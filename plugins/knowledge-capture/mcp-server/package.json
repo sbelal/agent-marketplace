@@ -1,0 +1,7 @@
+{
+  "name": "knowledge-capture-mcp",
+  "version": "1.0.0",
+  "description": "Zero-dependency Stdio MCP Server for Knowledge Capture multi-layered memory",
+  "type": "module",
+  "main": "index.js"
+}

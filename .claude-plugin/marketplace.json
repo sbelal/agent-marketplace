@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json.schemastore.org/claude-marketplace.json",
+  "name": "agent-marketplace",
+  "description": "Universal plugin marketplace for Antigravity and Claude Code",
+  "owner": "sbelal",
+  "version": "1.0.0",
+  "plugins": [
+    {
+      "name": "syran-persona",
+      "description": "Adopts the Syran Logic Officer persona globally, providing dispassionate logical analysis and probability-driven counsel.",
+      "path": "plugins/syran-persona",
+      "version": "1.0.0"
+    },
+    {
+      "name": "knowledge-capture",
+      "description": "Multi-layered memory plugin supporting workspace, private, and team scopes with MCP scanning, Git synchronization, and promotion workflows.",
+      "path": "plugins/knowledge-capture",
+      "version": "1.0.0"
+    }
+  ]
+}

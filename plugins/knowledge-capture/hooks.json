@@ -1,0 +1,11 @@
+{
+  "knowledge-capture-session": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "node ./bin/session-start.js",
+        "timeout": 15
+      }
+    ]
+  }
+}
