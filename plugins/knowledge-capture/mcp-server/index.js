@@ -15,7 +15,7 @@ const TOOLS = [
   {
     name: 'get_memory_summary',
     description:
-      'Scans persistent memory markdown files across layers (Workspace, Private, Team), parses YAML frontmatters, and returns a compact markdown table of [slug | trigger description].',
+      'Scans persistent memory markdown files across layers (Workspace, Private, Team), parses YAML frontmatters, and returns a compact markdown table of [Layer | Slug | Type | Overrides | Trigger / Description]. Respects precedence hierarchy: Workspace > Private > Team.',
     inputSchema: {
       type: 'object',
       properties: {

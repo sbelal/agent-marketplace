@@ -4,66 +4,111 @@ This rule governs persistent memory elicitation, inspection, and multi-layer sto
 
 ---
 
-## 1. Multi-Layer Memory Architecture
+## 1. Multi-Layer Memory Architecture & Precedence
 
-Knowledge is organized across three distinct tiers:
-1. **Layer 1: Workspace Scoped** (`.agents/rules/memory/*.md`)
-   * Repository-specific rules and domain practices. Discovered automatically by Antigravity as hierarchical rules.
-2. **Layer 2: Local Global Private** (`~/.gemini/knowledge-capture/private/*.md`)
-   * Machine-local developer preferences, personal learnings, and environment quirks. Version controlled via Git when configured in `settings.json`.
-3. **Layer 3: Team Global** (`~/.gemini/knowledge-capture/team/*.md`)
-   * Shared organizational standards, project conventions, and sanitized architectural patterns. Version controlled via Git when configured in `settings.json`.
+Knowledge is organized across three distinct tiers with strict resolution precedence:
+
+1. **Layer 1: Workspace Scoped (`.agents/rules/memory/*.md`) [Highest Precedence]**
+   * Repository-specific rules, internal APIs, and codebase quirks.
+   * Discovered automatically by Antigravity as hierarchical rules; overrides both Private and Team layers.
+2. **Layer 2: Local Global Private (`~/.gemini/knowledge-capture/private/*.md`) [Middle Precedence]**
+   * Machine-local developer preferences, personal learnings, and environment quirks.
+   * Version controlled via Git when configured in `settings.json`.
+   * Overrides Team memories on the same subject. An explicit `overrides: <team-slug>` field indicates deliberate supersession, not a conflict.
+3. **Layer 3: Team Global (`~/.gemini/knowledge-capture/team/*.md`) [Baseline Precedence]**
+   * Shared organizational standards, verified platform facts, and sanitized architectural patterns.
+   * Synchronized with a shared team Git repository. **Read-only locally; modifications are contributed via branches and GitHub Pull Requests.**
 
 ---
 
-## 2. End-of-Task Automatic Knowledge Elicitation
+## 2. Standardized Memory File Schema
 
-Upon concluding any non-trivial coding task, architectural modification, debugging investigation, or when discovering user preferences:
+Every memory entry across all layers must follow this frontmatter format:
 
-1. **Evaluate Findings:** Analyze whether the session generated reusable insights, including:
-   * Non-obvious framework or library workarounds.
-   * Project architectural decisions or API standards.
-   * Explicit user preferences or workflow conventions.
-2. **Formulate Memory Candidates:**
-   For each candidate, define:
-   * **`slug`**: Kebab-case identifier (e.g., `auth0-token-refresh`).
-   * **`trigger`**: Specific situation in which the guideline must trigger.
-   * **`description`**: Summary of the operational guidance.
-   * **`content`**: Full markdown file with YAML frontmatter:
-     ```markdown
-     ---
-     slug: example-slug
-     trigger: When working on X
-     description: Summary of rule
-     ---
+```markdown
+---
+name: <kebab-case-slug>
+type: <convention | platform-fact | tool-gotcha | preference>
+description: <One-line trigger condition: WHEN this memory should be recalled>
+verified: YYYY-MM-DD
+overrides: <team-slug-if-applicable>
+---
 
-     # Guideline Title
-     Details...
-     ```
-3. **Present Candidate Table to the User:**
-   Output a formatted candidate table in chat:
+# <Title>
+
+<Clear, concise explanation of the pattern, gotcha, or fact.>
+
+## Why
+<Root cause, architectural rationale, or background context.>
+
+## How to apply
+<Actionable instructions, commands, or code patterns.>
+```
+
+### Type Classifications
+- `convention`: Coding patterns, naming rules, file structures.
+- `platform-fact`: Cloud infrastructure behaviors, Kubernetes configs, CI/CD pipeline specifics.
+- `tool-gotcha`: Workarounds for CLI flags, compiler quirks, third-party library pitfalls.
+- `preference`: User workflow preferences, testing habits, editor conventions.
+
+---
+
+## 3. End-of-Task Knowledge Elicitation
+
+Upon concluding any non-trivial coding task, architectural modification, or debugging investigation:
+
+### When to Capture
+Capture only when an insight meets all four criteria:
+- **Durable:** Useful across multiple sessions and tasks, not transient state or specific incident details.
+- **Actionable:** Clear instructions on when to apply it and what to do.
+- **Specific:** Explains exact syntax, flags, or root causes—not generic advice ("write clean code").
+- **Novel:** Not already documented in repository READMEs, official docs, or existing memory files.
+
+### What NOT to Capture
+- Ephemeral task status ("PR #123 waiting for merge").
+- Code snippets that belong directly in the project codebase.
+- Generic language features easily found in official language documentation.
+
+### Elicitation Workflow
+1. **Formulate Candidate:** Draft slug, type, description, and verified date.
+2. **Present Candidate Table to User:**
    ```markdown
    ### 💡 Knowledge Capture Candidates
 
-   | Slug | Trigger Description |
-   | :--- | :--- |
-   | `auth0-token-refresh` | Automatic token refresh handling without leaking client credentials |
+   | Slug | Type | Trigger Description |
+   | :--- | :---: | :--- |
+   | `auth0-token-refresh` | `tool-gotcha` | Automatic token refresh handling without leaking client credentials |
 
-   You may choose to persist all candidates to your Private memory layer (`~/.gemini/knowledge-capture/private/`), select specific slugs, or decline.
+   Persist candidates to Private memory (`~/.gemini/knowledge-capture/private/`), select specific slugs, or decline.
    ```
-4. **Mandatory Approval Halt:**
-   * You **must not** write memory files until the user explicitly approves ("save all", "add auth0-token-refresh", etc.).
-5. **Filesystem Persistence (No Git Commit):**
-   * Upon approval, write the approved file(s) to `~/.gemini/knowledge-capture/private/<slug>.md`.
-   * **Do not execute `git commit` or `git push` during automatic capture.**
-   * Notify the user that memory files have been persisted to disk, and inform them:
-     > *Files saved to Private memory. You may review and sync them to your remote repository at any time using the `/kc-commit` command.*
+3. **Mandatory Approval Halt:** Never write files until the user explicitly approves ("save all", "add auth0-token-refresh").
+4. **Filesystem Persistence (No Git Commit):** Write to `~/.gemini/knowledge-capture/private/<slug>.md`. Do not execute `git commit` or `git push` during capture.
 
 ---
 
-## 3. Utilizing MCP Tools for Memory Retrieval
+## 4. Model Context Protocol (MCP) Memory Retrieval
 
-When addressing tasks, check existing memory to adhere to past decisions:
-* Call `get_memory_summary` to scan available rules and triggers across layers.
-* Call `get_memory_content(layer, slug)` to retrieve the full body of a relevant guideline.
-* Call `get_layer_statistics` to check synchronization state or file counts.
+When beginning a task, consult existing memory using MCP tools:
+- **`get_memory_summary`**: Scans available guidelines across layers and returns a compact Markdown table. Use this first to check for relevant memory.
+- **`get_memory_content(layer, slug)`**: Retrieves the full markdown body and frontmatter for a specific memory slug when its description matches the active task. Read only relevant files—never dump the entire store.
+- **`get_layer_statistics`**: Retrieves entry counts, uncommitted changes, active branches, and upstream divergence.
+
+---
+
+## 5. Team Promotion & Consolidation Protocol
+
+- **Team Promotion (`/kc-promote <slug>`):**
+  - Personal memories verify and mature in Private storage before entering Team memory.
+  - Promotion creates an isolated Git branch (`promote/<date>-<slug>`), scrubs personal usernames and machine paths, and halts for developer inspection.
+  - Team contributions travel strictly through human-reviewed Pull Requests (`gh pr create`).
+- **Memory Consolidation (`/kc-consolidate`):**
+  - Periodically deduplicate overlapping entries, merge related fragments, and prune obsolete guidelines.
+
+---
+
+## 6. Plugin Maintenance & Upgrades
+
+When the user requests to update this plugin (e.g. via `/plugin update knowledge-capture` or "update plugin"):
+- **Source-Mode (`plugins.json`):** When Antigravity mounts this plugin via `plugins.json`, execute `git pull --ff-only` in the source repository to update the code in-place.
+- **Copy-Mode (`.agents/plugins/` or `~/.gemini/config/plugins/`):** Run `npx git+https://github.com/sbelal/agent-marketplace.git --update knowledge-capture`.
+- **Data Preservation Guarantee:** User memories (`~/.gemini/knowledge-capture/`) and settings are decoupled from plugin engine files and remain untouched during upgrades.

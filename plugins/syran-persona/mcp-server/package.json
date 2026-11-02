@@ -1,0 +1,7 @@
+{
+  "name": "syran-mcp-server",
+  "version": "1.0.0",
+  "description": "Stdio MCP server providing formal logic analysis, fallacy detection, and probability evaluation for Syran.",
+  "type": "module",
+  "main": "index.js"
+}

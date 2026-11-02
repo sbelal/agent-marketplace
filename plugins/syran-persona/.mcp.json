@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "syran-logic": {
+      "command": "node",
+      "args": ["mcp-server/index.js"]
+    }
+  }
+}

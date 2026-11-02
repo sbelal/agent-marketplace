@@ -1,0 +1,27 @@
+{
+  "name": "antigravity-plugins",
+  "version": "1.0.0",
+  "description": "Antigravity & Claude Code universal plugin repository and installer.",
+  "main": "bin/install.js",
+  "bin": {
+    "antigravity-plugins": "./bin/install.js",
+    "agent-marketplace": "./bin/install.js"
+  },
+  "scripts": {
+    "install-plugins": "node ./bin/install.js",
+    "test": "node ./bin/install.js --list"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sbelal/agent-marketplace.git"
+  },
+  "keywords": [
+    "antigravity",
+    "claude-code",
+    "plugins",
+    "skills",
+    "agent-marketplace"
+  ],
+  "author": "Salahuddin Belal",
+  "license": "Apache-2.0"
+}

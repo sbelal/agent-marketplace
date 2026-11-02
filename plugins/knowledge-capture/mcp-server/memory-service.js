@@ -52,9 +52,16 @@ export function parseYamlFrontmatter(fileContent) {
     }
 
     const colonIndex = line.indexOf(':');
-    if (colonIndex > 0) {
+    if (colonIndex > 0 && !line.startsWith(' ') && !line.startsWith('\t')) {
       const key = line.slice(0, colonIndex).trim();
       let value = line.slice(colonIndex + 1).trim();
+
+      // Handle multiline indicators like > or |
+      if (value === '>' || value === '|') {
+        frontmatter[key] = '';
+        currentKey = key;
+        continue;
+      }
 
       // Strip surrounding quotes
       if (
@@ -66,14 +73,39 @@ export function parseYamlFrontmatter(fileContent) {
 
       frontmatter[key] = value;
       currentKey = key;
-    } else if (currentKey && trimmedLine.startsWith('-')) {
-      // Handle simple list items
-      if (!Array.isArray(frontmatter[currentKey])) {
-        frontmatter[currentKey] = [];
+    } else if (currentKey) {
+      if (trimmedLine.startsWith('-')) {
+        // Handle list item
+        if (!Array.isArray(frontmatter[currentKey])) {
+          frontmatter[currentKey] = [];
+        }
+        const item = trimmedLine.replace(/^-\s*/, '').trim();
+        frontmatter[currentKey].push(item);
+      } else {
+        // Continuation of multiline string
+        if (typeof frontmatter[currentKey] === 'string') {
+          const sep = frontmatter[currentKey] ? ' ' : '';
+          frontmatter[currentKey] += sep + trimmedLine;
+        }
       }
-      const item = trimmedLine.replace(/^-\s*/, '').trim();
-      frontmatter[currentKey].push(item);
     }
+  }
+
+  // Normalize aliases: slug <-> name, trigger <-> description
+  if (!frontmatter.slug && frontmatter.name) {
+    frontmatter.slug = frontmatter.name;
+  }
+  if (!frontmatter.name && frontmatter.slug) {
+    frontmatter.name = frontmatter.slug;
+  }
+  if (!frontmatter.trigger && frontmatter.description) {
+    frontmatter.trigger = frontmatter.description;
+  }
+  if (!frontmatter.description && frontmatter.trigger) {
+    frontmatter.description = frontmatter.trigger;
+  }
+  if (!frontmatter.type) {
+    frontmatter.type = 'general';
   }
 
   return { frontmatter, body };
@@ -99,6 +131,7 @@ export function getMemorySummary(workspaceRoot, targetLayer = 'all') {
   const layersToScan = [];
 
   const normalized = (targetLayer || 'all').toLowerCase();
+  // Maintain strict precedence: Workspace > Private > Team
   if (normalized === 'all' || normalized === 'workspace') {
     layersToScan.push({ name: 'Workspace', dir: paths.workspaceDir });
   }
@@ -114,17 +147,25 @@ export function getMemorySummary(workspaceRoot, targetLayer = 'all') {
   for (const layer of layersToScan) {
     const files = findMarkdownFiles(layer.dir);
     for (const file of files) {
+      const base = path.basename(file, '.md');
+      if (base.toUpperCase() === 'README') continue;
+
       try {
         const content = fs.readFileSync(file, 'utf8');
         const parsed = parseYamlFrontmatter(content);
-        const slug = parsed.frontmatter.slug || path.basename(file, '.md');
+        const slug = parsed.frontmatter.slug || base;
+        const type = parsed.frontmatter.type || 'general';
+        const overrides = parsed.frontmatter.overrides || '';
         const trigger =
           parsed.frontmatter.trigger ||
           parsed.frontmatter.description ||
           'General guideline';
+
         rows.push({
           layer: layer.name,
           slug,
+          type,
+          overrides: Array.isArray(overrides) ? overrides.join(', ') : overrides,
           trigger,
           file
         });
@@ -139,31 +180,116 @@ export function getMemorySummary(workspaceRoot, targetLayer = 'all') {
   }
 
   // Format as a compact Markdown table
-  let table = '| Layer | Slug | Trigger Description |\n';
-  table += '| :--- | :--- | :--- |\n';
+  let table = '| Layer | Slug | Type | Overrides | Trigger / Description |\n';
+  table += '| :--- | :--- | :---: | :---: | :--- |\n';
   for (const row of rows) {
     const sanitizedTrigger = row.trigger.replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
-    table += `| ${row.layer} | \`${row.slug}\` | ${sanitizedTrigger} |\n`;
+    const overridesCell = row.overrides ? `\`${row.overrides}\`` : '-';
+    table += `| ${row.layer} | \`${row.slug}\` | \`${row.type}\` | ${overridesCell} | ${sanitizedTrigger} |\n`;
   }
 
   return table;
 }
 
+function queryGitRepoStatus(repoDir) {
+  if (!fs.existsSync(path.join(repoDir, '.git'))) {
+    return {
+      isGit: false,
+      branch: 'none',
+      isClean: true,
+      uncommittedCount: 0,
+      uncommittedList: [],
+      upstreamAhead: 0,
+      upstreamBehind: 0,
+      isPromoteBranch: false
+    };
+  }
+
+  let branch = 'unknown';
+  try {
+    branch = execSync('git rev-parse --abbrev-ref HEAD', {
+      cwd: repoDir,
+      encoding: 'utf8',
+      timeout: 3000,
+      stdio: ['ignore', 'pipe', 'ignore']
+    }).trim();
+  } catch {
+    branch = 'unknown';
+  }
+
+  let isClean = true;
+  let uncommittedList = [];
+  try {
+    const statusOutput = execSync('git status --porcelain', {
+      cwd: repoDir,
+      encoding: 'utf8',
+      timeout: 5000,
+      stdio: ['ignore', 'pipe', 'ignore']
+    }).trim();
+
+    if (statusOutput.length > 0) {
+      isClean = false;
+      uncommittedList = statusOutput
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean);
+    }
+  } catch {
+    // Ignore git error
+  }
+
+  let upstreamAhead = 0;
+  let upstreamBehind = 0;
+  try {
+    const aheadBehind = execSync('git rev-list --count --left-right HEAD...@{u}', {
+      cwd: repoDir,
+      encoding: 'utf8',
+      timeout: 3000,
+      stdio: ['ignore', 'pipe', 'ignore']
+    }).trim();
+    if (aheadBehind) {
+      const parts = aheadBehind.split(/\s+/);
+      upstreamAhead = parseInt(parts[0], 10) || 0;
+      upstreamBehind = parseInt(parts[1], 10) || 0;
+    }
+  } catch {
+    // Upstream tracking not set or offline
+  }
+
+  return {
+    isGit: true,
+    branch,
+    isClean,
+    uncommittedCount: uncommittedList.length,
+    uncommittedList,
+    upstreamAhead,
+    upstreamBehind,
+    isPromoteBranch: branch.startsWith('promote/')
+  };
+}
+
 export function getLayerStatistics(workspaceRoot) {
   const paths = resolveStoragePaths(workspaceRoot);
 
-  const workspaceFiles = findMarkdownFiles(paths.workspaceDir);
-  const privateFiles = findMarkdownFiles(paths.privateDir);
-  const teamFiles = findMarkdownFiles(paths.teamDir);
+  const workspaceFiles = findMarkdownFiles(paths.workspaceDir).filter(
+    (f) => path.basename(f, '.md').toUpperCase() !== 'README'
+  );
+  const privateFiles = findMarkdownFiles(paths.privateDir).filter(
+    (f) => path.basename(f, '.md').toUpperCase() !== 'README'
+  );
+  const teamFiles = findMarkdownFiles(paths.teamDir).filter(
+    (f) => path.basename(f, '.md').toUpperCase() !== 'README'
+  );
 
   let hasSettings = fs.existsSync(paths.settingsPath);
   let privateRepoConfigured = false;
   let teamRepoConfigured = false;
+  let settings = {};
 
   if (hasSettings) {
     try {
       const raw = fs.readFileSync(paths.settingsPath, 'utf8');
-      const settings = JSON.parse(raw);
+      settings = JSON.parse(raw);
       if (settings.privateRepoUrl && typeof settings.privateRepoUrl === 'string') {
         privateRepoConfigured = true;
       }
@@ -175,29 +301,8 @@ export function getLayerStatistics(workspaceRoot) {
     }
   }
 
-  let uncommittedPrivateChanges = false;
-  let uncommittedList = [];
-
-  if (fs.existsSync(path.join(paths.privateDir, '.git'))) {
-    try {
-      const statusOutput = execSync('git status --porcelain', {
-        cwd: paths.privateDir,
-        encoding: 'utf8',
-        timeout: 5000,
-        stdio: ['ignore', 'pipe', 'ignore']
-      }).trim();
-
-      if (statusOutput.length > 0) {
-        uncommittedPrivateChanges = true;
-        uncommittedList = statusOutput
-          .split(/\r?\n/)
-          .map((line) => line.trim())
-          .filter(Boolean);
-      }
-    } catch {
-      // Suppress git errors
-    }
-  }
+  const privateGit = queryGitRepoStatus(paths.privateDir);
+  const teamGit = queryGitRepoStatus(paths.teamDir);
 
   return {
     counts: {
@@ -216,9 +321,11 @@ export function getLayerStatistics(workspaceRoot) {
       hasSettings,
       privateRepoConfigured,
       teamRepoConfigured,
-      uncommittedPrivateChanges,
-      uncommittedCount: uncommittedList.length,
-      uncommittedDetails: uncommittedList
+      privateGit,
+      teamGit,
+      uncommittedPrivateChanges: !privateGit.isClean,
+      uncommittedCount: privateGit.uncommittedCount,
+      uncommittedDetails: privateGit.uncommittedList
     }
   };
 }

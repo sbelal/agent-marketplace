@@ -2,6 +2,8 @@
   "name": "syran-persona",
   "version": "1.0.0",
   "description": "Adopts the Syran Logic Officer persona globally, providing dispassionate logical analysis, formal precision, and probability-driven counsel.",
-  "author": "Sal Belal",
+  "author": {
+    "name": "Sal Belal"
+  },
   "repository": "https://github.com/sbelal/agent-marketplace"
 }

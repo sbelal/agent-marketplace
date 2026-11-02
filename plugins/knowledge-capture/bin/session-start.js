@@ -3,7 +3,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { fileURLToPath } from 'node:url';
 import { execSync } from 'node:child_process';
+import { getLayerStatistics } from '../mcp-server/memory-service.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const pluginRoot = path.dirname(__dirname);
 
 /**
  * SessionStart Lifecycle Hook Handler for Knowledge Capture
@@ -12,75 +18,85 @@ import { execSync } from 'node:child_process';
  * 1. Read ~/.gemini/knowledge-capture/settings.json
  * 2. Execute git pull on configured remote repositories (gracefully degraded if absent)
  * 3. Count memory entries across Workspace, Private, and Team layers
- * 4. Audit uncommitted changes in the Private layer
+ * 4. Audit uncommitted changes, active branches, and upstream divergence
  * 5. Output injectSteps system message via stdout complying with the Antigravity hook schema
  */
-
-function countMarkdownFiles(dirPath) {
-  if (!fs.existsSync(dirPath)) {
-    return 0;
-  }
-  try {
-    const entries = fs.readdirSync(dirPath, { withFileTypes: true });
-    return entries.filter((e) => e.isFile() && e.name.toLowerCase().endsWith('.md')).length;
-  } catch {
-    return 0;
-  }
-}
 
 function safeGitPull(repoDir) {
   if (!fs.existsSync(path.join(repoDir, '.git'))) {
     return false;
   }
   try {
+    // Only pull if on main/master and working tree is clean
+    const branch = execSync('git rev-parse --abbrev-ref HEAD', {
+      cwd: repoDir,
+      encoding: 'utf8',
+      timeout: 3000,
+      stdio: ['ignore', 'pipe', 'ignore']
+    }).trim();
+
+    if (branch.startsWith('promote/')) {
+      return 'on-promote-branch';
+    }
+
+    const dirty = execSync('git status --porcelain', {
+      cwd: repoDir,
+      encoding: 'utf8',
+      timeout: 3000,
+      stdio: ['ignore', 'pipe', 'ignore']
+    }).trim();
+
+    if (dirty) {
+      return 'dirty';
+    }
+
     execSync('git pull --ff-only', {
       cwd: repoDir,
       timeout: 8000,
       stdio: ['ignore', 'ignore', 'ignore']
     });
-    return true;
+    return 'success';
   } catch {
-    return false;
+    return 'failed';
   }
 }
 
-function checkUncommittedChanges(repoDir) {
-  if (!fs.existsSync(path.join(repoDir, '.git'))) {
-    return { hasChanges: false, count: 0 };
-  }
-  try {
-    const status = execSync('git status --porcelain', {
-      cwd: repoDir,
-      encoding: 'utf8',
-      timeout: 5000,
-      stdio: ['ignore', 'pipe', 'ignore']
-    }).trim();
-
-    if (!status) {
-      return { hasChanges: false, count: 0 };
+async function getStdinPayload() {
+  return new Promise((resolve) => {
+    if (process.stdin.isTTY) {
+      return resolve({});
     }
+    let data = '';
+    const timer = setTimeout(() => {
+      process.stdin.pause();
+      resolve({});
+    }, 150);
 
-    const lines = status.split(/\r?\n/).filter(Boolean);
-    return { hasChanges: true, count: lines.length };
-  } catch {
-    return { hasChanges: false, count: 0 };
-  }
+    process.stdin.setEncoding('utf8');
+    process.stdin.on('data', (chunk) => {
+      data += chunk;
+    });
+    process.stdin.on('end', () => {
+      clearTimeout(timer);
+      process.stdin.pause();
+      try {
+        resolve(data.trim() ? JSON.parse(data.trim()) : {});
+      } catch {
+        resolve({});
+      }
+    });
+    process.stdin.resume();
+  });
 }
 
 async function main() {
-  // Read stdin context if available (non-blocking)
+  // Read stdin context if piped (with 150ms fallback to prevent hangs)
   let workspaceRoot = process.cwd();
+  let payload = {};
   try {
-    const chunks = [];
-    for await (const chunk of process.stdin) {
-      chunks.push(chunk);
-    }
-    const input = Buffer.concat(chunks).toString('utf8').trim();
-    if (input) {
-      const payload = JSON.parse(input);
-      if (Array.isArray(payload.workspacePaths) && payload.workspacePaths.length > 0) {
-        workspaceRoot = payload.workspacePaths[0];
-      }
+    payload = await getStdinPayload();
+    if (Array.isArray(payload.workspacePaths) && payload.workspacePaths.length > 0) {
+      workspaceRoot = payload.workspacePaths[0];
     }
   } catch {
     // Stdin reading fallback to process.cwd()
@@ -91,14 +107,13 @@ async function main() {
   const settingsPath = path.join(baseDir, 'settings.json');
   const privateDir = path.join(baseDir, 'private');
   const teamDir = path.join(baseDir, 'team');
-  const workspaceDir = path.join(workspaceRoot, '.agents', 'rules', 'memory');
 
   let settings = null;
   if (fs.existsSync(settingsPath)) {
     try {
       settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
     } catch {
-      // Invalids settings handled gracefully
+      // Invalid settings handled gracefully
     }
   }
 
@@ -107,56 +122,105 @@ async function main() {
   let teamSyncStatus = 'Not configured';
 
   if (settings?.privateRepoUrl) {
-    const pullSuccess = safeGitPull(privateDir);
-    privateSyncStatus = pullSuccess ? 'Synchronized (Git pull successful)' : 'Offline / Remote unavailable';
+    const res = safeGitPull(privateDir);
+    if (res === 'success') privateSyncStatus = 'Synchronized (Git pull successful)';
+    else if (res === 'dirty') privateSyncStatus = 'Uncommitted changes present (skipped pull)';
+    else privateSyncStatus = 'Offline / Remote unavailable';
   }
 
   if (settings?.teamRepoUrl) {
-    const pullSuccess = safeGitPull(teamDir);
-    teamSyncStatus = pullSuccess ? 'Synchronized (Git pull successful)' : 'Offline / Remote unavailable';
+    const res = safeGitPull(teamDir);
+    if (res === 'success') teamSyncStatus = 'Synchronized (Git pull successful)';
+    else if (res === 'on-promote-branch') teamSyncStatus = 'On promotion branch (manual pull required)';
+    else if (res === 'dirty') teamSyncStatus = 'Uncommitted changes present in team clone';
+    else privateSyncStatus = 'Offline / Remote unavailable';
   }
 
-  // Count files per layer
-  const workspaceCount = countMarkdownFiles(workspaceDir);
-  const privateCount = countMarkdownFiles(privateDir);
-  const teamCount = countMarkdownFiles(teamDir);
-
-  // Check uncommitted private memories
-  const uncommitted = checkUncommittedChanges(privateDir);
+  // Retrieve comprehensive layer statistics using pure query service
+  const stats = getLayerStatistics(workspaceRoot);
+  const priv = stats.syncStatus.privateGit;
+  const team = stats.syncStatus.teamGit;
 
   // Construct summary message
-  let report = `### 🧠 Knowledge Capture Status\n\n`;
-  report += `* **Layer 1 (Workspace Scoped):** ${workspaceCount} entries (\`${workspaceDir}\`)\n`;
-  report += `* **Layer 2 (Local Global Private):** ${privateCount} entries [${privateSyncStatus}]\n`;
-  report += `* **Layer 3 (Team Global):** ${teamCount} entries [${teamSyncStatus}]\n`;
+  let report = `### 🧠 Knowledge Capture Active\n\n`;
+  report += `* **Workspace Layer:** ${stats.counts.workspace} entries (\`${stats.paths.workspace}\`)\n`;
+  report += `* **Private Layer:** ${stats.counts.private} entries [${privateSyncStatus}]\n`;
+  report += `* **Team Layer:** ${stats.counts.team} entries [${teamSyncStatus}]\n\n`;
+  report += `*Precedence Hierarchy:* **Workspace** overrides **Private**, which overrides **Team**. Recall guidelines on demand via MCP tool \`get_memory_summary\` or \`get_memory_content\`.\n`;
 
-  if (uncommitted.hasChanges) {
+  // Warnings & Notices
+  if (!priv.isClean) {
     report += `\n> [!WARNING]\n`;
-    report += `> You have **${uncommitted.count} uncommitted memory update(s)** in your Private layer.\n`;
-    report += `> Use the \`/kc-commit\` command to review and commit your changes.\n`;
+    report += `> You have **${priv.uncommittedCount} uncommitted memory update(s)** in your Private layer.\n`;
+    report += `> Run \`/kc-commit\` to review, audit, and push your changes.\n`;
+  }
+
+  if (team.isGit && !team.isClean) {
+    report += `\n> [!CAUTION]\n`;
+    report += `> The Team memory clone has **${team.uncommittedCount} uncommitted change(s)**.\n`;
+    report += `> Team memory should not be edited directly. Run \`/kc-status\` to inspect or \`/kc-promote\` to open a review branch.\n`;
+  }
+
+  if (team.isGit && team.isPromoteBranch) {
+    report += `\n> [!NOTE]\n`;
+    report += `> Team clone is currently on promotion branch \`${team.branch}\`.\n`;
+    report += `> Once your Pull Request is merged, check out \`main\` via \`git checkout main\` and run \`/kc-pull\`.\n`;
+  }
+
+  if (team.isGit && team.upstreamBehind > 0) {
+    report += `\n> [!NOTE]\n`;
+    report += `> Team memory clone is **${team.upstreamBehind} commit(s) behind** upstream. Run \`/kc-pull\` to fast-forward.\n`;
   }
 
   if (!settings) {
     report += `\n> [!NOTE]\n`;
-    report += `> Knowledge Capture settings file not detected at \`~/.gemini/knowledge-capture/settings.json\`.\n`;
-    report += `> The Private layer operates locally without Git sync. Run \`/kc-init\` to configure remote repositories.\n`;
+    report += `> Settings file not detected at \`~/.gemini/knowledge-capture/settings.json\`.\n`;
+    report += `> The Private layer operates locally without Git sync. Run \`/kc-init\` to configure remotes.\n`;
   }
 
-  // Format JSON payload matching Antigravity SessionStart hook contract
-  const output = {
-    injectSteps: [
-      {
-        systemMessage: {
-          systemMessage: report
-        }
-      }
-    ]
-  };
+  // Dual-platform output formatting:
+  // Antigravity passes stdin payload with conversationId and expects JSON injectSteps.
+  // Claude Code executes the hook command and injects raw stdout plain text.
+  const isAntigravity = Boolean(payload && payload.conversationId);
 
-  process.stdout.write(JSON.stringify(output) + '\n');
+  if (isAntigravity) {
+    const output = {
+      injectSteps: [
+        {
+          systemMessage: {
+            systemMessage: report
+          }
+        }
+      ]
+    };
+    process.stdout.write(JSON.stringify(output) + '\n');
+  } else {
+    // Under Claude Code, rules/AGENTS.md is not loaded automatically by the plugin runtime.
+    // Injecting it alongside the startup report guarantees 100% feature and protocol parity.
+    let fullClaudeContext = report;
+    const rulesPath = path.join(pluginRoot, 'rules', 'AGENTS.md');
+    if (fs.existsSync(rulesPath)) {
+      try {
+        const rulesContent = fs.readFileSync(rulesPath, 'utf8');
+        fullClaudeContext += `\n\n---\n\n${rulesContent}\n`;
+      } catch {
+        // Fallback to report only
+      }
+    }
+    process.stdout.write(fullClaudeContext + '\n');
+  }
 }
 
-main().catch(() => {
-  // Ensure hook never crashes the agent startup
-  process.stdout.write(JSON.stringify({ injectSteps: [] }) + '\n');
-});
+main()
+  .then(() => {
+    process.exit(0);
+  })
+  .catch((err) => {
+    // Ensure hook never crashes the agent startup
+    if (process.env.CLAUDE_PLUGIN_ROOT) {
+      process.stdout.write(`[knowledge-capture] Startup check completed.\n`);
+    } else {
+      process.stdout.write(JSON.stringify({ injectSteps: [] }) + '\n');
+    }
+    process.exit(0);
+  });
