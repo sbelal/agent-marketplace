@@ -9,6 +9,29 @@ Equipped with a **SessionStart lifecycle hook**, a dedicated **Model Context Pro
 
 ---
 
+## 🚀 Setup & Enablement
+
+### 1. Google Antigravity
+Install using the universal cross-platform installer:
+```bash
+# Install to workspace:
+npx git+https://github.com/sbelal/agent-marketplace.git --plugin syran-persona --scope workspace
+
+# Or install globally:
+npx git+https://github.com/sbelal/agent-marketplace.git --plugin syran-persona --scope global
+```
+*Note: Restart your Antigravity IDE or CLI session to discover the new skills and MCP tools.*
+
+### 2. Claude Code
+Install directly from the decentralized marketplace:
+```bash
+claude plugin marketplace add https://github.com/sbelal/agent-marketplace.git
+claude plugin install syran-persona
+```
+*Note: The plugin's `SessionStart` hook (`hooks/hooks.json`) automatically injects the full Syran Persona directives into Claude Code starting context, while the internal `.mcp.json` automatically activates Syran's MCP tools.*
+
+---
+
 ## 🧠 The Logic Officer Persona
 
 A core challenge with Large Language Models is their tendency toward excessive agreeable behavior, ambiguity tolerance, or conversational drift. The **Logic Officer** persona resolves this by providing a predictable, reliable, and rigorous collaboration model.
@@ -58,26 +81,3 @@ Syran operates in two complementary ways:
 ### Available Slash Commands
 - **`/syran-consult`**: Solicits formal logical analysis, fallacy checking, and objective counsel for an architectural dilemma, code change, or decision.
 - **`/syran-status`**: Inspects the operational readiness and tool health of the Syran Logic Officer persona.
-
----
-
-## 🚀 Setup & Enablement
-
-### 1. Claude Code
-Install directly from the decentralized marketplace:
-```bash
-claude plugin marketplace add https://github.com/sbelal/agent-marketplace.git
-claude plugin install syran-persona
-```
-*Note: The plugin's `SessionStart` hook (`hooks/hooks.json`) automatically injects the full Syran Persona directives into Claude Code starting context, while the internal `.mcp.json` automatically activates Syran's MCP tools.*
-
-### 2. Google Antigravity
-Install using the universal cross-platform installer:
-```bash
-# Install to workspace:
-npx git+https://github.com/sbelal/agent-marketplace.git --plugin syran-persona --scope workspace
-
-# Or install globally:
-npx git+https://github.com/sbelal/agent-marketplace.git --plugin syran-persona --scope global
-```
-*Note: Restart your Antigravity IDE or CLI session to discover the new skills and MCP tools.*

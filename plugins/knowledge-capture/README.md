@@ -4,6 +4,27 @@
 
 ---
 
+## 🚀 Installation & Enablement
+
+### 1. Google Antigravity
+Install using the universal cross-platform installer:
+```bash
+# Install to workspace:
+npx git+https://github.com/sbelal/agent-marketplace.git --plugin knowledge-capture --scope workspace
+
+# Or install globally:
+npx git+https://github.com/sbelal/agent-marketplace.git --plugin knowledge-capture --scope global
+```
+
+### 2. Claude Code
+Install from the decentralized marketplace:
+```bash
+claude plugin marketplace add https://github.com/sbelal/agent-marketplace.git
+claude plugin install knowledge-capture
+```
+
+---
+
 ## 🏛️ Architecture: The 3 Storage Layers
 
 Persistent knowledge is partitioned across three distinct tiers with strict precedence:
@@ -113,27 +134,6 @@ In your Helm values or Deployment manifest:
 behavior:
   scaleDown:
     stabilizationWindowSeconds: 300
-```
-
----
-
-## 🚀 Installation & Enablement
-
-### 1. Google Antigravity
-Install using the universal cross-platform installer:
-```bash
-# Install to workspace:
-npx git+https://github.com/sbelal/agent-marketplace.git --plugin knowledge-capture --scope workspace
-
-# Or install globally:
-npx git+https://github.com/sbelal/agent-marketplace.git --plugin knowledge-capture --scope global
-```
-
-### 2. Claude Code
-Install from the decentralized marketplace:
-```bash
-claude plugin marketplace add https://github.com/sbelal/agent-marketplace.git
-claude plugin install knowledge-capture
 ```
 
 ---
