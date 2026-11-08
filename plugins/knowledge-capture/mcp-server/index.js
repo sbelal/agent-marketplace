@@ -15,7 +15,7 @@ const TOOLS = [
   {
     name: 'get_memory_summary',
     description:
-      'Scans persistent memory markdown files across layers (Workspace, Private, Team), parses YAML frontmatters, and returns a compact markdown table of [Layer | Slug | Type | Overrides | Trigger / Description]. Respects precedence hierarchy: Workspace > Private > Team.',
+      'Scans persistent memory markdown files across layers (Workspace, Private, Team), parses YAML frontmatters (including domain and related links), and returns Markdown tables grouped by ### Domain: <domain>. Respects precedence hierarchy: Workspace > Private > Team and deterministic overrides shadowing.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -23,6 +23,16 @@ const TOOLS = [
           type: 'string',
           enum: ['all', 'workspace', 'private', 'team'],
           description: "Optional filter for memory layer. Defaults to 'all'."
+        },
+        domain: {
+          type: 'string',
+          description:
+            "Optional category filter (e.g., 'kubernetes', 'terraform', 'go', 'ci-cd', 'general')."
+        },
+        query: {
+          type: 'string',
+          description:
+            'Optional keyword filter matched case-insensitively against slug, domain, type, overrides, related, or trigger description.'
         }
       }
     }
@@ -30,7 +40,7 @@ const TOOLS = [
   {
     name: 'get_layer_statistics',
     description:
-      'Returns entry counts per layer (Workspace, Private, Team), configuration status, and uncommitted Git changes warnings.',
+      'Returns entry counts per layer (Workspace, Private, Team), per-domain breakdown across active layers, stale entry counts (verified > 180 days or missing), configuration status, and uncommitted Git changes warnings.',
     inputSchema: {
       type: 'object',
       properties: {}
@@ -39,21 +49,26 @@ const TOOLS = [
   {
     name: 'get_memory_content',
     description:
-      'Retrieves the full markdown content and YAML frontmatter of a designated memory slug from Workspace, Private, or Team storage.',
+      'Retrieves the full markdown content, YAML frontmatter, and resolved 1-hop related memory graph footer for one or more memory slugs from Workspace, Private, or Team storage.',
     inputSchema: {
       type: 'object',
       properties: {
         layer: {
           type: 'string',
-          enum: ['workspace', 'private', 'team'],
-          description: 'The memory layer containing the target file.'
+          enum: ['all', 'workspace', 'private', 'team'],
+          description:
+            "The memory layer containing the target file ('workspace', 'private', 'team'), or 'all' to resolve highest-precedence layer automatically."
         },
         slug: {
           type: 'string',
-          description: 'The slug or file name of the memory.'
+          description: 'A single memory slug (or filename) to retrieve.'
+        },
+        slugs: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Optional array of memory slugs to retrieve in a single batch call.'
         }
-      },
-      required: ['layer', 'slug']
+      }
     }
   }
 ];
@@ -87,7 +102,7 @@ function handleRequest(message) {
           },
           serverInfo: {
             name: 'knowledge-capture',
-            version: '1.0.0'
+            version: '1.1.0'
           }
         }
       });
@@ -120,12 +135,20 @@ function handleRequest(message) {
         let resultText = '';
 
         if (toolName === 'get_memory_summary') {
-          resultText = getMemorySummary(workspaceRoot, args.layer || 'all');
+          resultText = getMemorySummary(workspaceRoot, args.layer || 'all', {
+            domain: args.domain,
+            query: args.query
+          });
         } else if (toolName === 'get_layer_statistics') {
           const stats = getLayerStatistics(workspaceRoot);
           resultText = JSON.stringify(stats, null, 2);
         } else if (toolName === 'get_memory_content') {
-          const contentObj = getMemoryContent(workspaceRoot, args.layer, args.slug);
+          const contentObj = getMemoryContent(
+            workspaceRoot,
+            args.layer || 'all',
+            args.slug,
+            args.slugs
+          );
           resultText = contentObj.content;
         } else {
           sendJsonRpc({

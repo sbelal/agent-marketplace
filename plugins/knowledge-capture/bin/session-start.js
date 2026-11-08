@@ -22,6 +22,12 @@ const pluginRoot = path.dirname(__dirname);
  * 5. Output injectSteps system message via stdout complying with the Antigravity hook schema
  */
 
+const GIT_EXEC_ENV = {
+  ...process.env,
+  GIT_TERMINAL_PROMPT: '0',
+  GIT_SSH_COMMAND: 'ssh -o BatchMode=yes -o ConnectTimeout=3'
+};
+
 function safeGitPull(repoDir) {
   if (!fs.existsSync(path.join(repoDir, '.git'))) {
     return false;
@@ -32,6 +38,7 @@ function safeGitPull(repoDir) {
       cwd: repoDir,
       encoding: 'utf8',
       timeout: 3000,
+      env: GIT_EXEC_ENV,
       stdio: ['ignore', 'pipe', 'ignore']
     }).trim();
 
@@ -43,6 +50,7 @@ function safeGitPull(repoDir) {
       cwd: repoDir,
       encoding: 'utf8',
       timeout: 3000,
+      env: GIT_EXEC_ENV,
       stdio: ['ignore', 'pipe', 'ignore']
     }).trim();
 
@@ -52,7 +60,8 @@ function safeGitPull(repoDir) {
 
     execSync('git pull --ff-only', {
       cwd: repoDir,
-      timeout: 8000,
+      timeout: 3000,
+      env: GIT_EXEC_ENV,
       stdio: ['ignore', 'ignore', 'ignore']
     });
     return 'success';
@@ -133,7 +142,7 @@ async function main() {
     if (res === 'success') teamSyncStatus = 'Synchronized (Git pull successful)';
     else if (res === 'on-promote-branch') teamSyncStatus = 'On promotion branch (manual pull required)';
     else if (res === 'dirty') teamSyncStatus = 'Uncommitted changes present in team clone';
-    else privateSyncStatus = 'Offline / Remote unavailable';
+    else teamSyncStatus = 'Offline / Remote unavailable';
   }
 
   // Retrieve comprehensive layer statistics using pure query service
@@ -145,10 +154,21 @@ async function main() {
   let report = `### 🧠 Knowledge Capture Active\n\n`;
   report += `* **Workspace Layer:** ${stats.counts.workspace} entries (\`${stats.paths.workspace}\`)\n`;
   report += `* **Private Layer:** ${stats.counts.private} entries [${privateSyncStatus}]\n`;
-  report += `* **Team Layer:** ${stats.counts.team} entries [${teamSyncStatus}]\n\n`;
-  report += `*Precedence Hierarchy:* **Workspace** overrides **Private**, which overrides **Team**. Recall guidelines on demand via MCP tool \`get_memory_summary\` or \`get_memory_content\`.\n`;
+  report += `* **Team Layer:** ${stats.counts.team} entries [${teamSyncStatus}]\n`;
+  report += `* **Active Domains:** ${stats.domainSummary}\n`;
+  report += `* **Stale Entries (>180d or unverified):** ${stats.staleCount}\n\n`;
+  report += `*Precedence Hierarchy:* **Workspace** overrides **Private**, which overrides **Team**. Recall guidelines on demand via MCP tool \`get_memory_summary\` or \`get_memory_content\`.\n\n`;
+
+  report += `#### Operational Recall & Capture Directive\n`;
+  report += `1. **Pre-Task Recall (\`kc-recall\`):** Before executing complex architectural, implementation, or debugging tasks, call \`get_memory_summary\` (using \`domain\` / \`query\` filters as needed) and inspect matching memories via \`get_memory_content\` (including the 1-hop \`Related Memories Available\` graph).\n`;
+  report += `2. **Post-Task Elicitation, Full-Envelope Repurposing & Fragmentation Detection (\`kc-capture\`):** At task completion (including deep root-cause investigations or architectural analyses that required zero code changes), evaluate learnings via \`kc-capture\`. Always run \`get_memory_summary(layer="all")\` first during candidate determination to: (a) prioritize **Full-Envelope Repurposing** (\`EXTEND\` / \`REPURPOSE-SLUG\`: evolving narrow slugs, expanding \`description\` triggers, and synthesizing body content together) over creating fragmented sibling files, and (b) detect **co-triggered memory fragmentation** when 2+ memories from the same domain were recalled together (or overlap in the summary index) and propose a \`MERGE\` candidate.\n`;
 
   // Warnings & Notices
+  if (stats.staleCount > 0) {
+    report += `\n> [!NOTE]\n`;
+    report += `> **${stats.staleCount} memory entry/entries** have a \`verified\` date older than 180 days (or missing). Run \`/kc-consolidate\` to audit and refresh stale rules.\n`;
+  }
+
   if (!priv.isClean) {
     report += `\n> [!WARNING]\n`;
     report += `> You have **${priv.uncommittedCount} uncommitted memory update(s)** in your Private layer.\n`;
