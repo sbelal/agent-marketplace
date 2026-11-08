@@ -61,7 +61,16 @@ function main() {
   console.log(`  Memory entries:  ${stats.counts.team}`);
   console.log('');
 
-  console.log(`Total memory files across all layers: ${stats.counts.total}`);
+  console.log(`Total memory files across all layers: ${stats.counts.total} (${stats.counts.active} active after precedence)`);
+  console.log(`Active domain breakdown:              ${stats.domainSummary}`);
+  console.log(`Stale entries (>180 days / missing):  ${stats.staleCount}`);
+  if (stats.staleness?.staleEntries?.length > 0) {
+    for (const entry of stats.staleness.staleEntries) {
+      const ageLabel =
+        entry.daysOld !== null ? `${entry.daysOld}d old (verified: ${entry.verified})` : 'missing/invalid verified date';
+      console.log(`  - [${entry.layer}] ${entry.slug} (${entry.domain}): ${ageLabel}`);
+    }
+  }
 }
 
 main();
