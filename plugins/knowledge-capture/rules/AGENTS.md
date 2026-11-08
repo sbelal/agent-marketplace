@@ -69,13 +69,14 @@ Capture only when an insight meets all four criteria:
 - **Specific:** Explains exact syntax, flags, or root causes—not generic advice ("write clean code").
 - **Novel:** Not already documented in repository READMEs, official docs, or existing memory files.
 
-### Elicitation & Full-Envelope Repurposing Workflow
+### Elicitation, Full-Envelope Repurposing & Fragmentation Detection Workflow
 1. **Mandatory Pre-Scan:** Always call `get_memory_summary(layer="all")` before formulating any candidate.
-2. **Evaluate for Holistic Extension / Repurposing:**
-   If a new learning relates to, generalizes, or expands an existing memory, do **not** create a fragmented sibling file and do **not** blindly append paragraphs to the body while leaving a narrow `slug` and `description` untouched (which creates "invisible knowledge"). Instead, update all three dimensions together:
-   - **Slug Evolution (`old-slug -> new-slug`):** Propose renaming the slug (`REPURPOSE-SLUG` / `EXTEND & RENAME`) when the combined scope outgrows the original filename.
-   - **Trigger Description Expansion:** Rewrite `description:` so it explicitly covers both the original trigger scenario and the newly added scenarios.
-   - **Unified Content Synthesis:** Refactor `# Title`, `## Why`, and `## How to apply` into a single cohesive guide and update `verified: YYYY-MM-DD`.
+2. **Determine Candidates (Full-Envelope Repurposing & Co-Triggered Defragmentation):**
+   - **Extending an Existing Memory (`EXTEND` / `REPURPOSE-SLUG`):** If a new learning relates to, generalizes, or expands an existing memory, do **not** create a fragmented sibling file and do **not** blindly append paragraphs to the body while leaving a narrow `slug` and `description` untouched (which creates "invisible knowledge"). Update all three dimensions together:
+     - **Slug Evolution (`old-slug -> new-slug`):** Propose renaming the slug (`REPURPOSE-SLUG`) when the combined scope outgrows the original filename.
+     - **Trigger Description Expansion:** Rewrite `description:` so it explicitly covers both the original trigger scenario and the newly added scenarios.
+     - **Unified Content Synthesis:** Refactor `# Title`, `## Why`, and `## How to apply` into a single cohesive guide and update `verified: YYYY-MM-DD`.
+   - **Co-Triggered Memory Fragmentation Detection (`MERGE` or `related` Link):** During candidate determination, check if **2 or more existing memories** from the same `domain` or layer were co-retrieved during this session (or address tightly coupled facets of one concept in the `get_memory_summary` output). If they are orthogonal concerns, link them via `related: [...]`; if they are fragmented facets of the same subsystem, propose a **`MERGE`** candidate (`<slug-a> + <slug-b> -> <proposed-merged-slug>`) with an expanded trigger description.
 3. **Present Candidate Approval Table to Developer:**
    ```markdown
    ### 💡 Knowledge Capture Candidates
@@ -88,18 +89,17 @@ Capture only when an insight meets all four criteria:
 5. **Filesystem Persistence & Reference Re-Wiring (No Auto-Commit):**
    - Write the approved `<target-slug>.md` file.
    - When renaming/merging in `Workspace` or `Private`, remove `<old-slug>.md` and scan all `.md` files in `Workspace` and `Private` to update any `related: [...]` or `overrides: <old-slug>` references to `<new-slug>`.
-   - When expanding a read-only `Team` rule (`<team-slug>`), write `<new-slug>.md` in `Private` with `overrides: <team-slug>` so the narrower team rule is shadowed until `/kc-promote`.
+   - When expanding or merging a read-only `Team` rule (`<team-slug>`), write `<new-slug>.md` in `Private` with `overrides: <team-slug>` so the narrower team rule is shadowed until `/kc-promote`.
    - Do not execute `git commit` or `git push` during capture; remind the user to run `/kc-commit`.
 
 ---
 
-## 4. Model Context Protocol (MCP) Recall & Co-Retrieval Consolidation (`kc-recall`)
+## 4. Model Context Protocol (MCP) Memory Retrieval (`kc-recall`)
 
-When beginning a complex task, consult existing memory using MCP tools:
+When beginning a complex task, consult existing memory using MCP tools with minimal token overhead:
 - **`get_memory_summary(layer?, domain?, query?)`**: Scans guidelines across layers, applies deterministic `Workspace > Private > Team` precedence shadowing, and outputs Markdown tables grouped by `### Domain: <domain>`.
 - **`get_memory_content(layer?, slug?, slugs?)`**: Retrieves full markdown content, frontmatter, and the resolved `### Related Memories Available (1-Hop Graph)` footer. Read only relevant files—never dump the entire store.
 - **`get_layer_statistics()`**: Retrieves entry counts per layer, active domain breakdown, stale entry count (`verified` > 180 days or missing), uncommitted changes, and branch divergence.
-- **Co-Retrieval Consolidation Detection:** When a single task triggers **2 or more memories from the same `domain` or layer** that address tightly coupled facets of one concept, hold a **Co-Retrieval Consolidation Note** without interrupting the task mid-flight. At task completion, proactively offer to merge and repurpose those co-triggered slugs into a single unified slug with an expanded trigger description.
 
 ---
 

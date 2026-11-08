@@ -52,7 +52,7 @@ Upon starting an Antigravity or Claude Code session, the `SessionStart` hook (`b
 2. Executes non-blocking `git pull --ff-only` on configured remotes with strict network/SSH guards (`timeout: 3000` ms, `GIT_TERMINAL_PROMPT=0`, `GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=3"`) so offline sessions never hang.
 3. Alerts if the Team clone is on a promotion branch or behind upstream, or if entries are stale (`verified` > 180 days).
 4. Audits the Private layer for uncommitted Git modifications.
-5. Injects an overview into the agent's context displaying memory counts per layer, active domain breakdown, staleness counts, and an **Operational Recall & Capture Directive** enforcing pre-task `kc-recall` (with co-retrieval detection) and post-task `kc-capture` (with Full-Envelope Repurposing).
+5. Injects an overview into the agent's context displaying memory counts per layer, active domain breakdown, staleness counts, and an **Operational Recall & Capture Directive** enforcing pre-task `kc-recall` and post-task `kc-capture` (with Full-Envelope Repurposing and Co-Triggered Fragmentation Detection during candidate determination).
 
 ---
 
@@ -75,13 +75,13 @@ These skills appear directly in the user's slash command palette:
 ### Autonomous Agent-Only Skills (`user-invocable: false`)
 These skills are hidden from the user's slash command palette and run autonomously during agent execution:
 
-- **`kc-capture` (Full-Envelope Repurposing):**
+- **`kc-capture` (Full-Envelope Repurposing & Co-Triggered Defragmentation):**
   - Always runs a mandatory `get_memory_summary(layer="all")` pre-scan before proposing candidates.
   - Prioritizes **Full-Envelope Repurposing** (`EXTEND` / `REPURPOSE-SLUG` / `MERGE`) over creating fragmented sibling files or blindly appending body paragraphs—evolving the **slug** (`old-slug -> new-slug`), expanding the **trigger description** (`description:`), and synthesizing the **Markdown body** together.
-  - Automatically re-wires `related: [...]` and `overrides:` references across `Workspace` and `Private` when renaming a slug (or sets `overrides: <team-slug>` in `Private` when expanding a read-only `Team` rule).
-- **`kc-recall` (1-Hop Graph & Co-Retrieval Consolidation Detection):**
-  - Consults `get_memory_summary` (with optional `domain` and `query` filters) before complex tasks and traverses the 1-hop `Related Memories Available` footer returned by `get_memory_content`.
-  - Monitors for **Co-Retrieval Fragmentation**: when 2+ memories from the same `domain` or layer co-trigger for a single task, holds a note until task wrap-up and proactively offers to merge and repurpose them into a single unified guide.
+  - Performs **Co-Triggered Fragmentation Detection** during candidate determination: if 2+ memories from the same `domain` or layer were recalled together during the session (or address tightly coupled facets of one concept in the index), proposes merging them (`MERGE`) into a single unified guide with an expanded trigger description.
+  - Automatically re-wires `related: [...]` and `overrides:` references across `Workspace` and `Private` when renaming/merging a slug (or sets `overrides: <team-slug>` in `Private` when expanding a read-only `Team` rule).
+- **`kc-recall` (Domain Filtering & 1-Hop Graph Traversal):**
+  - Consults `get_memory_summary` (with optional `domain` and `query` filters) before complex tasks and traverses the 1-hop `Related Memories Available` footer returned by `get_memory_content` with zero mid-task token overhead.
 
 ---
 
