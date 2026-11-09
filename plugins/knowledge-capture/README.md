@@ -4,24 +4,50 @@
 
 ---
 
-## 🚀 Installation & Enablement
+## 🚀 Installation & Setup
 
-### 1. Google Antigravity
+### Step 1: Install the Plugin
+
+#### Google Antigravity
 Install using the universal cross-platform installer:
 ```bash
-# Install to workspace:
+# Install to workspace (.agents/):
 npx git+https://github.com/sbelal/agent-marketplace.git --plugin knowledge-capture --scope workspace
 
-# Or install globally:
+# Or install globally (~/.gemini/config/):
 npx git+https://github.com/sbelal/agent-marketplace.git --plugin knowledge-capture --scope global
 ```
 
-### 2. Claude Code
+#### Claude Code
 Install from the decentralized marketplace:
 ```bash
 claude plugin marketplace add https://github.com/sbelal/agent-marketplace.git
 claude plugin install knowledge-capture
 ```
+
+---
+
+### Step 2: Initialize Storage & Git Remotes (`/kc-init`)
+
+Immediately after installing, run the initialization command in your chat session or terminal:
+```text
+/kc-init
+```
+*(Or via CLI: `node ./bin/setup.js`)*
+
+The initialization wizard scaffolds your local directories and optionally configures your Git remotes (`settings.json`) for personal and team knowledge stores.
+
+#### 💡 Why Run `/kc-init`? (Configured Remotes vs. Local-Only Mode)
+
+Knowledge Capture works out-of-the-box in local-only mode, but configuring Git remotes unlocks the full power of multi-layer persistent memory:
+
+| Capability | Configured with `/kc-init` ⭐ *(Recommended)* | Without Setup (Local-Only Default) |
+| :--- | :--- | :--- |
+| **Cross-Machine Sync** | ✅ Private memories sync across all your laptops and workstations via Git (`/kc-commit` & auto-pull). | ❌ Memories stay trapped on the single local machine where they were captured. |
+| **Remote Agents & Cloud VMs** | ✅ Remote agent VMs clone and pull your private memory store automatically upon session start. | ⚠️ Remote agent VMs only see project workspace files; cannot access your personal memories. |
+| **Team Knowledge Sharing** | ✅ Automatically pulls organization-wide conventions and platform standards from your team repo. | ❌ Team memory directory remains unlinked and empty. |
+| **Team Promotion (`/kc-promote`)**| ✅ Create isolated branches (`promote/<slug>`) and open GitHub Pull Requests directly to the team store. | ❌ Promotion unavailable without a configured upstream team repository. |
+| **Automatic Startup Pulls** | ✅ Non-blocking fast-forward on session start ensures you never code against outdated team standards. | ⚠️ Skipped during startup (operates in offline local mode). |
 
 ---
 
