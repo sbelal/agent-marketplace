@@ -101,6 +101,9 @@ export function getDatabase() {
         path TEXT,
         mtime INTEGER,
         applies_to TEXT,
+        trigger_vector TEXT,
+        content_vector TEXT,
+        entity_vector TEXT,
         PRIMARY KEY (workspace_id, layer, slug)
       );
 
@@ -131,6 +134,19 @@ export function getDatabase() {
         last_applied TEXT
       );
     `);
+
+    // Ensure multi-vector columns exist for existing databases
+    try {
+      const cols = db.prepare('PRAGMA table_info(memories)').all();
+      const colNames = new Set(cols.map(c => c.name));
+      if (!colNames.has('trigger_vector')) {
+        db.exec(`
+          ALTER TABLE memories ADD COLUMN trigger_vector TEXT;
+          ALTER TABLE memories ADD COLUMN content_vector TEXT;
+          ALTER TABLE memories ADD COLUMN entity_vector TEXT;
+        `);
+      }
+    } catch {}
 
     dbInstance = db;
     return dbInstance;
@@ -177,6 +193,101 @@ export function computeCosineSimilarity(tokensA, tokensB) {
 
   const magnitude = Math.sqrt(magA) * Math.sqrt(magB);
   return magnitude === 0 ? 0 : dotProduct / magnitude;
+}
+
+/**
+ * Generates a deterministic dense 128-dimensional embedding vector from text.
+ * Uses subword n-grams and double hashing with sign hashing and L2 normalization.
+ * Pure JS, zero external dependencies, deterministic across all platforms.
+ */
+export function generateDenseEmbedding(text, dimensions = 128) {
+  const vec = new Float64Array(dimensions);
+  if (!text || typeof text !== 'string') return Array.from(vec);
+
+  const clean = text.toLowerCase().replace(/[^\w\s-]/g, ' ');
+  const words = clean.split(/\s+/).filter(w => w.length > 0);
+  if (words.length === 0) return Array.from(vec);
+
+  const features = [];
+  for (const w of words) {
+    features.push(`w:${w}`);
+    if (w.length >= 3) {
+      for (let i = 0; i <= w.length - 3; i++) {
+        features.push(`3:${w.slice(i, i + 3)}`);
+      }
+    }
+    if (w.length >= 4) {
+      for (let i = 0; i <= w.length - 4; i++) {
+        features.push(`4:${w.slice(i, i + 4)}`);
+      }
+    }
+  }
+
+  // Double-hash: bucket index + sign hashing to avoid collision bias
+  for (const feat of features) {
+    let h1 = 5381;
+    let h2 = 2166136261;
+    for (let i = 0; i < feat.length; i++) {
+      const code = feat.charCodeAt(i);
+      h1 = ((h1 << 5) + h1) ^ code;
+      h2 = (h2 ^ code) * 16777619;
+    }
+    const idx = Math.abs(h1) % dimensions;
+    const sign = (h2 & 1) === 0 ? 1 : -1;
+    vec[idx] += sign;
+  }
+
+  // L2 normalization: ||v|| = 1.0
+  let norm = 0;
+  for (let i = 0; i < dimensions; i++) norm += vec[i] * vec[i];
+  norm = Math.sqrt(norm);
+  if (norm > 0) {
+    for (let i = 0; i < dimensions; i++) vec[i] = Number((vec[i] / norm).toFixed(6));
+  }
+
+  return Array.from(vec);
+}
+
+/**
+ * Computes dot product (cosine similarity between L2-normalized dense vectors).
+ */
+export function computeDenseCosineSimilarity(vecA, vecB) {
+  if (!Array.isArray(vecA) || !Array.isArray(vecB) || vecA.length === 0 || vecA.length !== vecB.length) {
+    return 0;
+  }
+  let dot = 0;
+  for (let i = 0; i < vecA.length; i++) {
+    dot += vecA[i] * vecB[i];
+  }
+  return Math.max(0, Math.min(1.0, dot));
+}
+
+/**
+ * Generates multi-vector representation across 3 facets: trigger, content, entity.
+ */
+export function generateMultiVector(entry) {
+  const triggerText = `${entry.trigger || entry.description || ''} ${JSON.stringify(entry.applies_to || '')}`;
+  const contentText = typeof entry.body === 'string' ? entry.body : (entry.content || '');
+  const entityText = `${entry.slug || ''} ${entry.domain || ''} ${entry.type || ''} ${(entry.related || []).join(' ')}`;
+
+  return {
+    trigger_vector: generateDenseEmbedding(triggerText, 128),
+    content_vector: generateDenseEmbedding(contentText, 128),
+    entity_vector: generateDenseEmbedding(entityText, 128)
+  };
+}
+
+/**
+ * Computes composite Multi-Vector similarity between query vector and memory multi-vector facets.
+ * Weights: 50% trigger/intent, 35% content/rule, 15% entity/metadata.
+ */
+export function computeMultiVectorSimilarity(queryVec, multiVec) {
+  if (!queryVec || !multiVec) return 0;
+  const sTrigger = computeDenseCosineSimilarity(queryVec, multiVec.trigger_vector);
+  const sContent = computeDenseCosineSimilarity(queryVec, multiVec.content_vector);
+  const sEntity = computeDenseCosineSimilarity(queryVec, multiVec.entity_vector);
+
+  return (sTrigger * 0.50) + (sContent * 0.35) + (sEntity * 0.15);
 }
 
 /**
@@ -228,8 +339,11 @@ export function syncSqliteIndex(workspaceRoot = process.cwd()) {
 
   // Prepared Statements
   const insertMeta = db.prepare(`
-    INSERT INTO memories (workspace_id, layer, slug, domain, type, verified, trigger, path, mtime, applies_to)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO memories (
+      workspace_id, layer, slug, domain, type, verified, trigger, path, mtime, applies_to,
+      trigger_vector, content_vector, entity_vector
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(workspace_id, layer, slug) DO UPDATE SET
       domain=excluded.domain,
       type=excluded.type,
@@ -237,7 +351,10 @@ export function syncSqliteIndex(workspaceRoot = process.cwd()) {
       trigger=excluded.trigger,
       path=excluded.path,
       mtime=excluded.mtime,
-      applies_to=excluded.applies_to
+      applies_to=excluded.applies_to,
+      trigger_vector=excluded.trigger_vector,
+      content_vector=excluded.content_vector,
+      entity_vector=excluded.entity_vector
   `);
 
   const deleteFts = db.prepare('DELETE FROM memories_fts WHERE workspace_id = ? AND layer = ? AND slug = ?');
@@ -270,6 +387,16 @@ export function syncSqliteIndex(workspaceRoot = process.cwd()) {
       const trigger = fm.description || fm.trigger || '';
       const appliesTo = fm.applies_to ? JSON.stringify(fm.applies_to) : '';
 
+      const multiVec = generateMultiVector({
+        trigger,
+        applies_to: fm.applies_to,
+        body: parsed.body,
+        slug: item.slug,
+        domain,
+        type,
+        related: fm.related
+      });
+
       insertMeta.run(
         item.wsId,
         item.layer,
@@ -280,7 +407,10 @@ export function syncSqliteIndex(workspaceRoot = process.cwd()) {
         trigger,
         item.filePath,
         item.mtime,
-        appliesTo
+        appliesTo,
+        JSON.stringify(multiVec.trigger_vector),
+        JSON.stringify(multiVec.content_vector),
+        JSON.stringify(multiVec.entity_vector)
       );
 
       deleteFts.run(item.wsId, item.layer, item.slug);
@@ -317,15 +447,17 @@ export function syncSqliteIndex(workspaceRoot = process.cwd()) {
 
 /**
  * File-based fallback search when SQLite is unavailable.
- * Evaluates token cosine similarity and keyword matches directly from markdown files.
+ * Evaluates multi-vector dense embedding similarity and keyword matches directly from markdown files.
  */
 function searchMemoriesFileBasedFallback(workspaceRoot, queryText, options = {}) {
   const { activeEntries } = scanLayerEntries(workspaceRoot, 'all');
   if (activeEntries.length === 0) return [];
 
-  const queryTokens = tokenizeText(queryText);
+  const cleanQuery = queryText.trim();
+  const queryTokens = tokenizeText(cleanQuery);
   if (queryTokens.length === 0) return [];
 
+  const queryVec = generateDenseEmbedding(cleanQuery, 128);
   const precedence = { workspace: 3, private: 2, team: 1 };
   const results = [];
 
@@ -337,19 +469,31 @@ function searchMemoriesFileBasedFallback(workspaceRoot, queryText, options = {})
       body = parsed.body || '';
     } catch {}
 
+    const multiVec = generateMultiVector({
+      trigger: entry.trigger,
+      applies_to: entry.applies_to,
+      body,
+      slug: entry.slug,
+      domain: entry.domain,
+      type: entry.type,
+      related: entry.related
+    });
+
+    const multiVecSim = computeMultiVectorSimilarity(queryVec, multiVec);
+
     const docText = `${entry.slug} ${entry.domain} ${entry.type} ${entry.trigger} ${body}`;
     const docTokens = tokenizeText(docText);
     const cosineSim = computeCosineSimilarity(queryTokens, docTokens);
 
-    // Keyword match frequency
     let matchCount = 0;
     for (const tok of queryTokens) {
       if (docText.toLowerCase().includes(tok)) matchCount++;
     }
     const tokenOverlap = queryTokens.length > 0 ? matchCount / queryTokens.length : 0;
 
-    const combinedConfidence = Math.min(1.0, (cosineSim * 0.6) + (tokenOverlap * 0.4));
-    if (combinedConfidence <= 0.05 && tokenOverlap === 0) continue;
+    // Multi-Vector + lexical fusion
+    const combinedConfidence = Math.min(1.0, (multiVecSim * 0.50) + (cosineSim * 0.25) + (tokenOverlap * 0.25));
+    if (combinedConfidence <= 0.05 && tokenOverlap === 0 && multiVecSim <= 0.1) continue;
 
     results.push({
       slug: entry.slug,
@@ -374,8 +518,9 @@ function searchMemoriesFileBasedFallback(workspaceRoot, queryText, options = {})
 }
 
 /**
- * Hybrid semantic search with deterministic precedence and override shadowing.
- * Combines SQLite FTS5 BM25 with token Cosine Similarity, or falls back to file-based search.
+ * Multi-Vector Hybrid Semantic Retrieval with Reciprocal Rank Fusion (RRF).
+ * Combines SQLite FTS5 BM25 with Multi-Facet Dense Embeddings (trigger, content, entity).
+ * Deterministically enforces Workspace > Private > Team precedence and active override shadowing.
  */
 export function searchMemoriesHybrid(workspaceRoot, queryText, options = {}) {
   if (!queryText || typeof queryText !== 'string' || !queryText.trim()) {
@@ -393,6 +538,7 @@ export function searchMemoriesHybrid(workspaceRoot, queryText, options = {}) {
   const queryTokens = tokenizeText(cleanQuery);
   if (queryTokens.length === 0) return [];
 
+  const queryVec = generateDenseEmbedding(cleanQuery, 128);
   const currentWsId = normalizeWorkspaceId(workspaceRoot);
 
   // 1. Build authoritative precedence and shadow map from scanLayerEntries
@@ -408,7 +554,55 @@ export function searchMemoriesHybrid(workspaceRoot, queryText, options = {}) {
     shadowedSet.add(shadowed.slug);
   }
 
-  // 2. FTS5 Match Query (prefix matches)
+  // 2. Multi-Vector Semantic Retrieval across all active candidates
+  const allRows = db.prepare(`
+    SELECT m.slug, m.layer, m.workspace_id, m.domain, m.type, m.trigger, m.applies_to,
+           m.trigger_vector, m.content_vector, m.entity_vector
+    FROM memories m
+    WHERE (m.workspace_id = ? OR m.workspace_id = 'global')
+  `).all(currentWsId);
+
+  const vecCandidates = [];
+  for (const row of allRows) {
+    if (shadowedSet.has(`${row.layer}:${row.slug}`) || (row.layer === 'team' && shadowedSet.has(row.slug))) {
+      continue;
+    }
+
+    let multiVec = null;
+    try {
+      if (row.trigger_vector && row.content_vector && row.entity_vector) {
+        multiVec = {
+          trigger_vector: JSON.parse(row.trigger_vector),
+          content_vector: JSON.parse(row.content_vector),
+          entity_vector: JSON.parse(row.entity_vector)
+        };
+      }
+    } catch {}
+
+    if (!multiVec) {
+      multiVec = generateMultiVector({
+        trigger: row.trigger,
+        applies_to: row.applies_to ? JSON.parse(row.applies_to) : null,
+        body: '',
+        slug: row.slug,
+        domain: row.domain,
+        type: row.type
+      });
+    }
+
+    const multiVecSim = computeMultiVectorSimilarity(queryVec, multiVec);
+    vecCandidates.push({ slug: row.slug, layer: row.layer, row, multiVecSim });
+  }
+
+  vecCandidates.sort((a, b) => b.multiVecSim - a.multiVecSim);
+  const vecRankMap = new Map();
+  vecCandidates.forEach((item, idx) => {
+    if (item.multiVecSim > 0.05) {
+      vecRankMap.set(item.slug, { rank: idx + 1, sim: item.multiVecSim, row: item.row });
+    }
+  });
+
+  // 3. FTS5 Lexical Retrieval
   const ftsQuery = queryTokens.map(tok => `"${tok}"*`).join(' OR ');
   let ftsMatches = [];
   try {
@@ -426,48 +620,71 @@ export function searchMemoriesHybrid(workspaceRoot, queryText, options = {}) {
     return searchMemoriesFileBasedFallback(workspaceRoot, queryText, options);
   }
 
-  const precedence = { workspace: 3, private: 2, team: 1 };
-  const candidateMap = new Map(); // slug -> candidate
+  const ftsRankMap = new Map();
+  ftsMatches.forEach((row, idx) => {
+    if (!shadowedSet.has(`${row.layer}:${row.slug}`) && !(row.layer === 'team' && shadowedSet.has(row.slug))) {
+      ftsRankMap.set(row.slug, { rank: idx + 1, bm25_score: row.bm25_score, row });
+    }
+  });
 
-  for (const row of ftsMatches) {
-    // Exclude shadowed lower-tier rules
-    if (shadowedSet.has(`${row.layer}:${row.slug}`) || (row.layer === 'team' && shadowedSet.has(row.slug))) {
-      continue;
+  // 4. Reciprocal Rank Fusion (RRF)
+  const candidateSlugs = new Set([...vecRankMap.keys(), ...ftsRankMap.keys()]);
+  const precedence = { workspace: 3, private: 2, team: 1 };
+  const candidateMap = new Map();
+
+  const k = 60; // Standard RRF constant
+  const mode = options.mode || 'hybrid'; // 'hybrid', 'multi_vector', 'lexical'
+
+  for (const slug of candidateSlugs) {
+    const vecItem = vecRankMap.get(slug);
+    const ftsItem = ftsRankMap.get(slug);
+    const baseRow = (ftsItem && ftsItem.row) || (vecItem && vecItem.row);
+    if (!baseRow) continue;
+
+    let rrfScore = 0;
+    if (mode === 'lexical') {
+      rrfScore = ftsItem ? (1.0 / (k + ftsItem.rank)) : 0;
+    } else if (mode === 'multi_vector') {
+      rrfScore = vecItem ? (1.0 / (k + vecItem.rank)) : 0;
+    } else {
+      // Hybrid RRF: 45% Lexical BM25 + 55% Multi-Vector Semantic Embedding
+      const ftsScore = ftsItem ? (0.45 / (k + ftsItem.rank)) : 0;
+      const vecScore = vecItem ? (0.55 / (k + vecItem.rank)) : 0;
+      rrfScore = ftsScore + vecScore;
     }
 
-    const docTokens = tokenizeText(`${row.slug} ${row.domain} ${row.type} ${row.trigger} ${row.content}`);
-    const cosineSim = computeCosineSimilarity(queryTokens, docTokens);
+    if (rrfScore <= 0) continue;
 
-    // Normalize BM25 score (lower is better in SQLite bm25, typically -15 to 0)
-    const normBm25 = Math.min(1.0, Math.max(0, -row.bm25_score / 15.0));
-    const combinedConfidence = Math.min(1.0, (cosineSim * 0.6) + (normBm25 * 0.4));
+    // Normalize confidence to 0.0 - 1.0
+    // Max theoretical score is 1 / 61 ~= 0.016393
+    const maxTheoreticalRrf = 1.0 / 61.0;
+    const confidenceDecimal = Math.min(1.0, Math.max(0.01, rrfScore / maxTheoreticalRrf));
 
     // Get 1-hop related memories from graph
     const graphRows = db.prepare(`
       SELECT target_slug, rel_type FROM memories_graph 
       WHERE (workspace_id = ? OR workspace_id = 'global') AND source_slug = ?
-    `).all(currentWsId, row.slug);
+    `).all(currentWsId, slug);
 
     const cand = {
-      slug: row.slug,
-      layer: row.layer,
-      domain: row.domain,
-      type: row.type,
-      description: row.trigger,
-      confidence: Math.round(combinedConfidence * 100),
-      confidenceDecimal: combinedConfidence,
+      slug: baseRow.slug,
+      layer: baseRow.layer,
+      domain: baseRow.domain,
+      type: baseRow.type,
+      description: baseRow.trigger,
+      confidence: Math.round(confidenceDecimal * 100),
+      confidenceDecimal,
       related: graphRows.map(g => g.target_slug),
-      precedenceTier: precedence[row.layer] || 0
+      precedenceTier: precedence[baseRow.layer] || 0
     };
 
-    // Precedence-aware deduplication: Workspace > Private > Team
-    const existing = candidateMap.get(row.slug);
+    const existing = candidateMap.get(slug);
     if (!existing) {
-      candidateMap.set(row.slug, cand);
+      candidateMap.set(slug, cand);
     } else if (cand.precedenceTier > existing.precedenceTier) {
-      candidateMap.set(row.slug, cand);
+      candidateMap.set(slug, cand);
     } else if (cand.precedenceTier === existing.precedenceTier && cand.confidence > existing.confidence) {
-      candidateMap.set(row.slug, cand);
+      candidateMap.set(slug, cand);
     }
   }
 

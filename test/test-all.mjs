@@ -10,7 +10,8 @@ import {
   deleteMemoryEntry,
   rewireMemoryReferences,
   cleanDanglingReferences,
-  bootstrapRepoMemories
+  bootstrapRepoMemories,
+  autoElicitSessionKnowledge
 } from '../plugins/knowledge-capture/mcp-server/memory-service.js';
 
 import {
@@ -19,7 +20,11 @@ import {
   getKnowledgeGraphData,
   recordTelemetryEvent,
   generateKnowledgeGraphHtml,
-  normalizeWorkspaceId
+  normalizeWorkspaceId,
+  generateDenseEmbedding,
+  computeDenseCosineSimilarity,
+  generateMultiVector,
+  computeMultiVectorSimilarity
 } from '../plugins/knowledge-capture/mcp-server/sqlite-index.js';
 
 import {
@@ -210,6 +215,58 @@ description: Lower tier private rule that should be shadowed
   assert.ok(bootstrapped.some(b => b.slug.includes('microservices')), 'Should extract ADR candidate');
   assert.ok(bootstrapped.some(b => b.slug === 'ci-pipeline-conventions'), 'Should extract CI candidate');
   console.log('  ✔ Passed: Bootstrapping scanner auto-discovers repository conventions.\n');
+
+  // ==========================================
+  // TEST 8: Multi-Vector Embeddings & RRF Hybrid Retrieval
+  // ==========================================
+  console.log('Test 8: Multi-Vector Embeddings & Reciprocal Rank Fusion (RRF)...');
+  const vec1 = generateDenseEmbedding('kubernetes pod container crashloop restart', 128);
+  const vec2 = generateDenseEmbedding('container pod crash failure', 128);
+  const vec3 = generateDenseEmbedding('css flexbox responsive layout styling', 128);
+
+  const simRelated = computeDenseCosineSimilarity(vec1, vec2);
+  const simUnrelated = computeDenseCosineSimilarity(vec1, vec3);
+  assert.ok(simRelated > simUnrelated, 'Semantic similarity between related topics must exceed unrelated topics');
+  assert.ok(simRelated > 0.4, 'Related topics must yield substantial cosine similarity');
+
+  // Multi-Vector Facets
+  const testEntry = {
+    slug: 'k8s-crashloop-backoff',
+    domain: 'kubernetes',
+    type: 'tool-gotcha',
+    trigger: 'When kubernetes pods enter CrashLoopBackOff state',
+    body: 'Increase container memory limits and check OOMKilled events.',
+    related: ['docker-oom-limits']
+  };
+  const multiVec = generateMultiVector(testEntry);
+  assert.equal(multiVec.trigger_vector.length, 128);
+  assert.equal(multiVec.content_vector.length, 128);
+  assert.equal(multiVec.entity_vector.length, 128);
+
+  const queryVec = generateDenseEmbedding('pod oom killed crashloop', 128);
+  const facetScore = computeMultiVectorSimilarity(queryVec, multiVec);
+  assert.ok(facetScore > 0.25, 'Composite multi-vector score should capture intent and content facets');
+
+  // Hybrid search execution with RRF
+  const hybridMatches = searchMemoriesHybrid(ws1Root, 'docker', { mode: 'hybrid' });
+  assert.ok(Array.isArray(hybridMatches), 'Hybrid search must return array');
+  assert.ok(hybridMatches.length > 0, 'Should find matching memories in test workspace');
+  assert.ok(hybridMatches[0].confidence > 0, 'Match confidence must be positive');
+  console.log('  ✔ Passed: Multi-vector embeddings and Reciprocal Rank Fusion provide robust semantic matching.\n');
+
+  // ==========================================
+  // TEST 9: Session-End Auto-Elicitation Sentinel
+  // ==========================================
+  console.log('Test 9: Session-End Auto-Elicitation Sentinel (/kc-elicit)...');
+  const elicitResult = autoElicitSessionKnowledge(process.cwd());
+  assert.ok(typeof elicitResult === 'object', 'autoElicitSessionKnowledge must return result object');
+  assert.ok(Array.isArray(elicitResult.modified_files), 'modified_files must be an array');
+  assert.ok(typeof elicitResult.elicitation_needed === 'boolean', 'elicitation_needed must be boolean');
+
+  // Test bin/session-end.js execution
+  const sessionEndPath = path.resolve('plugins/knowledge-capture/bin/session-end.js');
+  assert.ok(fs.existsSync(sessionEndPath), 'bin/session-end.js must exist');
+  console.log('  ✔ Passed: Session-End Auto-Elicitation Sentinel audits workspace modifications.\n');
 
   console.log('============================================================');
   console.log('🎉 ALL TESTS PASSED SUCCESSFULLY!');

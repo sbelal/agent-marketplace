@@ -12,7 +12,8 @@ import {
   prepareTeamPromotion,
   checkToolGuardrails,
   ingestTeamAdr,
-  bootstrapRepoMemories
+  bootstrapRepoMemories,
+  autoElicitSessionKnowledge
 } from './memory-service.js';
 
 import {
@@ -60,7 +61,7 @@ const TOOLS = [
   {
     name: 'search_memories',
     description:
-      'High-performance hybrid semantic retrieval using local SQLite FTS5 BM25 combined with token Cosine Similarity. Returns ranked memory cards with match confidence percentages.',
+      'High-performance Multi-Vector Hybrid Semantic Retrieval combining local SQLite FTS5 BM25 with multi-facet dense embeddings (trigger intent, content rule, entity) fused via Reciprocal Rank Fusion (RRF). Returns ranked memory cards with match confidence percentages.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -71,6 +72,11 @@ const TOOLS = [
         limit: {
           type: 'number',
           description: 'Maximum number of results to return (default: 5).'
+        },
+        mode: {
+          type: 'string',
+          enum: ['hybrid', 'multi_vector', 'lexical'],
+          description: "Search retrieval strategy ('hybrid' via RRF, 'multi_vector' semantic only, or 'lexical' BM25 only). Defaults to 'hybrid'."
         }
       },
       required: ['query']
@@ -343,6 +349,20 @@ const TOOLS = [
         }
       }
     }
+  },
+  {
+    name: 'auto_elicit_session_knowledge',
+    description:
+      'Inspects current workspace git diffs and modified files to automatically detect and propose session-end memory candidates before closing a session or compacting context.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        workspaceRoot: {
+          type: 'string',
+          description: 'Optional path to the project root directory. Defaults to current working directory.'
+        }
+      }
+    }
   }
 ];
 
@@ -418,7 +438,8 @@ function handleRequest(message) {
 
           case 'search_memories':
             resultData = searchMemoriesHybrid(workspaceRoot, args.query, {
-              limit: args.limit || 5
+              limit: args.limit || 5,
+              mode: args.mode || 'hybrid'
             });
             // Record telemetry for top match
             if (resultData && resultData.length > 0) {
@@ -490,6 +511,18 @@ function handleRequest(message) {
           case 'ingest_team_adr':
             resultData = ingestTeamAdr(workspaceRoot, args.adrPath, { targetLayer: args.targetLayer || 'workspace' });
             syncSqliteIndex(workspaceRoot);
+            break;
+
+          case 'bootstrap_workspace_memories':
+            resultData = bootstrapRepoMemories(workspaceRoot);
+            break;
+
+          case 'generate_knowledge_graph_html':
+            resultData = generateKnowledgeGraphHtml(workspaceRoot);
+            break;
+
+          case 'auto_elicit_session_knowledge':
+            resultData = autoElicitSessionKnowledge(workspaceRoot);
             break;
 
           default:

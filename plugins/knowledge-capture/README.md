@@ -89,24 +89,30 @@ The plugin includes a lightweight, zero-dependency Node.js stdio **Model Context
 | Tool | Purpose | Parameters |
 | :--- | :--- | :--- |
 | **`get_memory_summary`** | Scans memory files across layers, parses YAML frontmatters, shadows lower-tier overridden rules (`Workspace > Private > Team`), and outputs Markdown tables grouped by `### Domain: <domain>`. | `layer` (*optional*: `"all"`, `"workspace"`, `"private"`, `"team"`), `domain` (*optional*), `query` (*optional*) |
-| **`search_memories`** | Precedence-aware hybrid semantic retrieval combining workspace-partitioned SQLite FTS5 BM25 with token Cosine Similarity (with automatic file-based search fallback). | `query` (*required* string), `limit` (*optional* number, default 5) |
+| **`search_memories`** | Multi-Vector hybrid semantic retrieval combining workspace-partitioned SQLite FTS5 BM25 with multi-facet dense embeddings (fused via Reciprocal Rank Fusion) and zero-dependency file-based fallback. | `query` (*required* string), `limit` (*optional* number, default 5), `mode` (*optional*: `"hybrid"`, `"multi_vector"`, `"lexical"`) |
 | **`get_layer_statistics`** | Returns memory entry counts per layer, active domain breakdown, stale entry counts (`verified` > 180 days or missing), configured Git remotes, and uncommitted changes. | *None* |
 | **`get_memory_content`** | Retrieves full markdown content, frontmatter, and resolved **1-Hop Related Memories Graph** footer for one or more memory slugs across layers. | `layer` (*optional*), `slug` (*optional* string), `slugs` (*optional* `string[]`) |
 | **`get_memory_graph`** | Returns referentially validated node-and-link graph dataset with broken link isolation for D3/SVG canvas rendering. | *None* |
 | **`generate_knowledge_graph_html`** | Generates a complete, interactive standalone HTML canvas visualizer with D3.js force physics, domain clustering, staleness alerts, and inspector drawer. | `workspaceRoot` (*optional*) |
 | **`bootstrap_workspace_memories`**| Scans repository ADRs, CI workflows, linters, Dockerfiles, and documentation to discover and propose initial Workspace memory rules on day one. | `workspaceRoot` (*optional*) |
+| **`auto_elicit_session_knowledge`**| Audits uncommitted working tree diffs and modified files to detect and propose session-end memory candidates before closing a session or compacting context. | `workspaceRoot` (*optional*) |
 | **`check_tool_guardrails`** | Evaluates proposed shell commands against JIT memory guardrails (`applies_to`) and returns pre-execution alerts. | `command` (*required*), `tool` (*optional*, default `'run_command'`) |
 
 ---
 
-## 🔄 Lifecycle Hooks (`SessionStart`)
+## 🔄 Lifecycle Hooks (`SessionStart` & `SessionEnd` / `Stop`)
 
-Upon starting an Antigravity or Claude Code session, the `SessionStart` hook (`bin/session-start.js`):
-1. Reads `settings.json`.
-2. Executes non-blocking `git pull --ff-only` on configured remotes with strict network/SSH guards (`timeout: 3000` ms, `GIT_TERMINAL_PROMPT=0`, `GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=3"`) so offline sessions never hang.
-3. Alerts if the Team clone is on a promotion branch or behind upstream, or if entries are stale (`verified` > 180 days).
-4. Audits the Private layer for uncommitted Git modifications.
-5. Injects an overview into the agent's context displaying memory counts per layer, active domain breakdown, staleness counts, and an **Operational Recall & Capture Directive** enforcing pre-task `kc-recall` and post-task `kc-capture` (with Full-Envelope Repurposing and Co-Triggered Fragmentation Detection during candidate determination).
+1. **`SessionStart` (`bin/session-start.js`):**
+   - Reads `settings.json`.
+   - Executes non-blocking `git pull --ff-only` on configured remotes with strict network/SSH guards (`timeout: 3000` ms, `GIT_TERMINAL_PROMPT=0`, `GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=3"`).
+   - Alerts if the Team clone is on a promotion branch or behind upstream, or if entries are stale (`verified` > 180 days).
+   - Audits the Private layer for uncommitted Git modifications.
+   - Injects memory counts per layer, active domain breakdown, and operational recall/capture directives into session context.
+
+2. **`SessionEnd` / `Stop` Sentinel (`bin/session-end.js`):**
+   - Fires upon session wrap-up, agent turn completion, or before context compaction.
+   - Audits uncommitted workspace modifications.
+   - If files were changed without new memory recorded, injects an auto-elicitation reminder prompting the agent to preserve tacit decisions via `/kc-elicit` or `/kc-capture`.
 
 ---
 
@@ -121,6 +127,7 @@ These skills appear directly in the user's slash command palette:
 | :--- | :--- | :--- |
 | **`/kc-init`** | None | Scaffolds directory layout, tests remote Git connectivity (`git ls-remote`), and configures `settings.json`. |
 | **`/kc-bootstrap`** | None | Scans project ADRs, CI workflows, linters, Dockerfiles, and contribution guides to auto-discover and bootstrap Workspace memory rules. |
+| **`/kc-elicit`** | None | Audits uncommitted workspace diffs to auto-synthesize and propose session-end memories before closing. |
 | **`/kc-graph`** | None | Generates an interactive visual knowledge graph HTML artifact with D3.js force physics, domain clusters, and node inspector. |
 | **`/kc-status`** | None | Prints detailed health, active domain breakdown, stale entry counts (`verified` > 180 days), branch names, uncommitted modifications, and upstream ahead/behind counts across layers. |
 | **`/kc-pull`** | `[team\|private\|all]` | Fast-forwards the local team or private memory clone from its configured Git remote upstream. |

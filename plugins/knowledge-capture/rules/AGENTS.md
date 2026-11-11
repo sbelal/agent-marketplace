@@ -110,8 +110,12 @@ At the start of complex tasks, consult memory with minimal token overhead:
   Personal memories mature in Private storage before entering Team memory. Promotion creates branch `promote/<date>-<slug>` in `team/`, scrubs personal usernames/paths, and halts for developer inspection before `gh pr create`.
 * **Repository Bootstrapping (`/kc-bootstrap`):**
   Scans project ADRs (`docs/adr/`), CI workflows (`.github/workflows/`), linters (`.golangci.yml`, `ruff.toml`, `.eslintrc`), and Dockerfiles to auto-discover and propose initial Workspace memory rules on day one.
+* **Session-End Auto-Elicitation (`/kc-elicit`):**
+  Audits uncommitted working tree diffs, modified dependencies, and test fixtures at session close (via `SessionEnd` / `Stop` sentinel hook `bin/session-end.js`) and proposes structured memory drafts before context loss.
 * **Interactive Knowledge Graph (`/kc-graph`):**
   Generates an interactive D3.js canvas artifact (`knowledge-graph.html`) displaying color-coded layers, domain clusters, staleness alerts, and inspector drawer.
+* **Multi-Vector Hybrid Retrieval (`search_memories`):**
+  Retrieves memories using Reciprocal Rank Fusion (RRF) combining lexical BM25 with multi-facet dense embeddings across trigger intent (50%), content rules (35%), and entity tags (15%). Gracefully falls back to file-based multi-vector ranking.
 * **4-Point "Lint & Dream" Consolidation (`/kc-consolidate [scope|domain]`):**
   1. **Fragmented Slugs:** Merge narrow co-triggered slugs in same domain.
   2. **Orphaned Overrides & Redundant Copies:** Prune entries whose overrides target disappeared upstream or are already identical in Team.

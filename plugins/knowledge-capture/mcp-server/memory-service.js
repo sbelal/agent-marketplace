@@ -1508,4 +1508,133 @@ export function bootstrapRepoMemories(workspaceRoot = process.cwd()) {
   return candidates;
 }
 
+/**
+ * Pure query: Audits current workspace git diffs and modified files to automatically detect
+ * and propose session-end memory candidates before closing a session or compacting context.
+ *
+ * @param {string} workspaceRoot
+ * @returns {Object} Structured session auto-elicitation audit and proposals
+ */
+export function autoElicitSessionKnowledge(workspaceRoot = process.cwd()) {
+  const result = {
+    workspace: workspaceRoot,
+    has_uncommitted_changes: false,
+    modified_files: [],
+    recent_memory_captures: 0,
+    elicitation_needed: false,
+    suggested_candidates: [],
+    session_summary: ''
+  };
+
+  // 1. Audit uncommitted git changes
+  const gitDir = path.join(workspaceRoot, '.git');
+  if (fs.existsSync(gitDir)) {
+    try {
+      const statusOutput = execSync('git status --porcelain', {
+        cwd: workspaceRoot,
+        encoding: 'utf8',
+        timeout: 3000,
+        env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+        stdio: ['ignore', 'pipe', 'ignore']
+      }).trim();
+
+      if (statusOutput) {
+        result.has_uncommitted_changes = true;
+        const lines = statusOutput.split('\n');
+        for (const line of lines) {
+          const parts = line.trim().split(/\s+/);
+          if (parts.length >= 2) {
+            result.modified_files.push({
+              status: parts[0],
+              file: parts.slice(1).join(' ')
+            });
+          }
+        }
+      }
+    } catch {}
+  }
+
+  // 2. Audit recent memory creations (within last 3 hours)
+  const paths = resolveStoragePaths(workspaceRoot);
+  const now = Date.now();
+  const threeHoursAgo = now - (3 * 3600 * 1000);
+
+  const checkRecentFiles = (dir) => {
+    let count = 0;
+    if (fs.existsSync(dir)) {
+      try {
+        const files = fs.readdirSync(dir);
+        for (const f of files) {
+          if (!f.endsWith('.md') || f.toUpperCase() === 'README.MD') continue;
+          const stat = fs.statSync(path.join(dir, f));
+          if (stat.mtimeMs >= threeHoursAgo) {
+            count++;
+          }
+        }
+      } catch {}
+    }
+    return count;
+  };
+
+  result.recent_memory_captures = checkRecentFiles(paths.workspaceDir) + checkRecentFiles(paths.privateDir);
+
+  // Elicitation is triggered when code modifications exist without corresponding memory captures
+  result.elicitation_needed = result.has_uncommitted_changes && (result.recent_memory_captures === 0);
+
+  if (result.modified_files.length === 0) {
+    result.session_summary = 'Clean working tree. No active modifications requiring knowledge capture.';
+    return result;
+  }
+
+  // 3. Categorize changes and generate memory candidate proposals
+  const filePaths = result.modified_files.map(m => m.file);
+  const hasDeps = filePaths.some(f => /package\.json|go\.mod|requirements\.txt|Cargo\.toml|pom\.xml|build\.gradle/i.test(f));
+  const hasTests = filePaths.some(f => /test|spec|__tests__/i.test(f));
+  const codeFiles = filePaths.filter(f => /\.(js|mjs|ts|go|py|rs|java|cpp|c|rb|php)$/i.test(f));
+
+  if (hasDeps) {
+    result.suggested_candidates.push({
+      slug: 'session-dependency-updates',
+      title: 'Dependency and Package Upgrades',
+      domain: 'architecture',
+      type: 'convention',
+      layer: 'workspace',
+      description: 'When updating project package dependencies or runtime toolchains',
+      suggested_body: `# Dependency and Package Upgrades\n\n## Why It Matters\nDependencies were updated or modified during this session.\n\n## How to Apply\n- Verify all package locks are committed synchronously.\n- Confirm runtime test suite passes under target engine version.`
+    });
+  }
+
+  if (hasTests) {
+    result.suggested_candidates.push({
+      slug: 'session-test-regression-rules',
+      title: 'Test Verification and Regression Rules',
+      domain: 'testing',
+      type: 'gotcha',
+      layer: 'workspace',
+      description: 'When running or writing test suites for recently modified modules',
+      suggested_body: `# Test Verification and Regression Rules\n\n## Why It Matters\nNew test fixtures or assertions were established in this session.\n\n## How to Apply\n- Ensure tests run deterministically without background task hanging.\n- Maintain separation between mock environments and real storage.`
+    });
+  }
+
+  if (codeFiles.length > 0 && result.suggested_candidates.length < 3) {
+    const primaryFile = codeFiles[0];
+    const moduleName = path.basename(primaryFile, path.extname(primaryFile));
+    result.suggested_candidates.push({
+      slug: `${moduleName}-session-patterns`,
+      title: `${moduleName} Architecture & Implementation Decisions`,
+      domain: 'architecture',
+      type: 'pattern',
+      layer: 'workspace',
+      description: `When modifying or extending the ${moduleName} module`,
+      suggested_body: `# ${moduleName} Architecture & Implementation Decisions\n\n## Why It Matters\nKey modifications were made to \`${primaryFile}\` in this session.\n\n## How to Apply\n- Adhere to established module interface contracts and Single Responsibility Principle.\n- Verify caller dependencies before refactoring.`
+    });
+  }
+
+  result.session_summary = result.elicitation_needed
+    ? `Sentinel Alert: ${result.modified_files.length} modified file(s) detected without corresponding memory capture.`
+    : `Session audit complete. ${result.recent_memory_captures} memory entries captured recently.`;
+
+  return result;
+}
+
 
