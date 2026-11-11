@@ -4,18 +4,36 @@ import readline from 'node:readline';
 import {
   getMemorySummary,
   getLayerStatistics,
-  getMemoryContent
+  getMemoryContent,
+  saveMemoryEntry,
+  mergeMemoryEntries,
+  deleteMemoryEntry,
+  syncMemoryLayer,
+  prepareTeamPromotion,
+  checkToolGuardrails,
+  ingestTeamAdr
 } from './memory-service.js';
+
+import {
+  syncSqliteIndex,
+  searchMemoriesHybrid,
+  getKnowledgeGraphData,
+  recordTelemetryEvent
+} from './sqlite-index.js';
 
 /**
  * Standard Stdio JSON-RPC 2.0 Model Context Protocol (MCP) Server
+ * Full CQS Compliance (Queries + Commands)
  */
 
 const TOOLS = [
+  // ==========================================
+  // QUERIES
+  // ==========================================
   {
     name: 'get_memory_summary',
     description:
-      'Scans persistent memory markdown files across layers (Workspace, Private, Team), parses YAML frontmatters (including domain and related links), and returns Markdown tables grouped by ### Domain: <domain>. Respects precedence hierarchy: Workspace > Private > Team and deterministic overrides shadowing.',
+      'Scans persistent memory markdown files across layers (Workspace, Private, Team), parses YAML frontmatters, and returns Markdown tables grouped by ### Domain: <domain>. Respects precedence hierarchy: Workspace > Private > Team and deterministic overrides shadowing.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -38,6 +56,25 @@ const TOOLS = [
     }
   },
   {
+    name: 'search_memories',
+    description:
+      'High-performance hybrid semantic retrieval using local SQLite FTS5 BM25 combined with token Cosine Similarity. Returns ranked memory cards with match confidence percentages.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: {
+          type: 'string',
+          description: 'Natural language search query (e.g., "how to prevent container oom kills" or "terraform lock timeout").'
+        },
+        limit: {
+          type: 'number',
+          description: 'Maximum number of results to return (default: 5).'
+        }
+      },
+      required: ['query']
+    }
+  },
+  {
     name: 'get_layer_statistics',
     description:
       'Returns entry counts per layer (Workspace, Private, Team), per-domain breakdown across active layers, stale entry counts (verified > 180 days or missing), configuration status, and uncommitted Git changes warnings.',
@@ -49,7 +86,7 @@ const TOOLS = [
   {
     name: 'get_memory_content',
     description:
-      'Retrieves the full markdown content, YAML frontmatter, and resolved 1-hop related memory graph footer for one or more memory slugs from Workspace, Private, or Team storage.',
+      'Retrieves full markdown content, YAML frontmatter, and resolved 1-hop related memory graph footer for one or more memory slugs from Workspace, Private, or Team storage.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -57,7 +94,7 @@ const TOOLS = [
           type: 'string',
           enum: ['all', 'workspace', 'private', 'team'],
           description:
-            "The memory layer containing the target file ('workspace', 'private', 'team'), or 'all' to resolve highest-precedence layer automatically."
+            "The memory layer containing the target file, or 'all' to resolve highest-precedence layer automatically."
         },
         slug: {
           type: 'string',
@@ -69,6 +106,207 @@ const TOOLS = [
           description: 'Optional array of memory slugs to retrieve in a single batch call.'
         }
       }
+    }
+  },
+  {
+    name: 'get_memory_graph',
+    description:
+      'Returns complete node-and-link graph dataset (nodes with domain, layer, staleness, and applied counts; edges with related and overrides connections) for D3/SVG canvas rendering.',
+    inputSchema: {
+      type: 'object',
+      properties: {}
+    }
+  },
+  {
+    name: 'check_tool_guardrails',
+    description:
+      'Checks a proposed tool execution or shell command against registered JIT memory guardrails and returns any pre-execution alerts.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        command: {
+          type: 'string',
+          description: 'The shell command or tool action to evaluate against memory guardrails.'
+        },
+        tool: {
+          type: 'string',
+          description: "Tool name (defaults to 'run_command')."
+        }
+      },
+      required: ['command']
+    }
+  },
+
+  // ==========================================
+  // COMMANDS (State Mutations)
+  // ==========================================
+  {
+    name: 'save_memory_entry',
+    description:
+      'Creates or updates a memory entry with YAML frontmatter schema validation and automatic reference re-wiring if renamed.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        layer: {
+          type: 'string',
+          enum: ['workspace', 'private'],
+          description: "Target layer ('workspace' or 'private')."
+        },
+        slug: {
+          type: 'string',
+          description: 'Canonical kebab-case slug for the memory.'
+        },
+        oldSlug: {
+          type: 'string',
+          description: 'If renaming an existing memory, provide the old slug so references are cleanly re-wired.'
+        },
+        title: {
+          type: 'string',
+          description: 'Human-readable title for the guideline (# Title).'
+        },
+        why: {
+          type: 'string',
+          description: 'Root cause or architectural rationale (## Why).'
+        },
+        howToApply: {
+          type: 'string',
+          description: 'Actionable instructions, code snippets, or commands (## How to apply).'
+        },
+        body: {
+          type: 'string',
+          description: 'Alternative full raw Markdown body (if not using title/why/howToApply).'
+        },
+        type: {
+          type: 'string',
+          enum: ['convention', 'platform-fact', 'tool-gotcha', 'preference'],
+          description: 'Classification type.'
+        },
+        domain: {
+          type: 'string',
+          description: "Taxonomic domain (e.g., 'kubernetes', 'terraform', 'go', 'ci-cd', 'general')."
+        },
+        description: {
+          type: 'string',
+          description: 'One-line trigger condition describing WHEN this memory must be recalled.'
+        },
+        verified: {
+          type: 'string',
+          description: 'Verification date in YYYY-MM-DD format (defaults to today).'
+        },
+        related: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Array of related memory slugs.'
+        },
+        overrides: {
+          type: 'string',
+          description: 'Lower-tier slug superseded by this entry.'
+        },
+        applies_to: {
+          type: 'object',
+          description: 'Optional JIT guardrail configuration (e.g., { tools: ["run_command"], command_patterns: ["kubectl apply*"] }).'
+        }
+      },
+      required: ['layer', 'slug', 'description']
+    }
+  },
+  {
+    name: 'merge_memory_entries',
+    description:
+      'Merges 2 or more memory entries into a single cohesive target slug, deleting the source files and re-wiring all incoming links.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        layer: {
+          type: 'string',
+          enum: ['workspace', 'private'],
+          description: "Target layer ('workspace' or 'private')."
+        },
+        targetSlug: {
+          type: 'string',
+          description: 'The new consolidated target slug.'
+        },
+        sourceSlugs: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'List of obsolete slugs being merged into targetSlug.'
+        },
+        title: { type: 'string', description: 'Title of the merged guideline.' },
+        why: { type: 'string', description: 'Consolidated rationale.' },
+        howToApply: { type: 'string', description: 'Consolidated instructions.' },
+        body: { type: 'string', description: 'Alternative full body.' },
+        type: { type: 'string', description: 'Guideline type.' },
+        domain: { type: 'string', description: 'Taxonomic category.' },
+        description: { type: 'string', description: 'Expanded trigger description covering both scenarios.' },
+        verified: { type: 'string', description: 'Verification date (YYYY-MM-DD).' },
+        related: { type: 'array', items: { type: 'string' } }
+      },
+      required: ['layer', 'targetSlug', 'sourceSlugs', 'description']
+    }
+  },
+  {
+    name: 'delete_memory_entry',
+    description:
+      'Deletes a memory file and cleans dangling references across remaining files in the layer.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        layer: {
+          type: 'string',
+          enum: ['workspace', 'private'],
+          description: "Layer containing the target file ('workspace' or 'private')."
+        },
+        slug: {
+          type: 'string',
+          description: 'Slug of the memory file to delete.'
+        }
+      },
+      required: ['layer', 'slug']
+    }
+  },
+  {
+    name: 'sync_memory_layer',
+    description:
+      'Safely synchronizes Git remotes for Private and Team layers using fast-forward git pull.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        layer: {
+          type: 'string',
+          enum: ['all', 'private', 'team'],
+          description: "Layer to synchronize ('all', 'private', or 'team'). Defaults to 'all'."
+        }
+      }
+    }
+  },
+  {
+    name: 'prepare_team_promotion',
+    description:
+      'Prepares an isolated promotion branch in the Team memory repository, scrubs personal machine paths/usernames, and generates the PR command.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        slug: {
+          type: 'string',
+          description: 'Slug in Private memory to promote to Team layer.'
+        }
+      },
+      required: ['slug']
+    }
+  },
+  {
+    name: 'ingest_team_adr',
+    description:
+      'Ingests an Architectural Decision Record (ADR) markdown file directly into the Team memory layer.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        adrPath: {
+          type: 'string',
+          description: 'Path to the local ADR file.'
+        }
+      },
+      required: ['adrPath']
     }
   }
 ];
@@ -85,7 +323,7 @@ function handleRequest(message) {
 
   const { id, method, params } = message;
 
-  // Notifications (no id)
+  // Suppress notifications without id
   if (id === undefined || id === null) {
     return;
   }
@@ -102,7 +340,7 @@ function handleRequest(message) {
           },
           serverInfo: {
             name: 'knowledge-capture',
-            version: '1.1.0'
+            version: '2.0.0'
           }
         }
       });
@@ -132,35 +370,95 @@ function handleRequest(message) {
       const workspaceRoot = process.cwd();
 
       try {
-        let resultText = '';
+        let resultData = null;
 
-        if (toolName === 'get_memory_summary') {
-          resultText = getMemorySummary(workspaceRoot, args.layer || 'all', {
-            domain: args.domain,
-            query: args.query
-          });
-        } else if (toolName === 'get_layer_statistics') {
-          const stats = getLayerStatistics(workspaceRoot);
-          resultText = JSON.stringify(stats, null, 2);
-        } else if (toolName === 'get_memory_content') {
-          const contentObj = getMemoryContent(
-            workspaceRoot,
-            args.layer || 'all',
-            args.slug,
-            args.slugs
-          );
-          resultText = contentObj.content;
-        } else {
-          sendJsonRpc({
-            jsonrpc: '2.0',
-            id,
-            error: {
-              code: -32601,
-              message: `Unknown tool: '${toolName}'`
+        switch (toolName) {
+          // --- Queries ---
+          case 'get_memory_summary':
+            resultData = getMemorySummary(workspaceRoot, args.layer || 'all', {
+              domain: args.domain,
+              query: args.query
+            });
+            break;
+
+          case 'search_memories':
+            resultData = searchMemoriesHybrid(workspaceRoot, args.query, {
+              limit: args.limit || 5
+            });
+            // Record telemetry for top match
+            if (resultData && resultData.length > 0) {
+              recordTelemetryEvent(resultData[0].slug, 'recall');
             }
-          });
-          return;
+            break;
+
+          case 'get_layer_statistics':
+            resultData = getLayerStatistics(workspaceRoot);
+            break;
+
+          case 'get_memory_content': {
+            const contentObj = getMemoryContent(
+              workspaceRoot,
+              args.layer || 'all',
+              args.slug,
+              args.slugs
+            );
+            resultData = contentObj.content;
+            if (args.slug) recordTelemetryEvent(args.slug, 'apply');
+            break;
+          }
+
+          case 'get_memory_graph':
+            resultData = getKnowledgeGraphData(workspaceRoot);
+            break;
+
+          case 'check_tool_guardrails':
+            resultData = checkToolGuardrails(workspaceRoot, args.command, args.tool || 'run_command');
+            break;
+
+          // --- Commands ---
+          case 'save_memory_entry':
+            resultData = saveMemoryEntry(workspaceRoot, args);
+            syncSqliteIndex(workspaceRoot);
+            break;
+
+          case 'merge_memory_entries':
+            resultData = mergeMemoryEntries(workspaceRoot, args);
+            syncSqliteIndex(workspaceRoot);
+            break;
+
+          case 'delete_memory_entry':
+            resultData = deleteMemoryEntry(workspaceRoot, args);
+            syncSqliteIndex(workspaceRoot);
+            break;
+
+          case 'sync_memory_layer':
+            resultData = syncMemoryLayer(workspaceRoot, args);
+            syncSqliteIndex(workspaceRoot);
+            break;
+
+          case 'prepare_team_promotion':
+            resultData = prepareTeamPromotion(workspaceRoot, args);
+            syncSqliteIndex(workspaceRoot);
+            break;
+
+          case 'ingest_team_adr':
+            resultData = ingestTeamAdr(workspaceRoot, args.adrPath);
+            syncSqliteIndex(workspaceRoot);
+            break;
+
+          default:
+            sendJsonRpc({
+              jsonrpc: '2.0',
+              id,
+              error: {
+                code: -32601,
+                message: `Method '${toolName}' not found.`
+              }
+            });
+            return;
         }
+
+        const formattedText = typeof resultData === 'string' ? resultData : JSON.stringify(resultData, null, 2);
 
         sendJsonRpc({
           jsonrpc: '2.0',
@@ -169,7 +467,7 @@ function handleRequest(message) {
             content: [
               {
                 type: 'text',
-                text: resultText
+                text: formattedText
               }
             ]
           }
@@ -205,36 +503,22 @@ function handleRequest(message) {
   }
 }
 
-function startServer() {
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout,
-    terminal: false
-  });
+const rl = readline.createInterface({
+  input: process.stdin,
+  output: process.stdout,
+  terminal: false
+});
 
-  rl.on('line', (line) => {
-    const trimmed = line.trim();
-    if (!trimmed) {
-      return;
-    }
+rl.on('line', (line) => {
+  const trimmed = line.trim();
+  if (!trimmed) return;
+  try {
+    const parsed = JSON.parse(trimmed);
+    handleRequest(parsed);
+  } catch {
+    // Ignore invalid JSON lines
+  }
+});
 
-    try {
-      const parsed = JSON.parse(trimmed);
-      handleRequest(parsed);
-    } catch (err) {
-      sendJsonRpc({
-        jsonrpc: '2.0',
-        id: null,
-        error: {
-          code: -32700,
-          message: `Parse error: ${err.message}`
-        }
-      });
-    }
-  });
-
-  process.on('SIGINT', () => process.exit(0));
-  process.on('SIGTERM', () => process.exit(0));
-}
-
-startServer();
+process.on('SIGINT', () => process.exit(0));
+process.on('SIGTERM', () => process.exit(0));

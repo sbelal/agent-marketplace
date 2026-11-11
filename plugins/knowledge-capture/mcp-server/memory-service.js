@@ -755,3 +755,539 @@ export function getMemoryContent(workspaceRoot, layer, slug, slugs) {
   return resolveSingleMemoryContent(workspaceRoot, normalizedLayer, slug, activeIndex);
 }
 
+// ==========================================
+// CQS COMMAND PROCEDURES & LINK INTEGRITY
+// ==========================================
+
+/**
+ * Serializes frontmatter and markdown body into standard string.
+ */
+export function serializeYamlFrontmatter(frontmatter, body) {
+  const lines = ['---'];
+  const keys = ['name', 'type', 'domain', 'description', 'verified', 'overrides', 'related', 'applies_to'];
+
+  for (const k of keys) {
+    if (frontmatter[k] !== undefined && frontmatter[k] !== null && frontmatter[k] !== '') {
+      const val = frontmatter[k];
+      if (Array.isArray(val)) {
+        if (val.length === 0) {
+          lines.push(`${k}: []`);
+        } else {
+          lines.push(`${k}: [${val.map(v => String(v).trim()).join(', ')}]`);
+        }
+      } else if (typeof val === 'object') {
+        lines.push(`${k}:`);
+        for (const [subk, subv] of Object.entries(val)) {
+          if (Array.isArray(subv)) {
+            lines.push(`  ${subk}: [${subv.map(v => JSON.stringify(v)).join(', ')}]`);
+          } else {
+            lines.push(`  ${subk}: ${JSON.stringify(subv)}`);
+          }
+        }
+      } else {
+        lines.push(`${k}: ${val}`);
+      }
+    }
+  }
+
+  // Include any extra custom keys
+  for (const [k, v] of Object.entries(frontmatter)) {
+    if (!keys.includes(k) && v !== undefined && v !== null) {
+      if (typeof v === 'object') {
+        lines.push(`${k}: ${JSON.stringify(v)}`);
+      } else {
+        lines.push(`${k}: ${v}`);
+      }
+    }
+  }
+
+  lines.push('---');
+  lines.push('');
+  lines.push(body ? body.trimStart() : '');
+  return lines.join('\n') + '\n';
+}
+
+/**
+ * Re-wires all incoming related: and overrides: references across Workspace and Private layers.
+ */
+export function rewireMemoryReferences(workspaceRoot, oldSlug, newSlug) {
+  if (!oldSlug || !newSlug || oldSlug === newSlug) return 0;
+  const paths = resolveStoragePaths(workspaceRoot);
+  const dirs = [paths.workspaceDir, paths.privateDir];
+  let rewiredCount = 0;
+
+  for (const dir of dirs) {
+    const files = findMarkdownFiles(dir);
+    for (const file of files) {
+      try {
+        const raw = fs.readFileSync(file, 'utf8');
+        const parsed = parseYamlFrontmatter(raw);
+        let modified = false;
+
+        // Check related
+        if (Array.isArray(parsed.frontmatter.related) && parsed.frontmatter.related.includes(oldSlug)) {
+          parsed.frontmatter.related = parsed.frontmatter.related.map(s => (s === oldSlug ? newSlug : s));
+          parsed.frontmatter.related = [...new Set(parsed.frontmatter.related)];
+          modified = true;
+        }
+
+        // Check overrides
+        if (parsed.frontmatter.overrides === oldSlug) {
+          parsed.frontmatter.overrides = newSlug;
+          modified = true;
+        } else if (Array.isArray(parsed.frontmatter.overrides) && parsed.frontmatter.overrides.includes(oldSlug)) {
+          parsed.frontmatter.overrides = parsed.frontmatter.overrides.map(s => (s === oldSlug ? newSlug : s));
+          parsed.frontmatter.overrides = [...new Set(parsed.frontmatter.overrides)];
+          modified = true;
+        }
+
+        if (modified) {
+          const updatedRaw = serializeYamlFrontmatter(parsed.frontmatter, parsed.body);
+          fs.writeFileSync(file, updatedRaw, 'utf8');
+          rewiredCount++;
+        }
+      } catch {}
+    }
+  }
+  return rewiredCount;
+}
+
+/**
+ * Cleans dangling references pointing to a deleted slug.
+ */
+export function cleanDanglingReferences(workspaceRoot, deletedSlug) {
+  if (!deletedSlug) return 0;
+  const paths = resolveStoragePaths(workspaceRoot);
+  const dirs = [paths.workspaceDir, paths.privateDir];
+  let cleanedCount = 0;
+
+  for (const dir of dirs) {
+    const files = findMarkdownFiles(dir);
+    for (const file of files) {
+      try {
+        const raw = fs.readFileSync(file, 'utf8');
+        const parsed = parseYamlFrontmatter(raw);
+        let modified = false;
+
+        if (Array.isArray(parsed.frontmatter.related) && parsed.frontmatter.related.includes(deletedSlug)) {
+          parsed.frontmatter.related = parsed.frontmatter.related.filter(s => s !== deletedSlug);
+          modified = true;
+        }
+
+        if (parsed.frontmatter.overrides === deletedSlug) {
+          delete parsed.frontmatter.overrides;
+          modified = true;
+        } else if (Array.isArray(parsed.frontmatter.overrides) && parsed.frontmatter.overrides.includes(deletedSlug)) {
+          parsed.frontmatter.overrides = parsed.frontmatter.overrides.filter(s => s !== deletedSlug);
+          if (parsed.frontmatter.overrides.length === 0) delete parsed.frontmatter.overrides;
+          modified = true;
+        }
+
+        if (modified) {
+          const updatedRaw = serializeYamlFrontmatter(parsed.frontmatter, parsed.body);
+          fs.writeFileSync(file, updatedRaw, 'utf8');
+          cleanedCount++;
+        }
+      } catch {}
+    }
+  }
+  return cleanedCount;
+}
+
+/**
+ * Explicit command: Saves, creates, or updates a memory entry with frontmatter schema validation.
+ */
+export function saveMemoryEntry(workspaceRoot, params = {}) {
+  const {
+    layer = 'private',
+    slug,
+    oldSlug,
+    title,
+    why,
+    howToApply,
+    body,
+    type = 'convention',
+    domain = 'general',
+    description,
+    trigger,
+    verified,
+    overrides,
+    related = [],
+    applies_to
+  } = params;
+
+  if (!slug || typeof slug !== 'string') {
+    throw new Error('A valid memory slug is required.');
+  }
+
+  const cleanSlug = path.basename(slug.trim()).replace(/\.md$/i, '');
+  if (!cleanSlug || cleanSlug.includes('..')) {
+    throw new Error('Invalid memory slug. Directory traversal is prohibited.');
+  }
+
+  const normLayer = String(layer).toLowerCase();
+  const paths = resolveStoragePaths(workspaceRoot);
+  let targetDir = null;
+
+  if (normLayer === 'workspace') {
+    targetDir = paths.workspaceDir;
+  } else if (normLayer === 'private') {
+    targetDir = paths.privateDir;
+  } else {
+    throw new Error(`Direct writes are only permitted to 'workspace' or 'private' layer. Got '${layer}'.`);
+  }
+
+  if (!fs.existsSync(targetDir)) {
+    fs.mkdirSync(targetDir, { recursive: true });
+  }
+
+  // Construct Markdown body
+  let markdownBody = body;
+  if (!markdownBody) {
+    const docTitle = title || cleanSlug.replace(/-/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+    markdownBody = `# ${docTitle}\n\n`;
+    if (why) markdownBody += `## Why\n${why.trim()}\n\n`;
+    if (howToApply) markdownBody += `## How to apply\n${howToApply.trim()}\n`;
+  }
+
+  const frontmatter = {
+    name: cleanSlug,
+    type,
+    domain: domain.toLowerCase(),
+    description: description || trigger || 'Engineering guideline',
+    verified: verified || new Date().toISOString().slice(0, 10),
+    related: Array.isArray(related) ? related.map(r => String(r).replace(/\.md$/i, '').trim()).filter(Boolean) : []
+  };
+
+  if (overrides) {
+    frontmatter.overrides = overrides;
+  }
+  if (applies_to) {
+    frontmatter.applies_to = applies_to;
+  }
+
+  const fileContent = serializeYamlFrontmatter(frontmatter, markdownBody);
+  const targetFile = path.join(targetDir, `${cleanSlug}.md`);
+  fs.writeFileSync(targetFile, fileContent, 'utf8');
+
+  let rewiredCount = 0;
+  if (oldSlug && oldSlug !== cleanSlug) {
+    const oldFile = path.join(targetDir, `${oldSlug.replace(/\.md$/i, '')}.md`);
+    if (fs.existsSync(oldFile)) {
+      fs.unlinkSync(oldFile);
+    }
+    rewiredCount = rewireMemoryReferences(workspaceRoot, oldSlug, cleanSlug);
+  }
+
+  return {
+    success: true,
+    layer: normLayer,
+    slug: cleanSlug,
+    path: targetFile,
+    rewiredReferences: rewiredCount
+  };
+}
+
+/**
+ * Explicit command: Merges multiple memory entries into a single cohesive target slug.
+ */
+export function mergeMemoryEntries(workspaceRoot, params = {}) {
+  const {
+    layer = 'private',
+    targetSlug,
+    sourceSlugs = [],
+    title,
+    why,
+    howToApply,
+    body,
+    type = 'convention',
+    domain = 'general',
+    description,
+    verified,
+    related = [],
+    overrides,
+    applies_to
+  } = params;
+
+  if (!targetSlug) {
+    throw new Error('A target slug must be specified for merge.');
+  }
+  if (!Array.isArray(sourceSlugs) || sourceSlugs.length === 0) {
+    throw new Error('sourceSlugs array must contain at least one slug to merge.');
+  }
+
+  const normLayer = String(layer).toLowerCase();
+  const paths = resolveStoragePaths(workspaceRoot);
+  const targetDir = normLayer === 'workspace' ? paths.workspaceDir : paths.privateDir;
+
+  // 1. Save merged target entry
+  const saveRes = saveMemoryEntry(workspaceRoot, {
+    layer: normLayer,
+    slug: targetSlug,
+    title,
+    why,
+    howToApply,
+    body,
+    type,
+    domain,
+    description,
+    verified,
+    related,
+    overrides,
+    applies_to
+  });
+
+  // 2. Remove source files and rewire references to targetSlug
+  let totalRewired = 0;
+  for (const src of sourceSlugs) {
+    const cleanSrc = src.replace(/\.md$/i, '').trim();
+    if (cleanSrc === saveRes.slug) continue;
+
+    const srcPath = path.join(targetDir, `${cleanSrc}.md`);
+    if (fs.existsSync(srcPath)) {
+      fs.unlinkSync(srcPath);
+    }
+    totalRewired += rewireMemoryReferences(workspaceRoot, cleanSrc, saveRes.slug);
+  }
+
+  return {
+    success: true,
+    layer: normLayer,
+    targetSlug: saveRes.slug,
+    mergedSlugs: sourceSlugs,
+    rewiredCount: totalRewired,
+    path: saveRes.path
+  };
+}
+
+/**
+ * Explicit command: Deletes a memory entry and cleans dangling graph references.
+ */
+export function deleteMemoryEntry(workspaceRoot, params = {}) {
+  const { layer = 'private', slug } = params;
+  if (!slug) throw new Error('A memory slug is required for deletion.');
+
+  const cleanSlug = path.basename(slug.trim()).replace(/\.md$/i, '');
+  const normLayer = String(layer).toLowerCase();
+  const paths = resolveStoragePaths(workspaceRoot);
+
+  const targetDir = normLayer === 'workspace' ? paths.workspaceDir : paths.privateDir;
+  const filePath = path.join(targetDir, `${cleanSlug}.md`);
+
+  if (!fs.existsSync(filePath)) {
+    return { success: false, message: `File '${cleanSlug}.md' not found in layer '${normLayer}'.` };
+  }
+
+  fs.unlinkSync(filePath);
+  const cleanedReferences = cleanDanglingReferences(workspaceRoot, cleanSlug);
+
+  return {
+    success: true,
+    layer: normLayer,
+    deletedSlug: cleanSlug,
+    cleanedReferences
+  };
+}
+
+/**
+ * Explicit command: Synchronizes Git remotes for Private and Team layers safely.
+ */
+export function syncMemoryLayer(workspaceRoot, params = {}) {
+  const { layer = 'all' } = params;
+  const paths = resolveStoragePaths(workspaceRoot);
+  const results = {
+    private: { attempted: false },
+    team: { attempted: false }
+  };
+
+  const syncRepo = (dir) => {
+    if (!fs.existsSync(path.join(dir, '.git'))) {
+      return { success: false, status: 'not-a-git-repo' };
+    }
+    try {
+      const dirty = execSync('git status --porcelain', { cwd: dir, encoding: 'utf8', timeout: 3000, env: GIT_EXEC_ENV }).trim();
+      if (dirty) {
+        return { success: false, status: 'dirty-working-copy', dirtyDetails: dirty.split('\n') };
+      }
+      const branch = execSync('git rev-parse --abbrev-ref HEAD', { cwd: dir, encoding: 'utf8', timeout: 3000, env: GIT_EXEC_ENV }).trim();
+      if (branch.startsWith('promote/')) {
+        return { success: false, status: 'on-promote-branch', branch };
+      }
+      try {
+        execSync(`git branch --set-upstream-to=origin/${branch} "${branch}"`, { cwd: dir, stdio: 'ignore' });
+      } catch {}
+      const pullOut = execSync('git pull --ff-only', { cwd: dir, encoding: 'utf8', timeout: 5000, env: GIT_EXEC_ENV }).trim();
+      return { success: true, status: 'synchronized', branch, output: pullOut };
+    } catch (err) {
+      return { success: false, status: 'error', error: err.message };
+    }
+  };
+
+  if (layer === 'all' || layer === 'private') {
+    results.private = { attempted: true, ...syncRepo(paths.privateDir) };
+  }
+  if (layer === 'all' || layer === 'team') {
+    results.team = { attempted: true, ...syncRepo(paths.teamDir) };
+  }
+
+  return results;
+}
+
+/**
+ * Explicit command: Prepares an isolated promotion branch in the Team memory repository.
+ */
+export function prepareTeamPromotion(workspaceRoot, params = {}) {
+  const { slug } = params;
+  if (!slug) throw new Error('A memory slug is required for promotion.');
+
+  const cleanSlug = path.basename(slug.trim()).replace(/\.md$/i, '');
+  const paths = resolveStoragePaths(workspaceRoot);
+  const privateFile = path.join(paths.privateDir, `${cleanSlug}.md`);
+
+  if (!fs.existsSync(privateFile)) {
+    throw new Error(`Private memory file '${cleanSlug}.md' does not exist.`);
+  }
+
+  const teamGit = path.join(paths.teamDir, '.git');
+  if (!fs.existsSync(teamGit)) {
+    throw new Error('Team memory clone is not initialized with Git. Run /kc-init first.');
+  }
+
+  // 1. Check out main and pull latest
+  try {
+    execSync('git checkout main', { cwd: paths.teamDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
+    execSync('git pull --ff-only', { cwd: paths.teamDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
+  } catch {}
+
+  // 2. Create promotion branch
+  const dateStr = new Date().toISOString().slice(0, 10);
+  const branchName = `promote/${dateStr}-${cleanSlug}`;
+  try {
+    execSync(`git checkout -b "${branchName}"`, { cwd: paths.teamDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
+  } catch {
+    execSync(`git checkout "${branchName}"`, { cwd: paths.teamDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
+  }
+
+  // 3. Scrub and write team memory
+  const rawContent = fs.readFileSync(privateFile, 'utf8');
+  const parsed = parseYamlFrontmatter(rawContent);
+
+  // Scrub personal usernames and machine paths
+  const home = os.homedir();
+  const username = os.userInfo().username;
+  let scrubbedBody = parsed.body
+    .replaceAll(home, '~')
+    .replaceAll(username, '<developer>')
+    .replace(/[A-Za-z]:\\[Users|Documents][^\s\n]+/gi, '<path>');
+
+  const teamFm = {
+    name: cleanSlug,
+    type: parsed.frontmatter.type || 'convention',
+    domain: parsed.frontmatter.domain || 'general',
+    description: parsed.frontmatter.description || 'Team engineering standard',
+    verified: dateStr,
+    related: parsed.frontmatter.related || []
+  };
+
+  const teamContent = serializeYamlFrontmatter(teamFm, scrubbedBody);
+  const targetFile = path.join(paths.teamDir, `${cleanSlug}.md`);
+  fs.writeFileSync(targetFile, teamContent, 'utf8');
+
+  return {
+    success: true,
+    slug: cleanSlug,
+    branch: branchName,
+    stagedFile: targetFile,
+    prCommand: `gh pr create --base main --head "${branchName}" --title "memory: promote ${cleanSlug}" --fill`
+  };
+}
+
+/**
+ * Pure query: Checks pending tool calls against memory guardrails (JIT Interception).
+ */
+export function checkToolGuardrails(workspaceRoot, commandString, toolName = 'run_command') {
+  if (!commandString || typeof commandString !== 'string') return [];
+  const paths = resolveStoragePaths(workspaceRoot);
+  const dirs = [paths.workspaceDir, paths.privateDir, paths.teamDir];
+  const alerts = [];
+  const lowerCmd = commandString.toLowerCase();
+
+  for (const dir of dirs) {
+    const files = findMarkdownFiles(dir);
+    for (const file of files) {
+      try {
+        const raw = fs.readFileSync(file, 'utf8');
+        const parsed = parseYamlFrontmatter(raw);
+        const appliesTo = parsed.frontmatter.applies_to;
+        if (!appliesTo) continue;
+
+        let matched = false;
+        if (Array.isArray(appliesTo.tools) && !appliesTo.tools.includes(toolName)) {
+          continue;
+        }
+
+        if (Array.isArray(appliesTo.command_patterns)) {
+          for (const pat of appliesTo.command_patterns) {
+            const cleanPat = pat.replace(/\*/g, '').toLowerCase().trim();
+            if (cleanPat && lowerCmd.includes(cleanPat)) {
+              matched = true;
+              break;
+            }
+          }
+        }
+
+        if (matched) {
+          alerts.push({
+            slug: parsed.frontmatter.name || path.basename(file, '.md'),
+            domain: parsed.frontmatter.domain || 'general',
+            description: parsed.frontmatter.description || 'Execution Guardrail',
+            message: `⚠️ Guardrail Alert [${parsed.frontmatter.name || path.basename(file, '.md')}]: ${parsed.frontmatter.description || ''}`
+          });
+        }
+      } catch {}
+    }
+  }
+
+  return alerts;
+}
+
+/**
+ * Ingests an Architectural Decision Record (ADR) file into Team memory.
+ */
+export function ingestTeamAdr(workspaceRoot, adrFilePath) {
+  if (!fs.existsSync(adrFilePath)) {
+    throw new Error(`ADR file not found at ${adrFilePath}`);
+  }
+
+  const content = fs.readFileSync(adrFilePath, 'utf8');
+  const baseName = path.basename(adrFilePath, path.extname(adrFilePath));
+  const slug = `adr-${baseName.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`.replace(/^-|-$/g, '');
+
+  const paths = resolveStoragePaths(workspaceRoot);
+  const targetFile = path.join(paths.teamDir, `${slug}.md`);
+
+  // Extract title
+  const titleMatch = content.match(/^#\s+(.+)$/m);
+  const title = titleMatch ? titleMatch[1].trim() : `ADR: ${baseName}`;
+
+  const frontmatter = {
+    name: slug,
+    type: 'convention',
+    domain: 'architecture',
+    description: `When architectural decisions relating to ${title} apply`,
+    verified: new Date().toISOString().slice(0, 10),
+    related: []
+  };
+
+  const serialized = serializeYamlFrontmatter(frontmatter, content);
+  fs.writeFileSync(targetFile, serialized, 'utf8');
+
+  return {
+    success: true,
+    slug,
+    title,
+    path: targetFile
+  };
+}
+
+

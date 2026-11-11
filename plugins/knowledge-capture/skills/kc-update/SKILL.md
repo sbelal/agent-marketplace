@@ -13,7 +13,7 @@ This skill allows the agent to safely and automatically check for updates and up
 ### 1. Inspect Current Installation Mode & Update Status
 Execute a query to inspect current installation state:
 ```bash
-node ./bin/install.js --status-json
+npx git+https://github.com/sbelal/agent-marketplace.git --status-json
 ```
 Evaluate:
 - Is the plugin operating in **Source-Mode** (`isGlobalSource: true` or `isWorkspaceSource: true`)?
@@ -25,11 +25,8 @@ Evaluate:
 #### If Source-Mode (`plugins.json`):
 The monorepo source is linked live. Execute a git fast-forward pull on the source repository:
 ```bash
-# If cloned locally:
-git pull --ff-only
-
-# Or run the source updater:
-node ./bin/install.js --update-source
+# Update source via universal installer:
+npx git+https://github.com/sbelal/agent-marketplace.git --update-source
 ```
 This instantly updates all marketplace plugins with zero file copying.
 
@@ -37,17 +34,14 @@ This instantly updates all marketplace plugins with zero file copying.
 Execute headless plugin update to refresh engine code without affecting user data:
 ```bash
 # To update knowledge-capture specifically:
-node ./bin/install.js --update knowledge-capture
+npx git+https://github.com/sbelal/agent-marketplace.git --update knowledge-capture
 
 # Or to update all outdated plugins:
-node ./bin/install.js --update all
+npx git+https://github.com/sbelal/agent-marketplace.git --update all
 ```
 
 ### 3. Verify Operational Readiness & User Data Safety
-Verify that user memories and settings in `~/.gemini/knowledge-capture/` remain intact:
-```bash
-node ./bin/status.js
-```
+Call the MCP tool `get_layer_statistics` to verify that user memories and settings in `~/.gemini/knowledge-capture/` remain intact and active.
 
 ### 4. Report Update Summary to User
 Display an update confirmation card in chat:

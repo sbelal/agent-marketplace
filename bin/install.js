@@ -674,6 +674,19 @@ Options:
     process.exit(0);
   }
 
+  if (hasFlag('--update-source')) {
+    const targetSourcePath = resolveSourceRegistrationPath(REPO_ROOT, HOME_DIR);
+    console.log(`\x1b[36mSynchronizing marketplace source repository...\x1b[0m`);
+    const success = ensurePermanentSourceClone(targetSourcePath);
+    if (success) {
+      console.log('\x1b[32m✔ Source repository successfully updated.\x1b[0m');
+      process.exit(0);
+    } else {
+      console.error('\x1b[31m✖ Failed updating source repository.\x1b[0m');
+      process.exit(1);
+    }
+  }
+
   const updateArg = getArg('--update');
   if (updateArg || hasFlag('--update')) {
     const target = (updateArg || 'all').toLowerCase();

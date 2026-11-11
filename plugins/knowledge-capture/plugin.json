@@ -1,8 +1,8 @@
 {
   "name": "knowledge-capture",
   "displayName": "Knowledge Capture",
-  "description": "Multi-layered persistent memory system with Node.js stdio MCP server, automated candidate elicitation, and Git synchronization.",
-  "version": "1.0.0",
+  "description": "Multi-layered persistent memory system with full CQS stdio MCP server, local SQLite FTS5 hybrid search, JIT guardrails, and Git synchronization.",
+  "version": "2.0.0",
   "author": "Sal Belal",
   "repository": "https://github.com/sbelal/agent-marketplace"
 }

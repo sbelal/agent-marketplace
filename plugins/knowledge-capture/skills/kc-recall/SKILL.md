@@ -13,10 +13,10 @@ Retrieve past engineering guidelines and team conventions relevant to the active
 
 ## Workflow
 
-### 1. Scan Memory Index (`get_memory_summary`)
-Call the MCP tool `get_memory_summary` to inspect active memory entries across `Workspace`, `Private`, and `Team` layers:
-- Pass `domain` (e.g., `"kubernetes"`, `"terraform"`, `"go"`, `"ci-cd"`) or `query` keyword filters when the task targets a specific domain or subsystem, or scan `layer: "all"` for broad architectural tasks.
-- The summary groups active rules by `### Domain: <domain>` while automatically shadowing overridden lower-tier rules (`Workspace > Private > Team`).
+### 1. Scan Memory Index (`search_memories` or `get_memory_summary`)
+Call the MCP tool **`search_memories`** for natural-language semantic matching:
+- Pass `query: "<natural language description of task or error>"` to perform fast hybrid FTS5 + cosine similarity matching across memory titles, triggers, and bodies with confidence scores.
+- Alternatively, call **`get_memory_summary`** with `domain` or `query` filters to scan full tables grouped by `### Domain: <domain>` with precedence shadowing (`Workspace > Private > Team`).
 
 ### 2. Match Active Context & Traverse 1-Hop Graph (`get_memory_content`)
 Evaluate whether any memory `slug` or `Trigger / Description` directly relates to the current task or problem:
