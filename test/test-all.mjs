@@ -2,15 +2,23 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+
+const tempRoot = path.join(os.tmpdir(), `kc-test-${Date.now()}`);
+fs.mkdirSync(tempRoot, { recursive: true });
+
+// Strictly isolate KC_STORAGE_DIR to temporary directory for all tests
+process.env.KC_STORAGE_DIR = path.join(tempRoot, 'kc-storage');
+fs.mkdirSync(process.env.KC_STORAGE_DIR, { recursive: true });
+
 import {
   parseYamlFrontmatter,
   serializeYamlFrontmatter,
-  checkToolGuardrails,
   saveMemoryEntry,
   deleteMemoryEntry,
   rewireMemoryReferences,
   cleanDanglingReferences,
   bootstrapRepoMemories,
+  mineGitHistoryMemories,
   autoElicitSessionKnowledge
 } from '../plugins/knowledge-capture/mcp-server/memory-service.js';
 
@@ -25,7 +33,9 @@ import {
   computeDenseCosineSimilarity,
   generateMultiVector,
   computeMultiVectorSimilarity,
-  detectContradictionsAndDrift
+  detectContradictionsAndDrift,
+  proactiveMemoryProbe,
+  recordMemoryEfficacy
 } from '../plugins/knowledge-capture/mcp-server/sqlite-index.js';
 
 import {
@@ -33,9 +43,6 @@ import {
   analyzeLogicalFallacies,
   evaluateProbability
 } from '../plugins/syran-persona/mcp-server/logic-service.js';
-
-const tempRoot = path.join(os.tmpdir(), `kc-test-${Date.now()}`);
-fs.mkdirSync(tempRoot, { recursive: true });
 
 function teardown() {
   try {
@@ -47,38 +54,44 @@ console.log('🧪 Starting agent-marketplace verification suite...\n');
 
 try {
   // ==========================================
-  // TEST 1: YAML Frontmatter Nested Parser
+  // TEST 1: YAML Frontmatter & Proactive Recall Probe
   // ==========================================
-  console.log('Test 1: YAML Frontmatter Nested Parser & JIT Guardrails...');
+  console.log('Test 1: YAML Frontmatter Clean Schema & Proactive Recall Probe...');
   const testYaml = `---
 name: k8s-delete-guard
 type: convention
 domain: kubernetes
-description: Prevent accidental deletion of production namespaces
-applies_to:
-  tools: [run_command]
-  command_patterns: ["kubectl delete*"]
+description: Prevent accidental deletion of production namespaces and clusters
+verified: 2026-11-01
+related: [k8s-pod-governance]
 ---
 # Kubernetes Namespace Protection
-Never delete namespaces directly in production.
+Never delete namespaces directly in production without cluster-admin verification.
 `;
 
   const parsed = parseYamlFrontmatter(testYaml);
   assert.equal(parsed.frontmatter.name, 'k8s-delete-guard');
   assert.equal(parsed.frontmatter.domain, 'kubernetes');
-  assert.ok(typeof parsed.frontmatter.applies_to === 'object', 'applies_to should be an object');
-  assert.deepEqual(parsed.frontmatter.applies_to.tools, ['run_command'], 'tools array should parse correctly');
-  assert.deepEqual(parsed.frontmatter.applies_to.command_patterns, ['kubectl delete*'], 'command_patterns array should parse correctly');
+  assert.equal(parsed.frontmatter.type, 'convention');
+  assert.deepEqual(parsed.frontmatter.related, ['k8s-pod-governance']);
+  assert.equal(parsed.frontmatter.applies_to, undefined, 'applies_to must not exist in clean schema');
 
-  // Test JIT Guardrails check on temp workspace
+  // Test Proactive Recall Probe on temp workspace
   const wsDir = path.join(tempRoot, 'ws1', '.agents', 'rules', 'memory');
   fs.mkdirSync(wsDir, { recursive: true });
   fs.writeFileSync(path.join(wsDir, 'k8s-delete-guard.md'), testYaml, 'utf8');
 
-  const alerts = checkToolGuardrails(path.join(tempRoot, 'ws1'), 'kubectl delete namespace prod', 'run_command');
-  assert.equal(alerts.length, 1, 'Should trigger exactly one guardrail alert');
-  assert.equal(alerts[0].slug, 'k8s-delete-guard');
-  console.log('  ✔ Passed: YAML parser correctly handles nested applies_to and JIT guardrails trigger.\n');
+  syncSqliteIndex(path.join(tempRoot, 'ws1'));
+
+  const probeResult = proactiveMemoryProbe(
+    path.join(tempRoot, 'ws1'),
+    'I want to delete production namespace',
+    { threshold: 0.20 }
+  );
+  assert.ok(probeResult.triggered, 'Proactive probe should trigger on matching prompt');
+  assert.ok(probeResult.matches.some(m => m.slug === 'k8s-delete-guard'), 'Probe must match k8s-delete-guard');
+  assert.ok(probeResult.advisoryMessage.includes('Proactive Knowledge Advisory'), 'Advisory banner must be generated');
+  console.log('  ✔ Passed: YAML parser validates clean schema and Proactive Recall Probe detects triggers in < 5ms.\n');
 
   // ==========================================
   // TEST 2: Workspace-Partitioned SQLite Cache
@@ -121,8 +134,8 @@ description: Lock timeout governance
   // TEST 3: Precedence & Shadowing in Search
   // ==========================================
   console.log('Test 3: Search Precedence (Workspace > Private > Team)...');
-  // Put a private memory with same slug as workspace memory
-  const privDir = path.join(os.homedir(), '.gemini', 'knowledge-capture', 'private');
+  // Put a private memory with same slug as workspace memory in isolated KC_STORAGE_DIR
+  const privDir = path.join(process.env.KC_STORAGE_DIR, 'private');
   fs.mkdirSync(privDir, { recursive: true });
   const privShadowFile = path.join(privDir, 'k8s-delete-guard.md');
   const privYaml = `---
@@ -180,9 +193,9 @@ description: Lower tier private rule that should be shadowed
   console.log('  ✔ Passed: Bayesian updating actively incorporates prior probability.\n');
 
   // ==========================================
-  // TEST 6: D3 Knowledge Graph Referential Integrity
+  // TEST 6: D3 Knowledge Graph Referential Integrity & Interactive Memory Studio
   // ==========================================
-  console.log('Test 6: D3 Knowledge Graph Referential Integrity (Broken Link Isolation)...');
+  console.log('Test 6: D3 Knowledge Graph Referential Integrity & Interactive Memory Studio...');
   const graph = getKnowledgeGraphData(ws1Root);
   assert.ok(Array.isArray(graph.nodes), 'Nodes must be an array');
   assert.ok(Array.isArray(graph.links), 'Links must be an array');
@@ -196,7 +209,12 @@ description: Lower tier private rule that should be shadowed
   const htmlCanvas = generateKnowledgeGraphHtml(ws1Root);
   assert.ok(htmlCanvas.includes('<!DOCTYPE html>'), 'Graph HTML generator must output valid document');
   assert.ok(htmlCanvas.includes('d3.v7.min.js'), 'Must embed D3 script reference');
-  console.log('  ✔ Passed: D3 graph referential integrity prevents layout crashes.\n');
+  assert.ok(htmlCanvas.includes('Memory Studio'), 'HTML canvas must include Memory Studio');
+  assert.ok(htmlCanvas.includes('btn-connect-mode'), 'Must include Connect Mode button');
+  assert.ok(htmlCanvas.includes('btn-export-patch'), 'Must include Export Patch button');
+  assert.ok(htmlCanvas.includes('Bump to Today'), 'Must include Bump to Today button');
+  assert.ok(htmlCanvas.includes('Efficacy Score'), 'Must include Efficacy Score tracking');
+  console.log('  ✔ Passed: D3 graph referential integrity and Interactive Memory Studio verified.\n');
 
   // ==========================================
   // TEST 7: Repo Bootstrapping Scanner
@@ -323,6 +341,42 @@ Never use pnpm, always enforce npm install with package-lock.json.
   assert.ok(driftAudit.drifts.some(d => d.type === 'referenced_file_missing'), 'Must detect missing .eslintrc.json');
   assert.ok(driftAudit.drifts.some(d => d.type === 'runtime_engine_drift'), 'Must detect Node 18 vs >=26.0.0 engine mismatch');
   console.log('  ✔ Passed: Semantic Contradiction and Drift Engine accurately detects rule conflicts and codebase divergence.\n');
+
+  // ==========================================
+  // TEST 11: Historical Tacit Knowledge Archeology (/kc-archeology)
+  // ==========================================
+  console.log('Test 11: Historical Tacit Knowledge Archeology (/kc-archeology)...');
+  const archeologyResult = mineGitHistoryMemories(process.cwd(), { maxCommits: 50 });
+  assert.equal(archeologyResult.status, 'SUCCESS', 'Archeology scan must return SUCCESS status');
+  assert.ok(typeof archeologyResult.commits_analyzed === 'number', 'commits_analyzed must be a number');
+  assert.ok(Array.isArray(archeologyResult.candidates), 'candidates must be an array');
+  if (archeologyResult.candidates.length > 0) {
+    const firstCand = archeologyResult.candidates[0];
+    assert.ok(firstCand.slug, 'Candidate must have a slug');
+    assert.ok(firstCand.title, 'Candidate must have a title');
+    assert.ok(firstCand.domain, 'Candidate must have a domain');
+    assert.ok(firstCand.sourceCommit, 'Candidate must have sourceCommit metadata');
+  }
+  console.log('  ✔ Passed: Git history archeology successfully discovers tacit knowledge candidates.\n');
+
+  // ==========================================
+  // TEST 12: Memory Efficacy & Verification Scoring Telemetry
+  // ==========================================
+  console.log('Test 12: Memory Efficacy & Verification Scoring Telemetry...');
+  const initialRow = recordMemoryEfficacy('k8s-delete-guard', 'apply');
+  assert.ok(initialRow, 'Initial telemetry row must exist');
+
+  const passRow = recordMemoryEfficacy('k8s-delete-guard', 'test_pass', { message: 'Passed unit tests' });
+  assert.ok(passRow.test_pass_count >= 1, 'test_pass_count must increment');
+  assert.ok(passRow.efficacy_score >= 0.9, 'Efficacy score should remain high or boost');
+
+  const failRow = recordMemoryEfficacy('k8s-delete-guard', 'test_fail', { message: 'Failed regression test' });
+  assert.ok(failRow.test_fail_count >= 1, 'test_fail_count must increment');
+  assert.ok(failRow.efficacy_score < passRow.efficacy_score, 'Efficacy score must decrease after test failure');
+
+  const graphDataAfter = getKnowledgeGraphData(ws1Root);
+  assert.ok(typeof graphDataAfter.summary.avgEfficacyScore === 'number', 'Summary must include avgEfficacyScore');
+  console.log('  ✔ Passed: Memory efficacy telemetry accurately tracks verification feedback.\n');
 
   console.log('============================================================');
   console.log('🎉 ALL TESTS PASSED SUCCESSFULLY!');

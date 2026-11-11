@@ -1,8 +1,8 @@
 # Knowledge Capture Plugin
 
-**Knowledge Capture** is an advanced, multi-layered persistent memory plugin engineered for **Google Antigravity** and **Anthropic Claude Code**. It bridges the best practices of Git-backed institutional memory with a zero-dependency Node.js stdio **Model Context Protocol (MCP)** server, automated knowledge elicitation, and human-in-the-loop review guardrails.
+**Knowledge Capture** is an advanced, multi-layered persistent memory plugin engineered for **Google Antigravity** and **Anthropic Claude Code**. It bridges the best practices of Git-backed institutional memory with a zero-dependency Node.js stdio **Model Context Protocol (MCP)** server, automated knowledge elicitation, proactive recall, and an interactive visual Memory Studio.
 
-> **System Requirement:** Requires **Node.js >= 26.0.0** (LTS). Features zero-dependency SQLite FTS5 hybrid search with an automatic file-based indexing fallback.
+> **System Requirement:** Requires **Node.js >= 20.0.0** (LTS). Features zero-dependency SQLite FTS5 hybrid search with an automatic file-based indexing fallback.
 
 ---
 
@@ -97,7 +97,9 @@ The plugin includes a lightweight, zero-dependency Node.js stdio **Model Context
 | **`bootstrap_workspace_memories`**| Scans repository ADRs, CI workflows, linters, Dockerfiles, and documentation to discover and propose initial Workspace memory rules on day one. | `workspaceRoot` (*optional*) |
 | **`auto_elicit_session_knowledge`**| Audits uncommitted working tree diffs and modified files to detect and propose session-end memory candidates before closing a session or compacting context. | `workspaceRoot` (*optional*) |
 | **`detect_contradictions_and_drift`**| Audits active memories for semantic contradictions (opposing directives on similar tasks) and codebase drift (missing referenced files, runtime engine mismatches, staleness). | `workspaceRoot` (*optional*), `domain` (*optional*), `threshold` (*optional*) |
-| **`check_tool_guardrails`** | Evaluates proposed shell commands against JIT memory guardrails (`applies_to`) and returns pre-execution alerts. | `command` (*required*), `tool` (*optional*, default `'run_command'`) |
+| **`proactive_memory_probe`** | Zero-turn pre-flight probe evaluating user prompts against memory triggers in < 5ms to surface immediate guidance cards. | `query` (*required* string), `threshold` (*optional* number), `limit` (*optional* number) |
+| **`mine_git_history_memories`** | Tacit knowledge archeology scanning Git commits, reverts, and bug fixes for undocumented gotchas. | `maxCommits` (*optional* number) |
+| **`record_memory_efficacy`** | Records verification feedback and efficacy telemetry for memory rules (`test_pass`, `test_fail`). | `slug` (*required* string), `feedbackType` (*required* string), `details` (*optional* object) |
 
 ---
 
@@ -135,6 +137,7 @@ These skills appear directly in the user's slash command palette:
 | **`/kc-pull`** | `[team\|private\|all]` | Fast-forwards the local team or private memory clone from its configured Git remote upstream. |
 | **`/kc-commit`** | `[message]` | Audits private memory for sensitive credentials, validates upstream remotes, commits pending changes, and pushes to Git. |
 | **`/kc-promote`** | `[slug]` | Creates an isolated branch (`promote/<date>-<slug>`), scrubs personal context, halts for developer diff inspection, and prepares a GitHub PR. |
+| **`/kc-archeology`** | `[maxCommits]` | Mines Git history, revert commits, and bug fixes to discover undocumented tacit knowledge and workarounds. |
 | **`/kc-consolidate`**| `[scope\|domain]` | Runs a 4-point **"Lint & Dream"** pass: merges fragmented/co-triggered slugs, prunes orphaned overrides or redundant private copies, repairs broken `related` graph links, and refreshes stale (>180d) or conflicting entries. |
 
 ### Autonomous Agent-Only Skills (`user-invocable: false`)

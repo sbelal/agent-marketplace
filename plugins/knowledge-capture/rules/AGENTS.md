@@ -33,9 +33,6 @@ description: <One-line trigger condition: WHEN this memory should be recalled>
 verified: YYYY-MM-DD
 overrides: <team-slug-if-applicable>
 related: [<related-slug-1>, <related-slug-2>]
-applies_to:
-  tools: [run_command]
-  command_patterns: ["<pattern>"]
 ---
 
 # <Title>
@@ -57,7 +54,6 @@ applies_to:
 * `verified`: `YYYY-MM-DD` verification date (>180 days flags entry as stale).
 * `overrides`: Lower-tier slug superseded by this entry (`Workspace > Private > Team`).
 * `related`: Array of 1-hop laterally linked slugs resolved in `get_memory_content`.
-* `applies_to`: Optional JIT guardrail patterns for pre-tool interception.
 
 ---
 
@@ -112,8 +108,14 @@ At the start of complex tasks, consult memory with minimal token overhead:
   Scans project ADRs (`docs/adr/`), CI workflows (`.github/workflows/`), linters (`.golangci.yml`, `ruff.toml`, `.eslintrc`), and Dockerfiles to auto-discover and propose initial Workspace memory rules on day one.
 * **Session-End Auto-Elicitation (`/kc-elicit`):**
   Audits uncommitted working tree diffs, modified dependencies, and test fixtures at session close (via `SessionEnd` / `Stop` sentinel hook `bin/session-end.js`) and proposes structured memory drafts before context loss.
-* **Interactive Knowledge Graph (`/kc-graph`):**
-  Generates an interactive D3.js canvas artifact (`knowledge-graph.html`) displaying color-coded layers, domain clusters, staleness alerts, and inspector drawer.
+* **Interactive Visual Memory Studio (`/kc-graph`):**
+  Generates an interactive D3.js canvas artifact (`knowledge-graph.html`) featuring force physics, visual Connect Mode, inline node metadata editor, and Staged Patch exporter.
+* **Zero-Turn Proactive Recall Probe (`proactive_memory_probe`):**
+  Pre-flight check evaluating user queries and task context against memory triggers in < 5ms to surface immediate advisory guidance cards.
+* **Historical Tacit Knowledge Archeology (`/kc-archeology`):**
+  Mines git commit history, revert messages, and hotfix commit diffs to discover uncodified gotchas and team conventions.
+* **Memory Efficacy & Verification Scoring (`record_memory_efficacy`):**
+  Tracks utility metrics and test pass/fail signals to automatically adjust efficacy scores (boosting effective rules, penalizing broken rules).
 * **Multi-Vector Hybrid Retrieval (`search_memories`):**
   Retrieves memories using Reciprocal Rank Fusion (RRF) combining lexical BM25 with multi-facet dense embeddings across trigger intent (50%), content rules (35%), and entity tags (15%). Gracefully falls back to file-based multi-vector ranking.
 * **Semantic Contradiction & Drift Engine (`/kc-drift`):**

@@ -10,7 +10,7 @@ import {
   deleteMemoryEntry,
   syncMemoryLayer,
   prepareTeamPromotion,
-  checkToolGuardrails,
+  mineGitHistoryMemories,
   ingestTeamAdr,
   bootstrapRepoMemories,
   autoElicitSessionKnowledge
@@ -22,7 +22,9 @@ import {
   getKnowledgeGraphData,
   recordTelemetryEvent,
   generateKnowledgeGraphHtml,
-  detectContradictionsAndDrift
+  detectContradictionsAndDrift,
+  proactiveMemoryProbe,
+  recordMemoryEfficacy
 } from './sqlite-index.js';
 
 /**
@@ -127,22 +129,48 @@ const TOOLS = [
     }
   },
   {
-    name: 'check_tool_guardrails',
+    name: 'proactive_memory_probe',
     description:
-      'Checks a proposed tool execution or shell command against registered JIT memory guardrails and returns any pre-execution alerts.',
+      'Zero-turn proactive recall probe. Quickly checks natural language user prompt or context against indexed memory triggers in < 5ms and returns high-confidence advisory cards.',
     inputSchema: {
       type: 'object',
       properties: {
-        command: {
+        query: {
           type: 'string',
-          description: 'The shell command or tool action to evaluate against memory guardrails.'
+          description: 'The user query, prompt, or task context to probe against memory triggers.'
         },
-        tool: {
+        threshold: {
+          type: 'number',
+          description: 'Confidence threshold (0.0 to 1.0, default: 0.55).'
+        },
+        limit: {
+          type: 'number',
+          description: 'Maximum recommendations to return (default: 3).'
+        },
+        workspaceRoot: {
           type: 'string',
-          description: "Tool name (defaults to 'run_command')."
+          description: 'Workspace root path.'
         }
       },
-      required: ['command']
+      required: ['query']
+    }
+  },
+  {
+    name: 'mine_git_history_memories',
+    description:
+      'Historical tacit knowledge archeology. Mines git commits, fix messages, and revert history to automatically surface undocumented workarounds, bug fixes, and gotchas.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        workspaceRoot: {
+          type: 'string',
+          description: 'Workspace root directory.'
+        },
+        maxCommits: {
+          type: 'number',
+          description: 'Maximum commits to scan (default: 100).'
+        }
+      }
     }
   },
 
@@ -210,10 +238,6 @@ const TOOLS = [
         overrides: {
           type: 'string',
           description: 'Lower-tier slug superseded by this entry.'
-        },
-        applies_to: {
-          type: 'object',
-          description: 'Optional JIT guardrail configuration (e.g., { tools: ["run_command"], command_patterns: ["kubectl apply*"] }).'
         }
       },
       required: ['layer', 'slug', 'description']
@@ -386,6 +410,30 @@ const TOOLS = [
         }
       }
     }
+  },
+  {
+    name: 'record_memory_efficacy',
+    description:
+      'Records verification feedback and efficacy telemetry for a memory guideline (e.g. test_pass boosts efficacy, test_fail penalizes efficacy).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        slug: {
+          type: 'string',
+          description: 'Slug of the memory entry.'
+        },
+        feedbackType: {
+          type: 'string',
+          enum: ['test_pass', 'test_fail', 'apply', 'recall'],
+          description: 'Type of feedback event.'
+        },
+        details: {
+          type: 'object',
+          description: 'Optional details (e.g. { message: "Test passed" }).'
+        }
+      },
+      required: ['slug', 'feedbackType']
+    }
   }
 ];
 
@@ -501,8 +549,15 @@ function handleRequest(message) {
             resultData = bootstrapRepoMemories(workspaceRoot);
             break;
 
-          case 'check_tool_guardrails':
-            resultData = checkToolGuardrails(workspaceRoot, args.command, args.tool || 'run_command');
+          case 'proactive_memory_probe':
+            resultData = proactiveMemoryProbe(workspaceRoot, args.query, {
+              threshold: args.threshold,
+              limit: args.limit
+            });
+            break;
+
+          case 'mine_git_history_memories':
+            resultData = mineGitHistoryMemories(workspaceRoot, args);
             break;
 
           // --- Commands ---
@@ -536,12 +591,8 @@ function handleRequest(message) {
             syncSqliteIndex(workspaceRoot);
             break;
 
-          case 'bootstrap_workspace_memories':
-            resultData = bootstrapRepoMemories(workspaceRoot);
-            break;
-
-          case 'generate_knowledge_graph_html':
-            resultData = generateKnowledgeGraphHtml(workspaceRoot);
+          case 'record_memory_efficacy':
+            resultData = recordMemoryEfficacy(args.slug, args.feedbackType, args.details);
             break;
 
           case 'auto_elicit_session_knowledge':

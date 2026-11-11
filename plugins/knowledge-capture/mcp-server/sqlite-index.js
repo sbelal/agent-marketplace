@@ -35,22 +35,24 @@ export function isSqliteAvailable() {
   return isSqliteSupported;
 }
 
-export function getDbPath() {
-  const home = os.homedir();
-  const dir = path.join(home, '.gemini', 'knowledge-capture');
+export function getStorageDir() {
+  const dir = process.env.KC_STORAGE_DIR || (
+    process.env.GEMINI_HOME
+      ? path.join(process.env.GEMINI_HOME, 'knowledge-capture')
+      : path.join(os.homedir(), '.gemini', 'knowledge-capture')
+  );
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
-  return path.join(dir, 'cache.sqlite');
+  return dir;
+}
+
+export function getDbPath() {
+  return path.join(getStorageDir(), 'cache.sqlite');
 }
 
 export function getTelemetryJsonPath() {
-  const home = os.homedir();
-  const dir = path.join(home, '.gemini', 'knowledge-capture');
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
-  }
-  return path.join(dir, 'telemetry.json');
+  return path.join(getStorageDir(), 'telemetry.json');
 }
 
 export function normalizeWorkspaceId(workspaceRoot) {
@@ -70,6 +72,14 @@ export function getDatabase() {
     const dbPath = getDbPath();
     const db = new DatabaseSync(dbPath);
 
+    // Concurrency and WAL mode optimization
+    try {
+      db.exec(`
+        PRAGMA journal_mode = WAL;
+        PRAGMA busy_timeout = 5000;
+      `);
+    } catch {}
+
     // Check if migration is needed from unpartitioned schema
     try {
       const tableInfo = db.prepare('PRAGMA table_info(memories)').all();
@@ -83,7 +93,7 @@ export function getDatabase() {
       }
     } catch {}
 
-    // Initialize Schema with workspace partitioning
+    // Initialize Schema with workspace partitioning (Option A: guardrails removed)
     db.exec(`
       CREATE TABLE IF NOT EXISTS meta (
         key TEXT PRIMARY KEY,
@@ -100,7 +110,6 @@ export function getDatabase() {
         trigger TEXT,
         path TEXT,
         mtime INTEGER,
-        applies_to TEXT,
         trigger_vector TEXT,
         content_vector TEXT,
         entity_vector TEXT,
@@ -130,8 +139,12 @@ export function getDatabase() {
         slug TEXT PRIMARY KEY,
         recalled_count INTEGER DEFAULT 0,
         applied_count INTEGER DEFAULT 0,
+        test_pass_count INTEGER DEFAULT 0,
+        test_fail_count INTEGER DEFAULT 0,
+        efficacy_score REAL DEFAULT 1.0,
         last_recalled TEXT,
-        last_applied TEXT
+        last_applied TEXT,
+        last_feedback TEXT
       );
     `);
 
@@ -144,6 +157,20 @@ export function getDatabase() {
           ALTER TABLE memories ADD COLUMN trigger_vector TEXT;
           ALTER TABLE memories ADD COLUMN content_vector TEXT;
           ALTER TABLE memories ADD COLUMN entity_vector TEXT;
+        `);
+      }
+    } catch {}
+
+    // Ensure telemetry efficacy columns exist for existing databases
+    try {
+      const teleCols = db.prepare('PRAGMA table_info(telemetry)').all();
+      const teleColNames = new Set(teleCols.map(c => c.name));
+      if (!teleColNames.has('test_pass_count')) {
+        db.exec(`
+          ALTER TABLE telemetry ADD COLUMN test_pass_count INTEGER DEFAULT 0;
+          ALTER TABLE telemetry ADD COLUMN test_fail_count INTEGER DEFAULT 0;
+          ALTER TABLE telemetry ADD COLUMN efficacy_score REAL DEFAULT 1.0;
+          ALTER TABLE telemetry ADD COLUMN last_feedback TEXT;
         `);
       }
     } catch {}
@@ -266,7 +293,7 @@ export function computeDenseCosineSimilarity(vecA, vecB) {
  * Generates multi-vector representation across 3 facets: trigger, content, entity.
  */
 export function generateMultiVector(entry) {
-  const triggerText = `${entry.trigger || entry.description || ''} ${JSON.stringify(entry.applies_to || '')}`;
+  const triggerText = `${entry.trigger || entry.description || ''}`;
   const contentText = typeof entry.body === 'string' ? entry.body : (entry.content || '');
   const entityText = `${entry.slug || ''} ${entry.domain || ''} ${entry.type || ''} ${(entry.related || []).join(' ')}`;
 
@@ -340,10 +367,10 @@ export function syncSqliteIndex(workspaceRoot = process.cwd()) {
   // Prepared Statements
   const insertMeta = db.prepare(`
     INSERT INTO memories (
-      workspace_id, layer, slug, domain, type, verified, trigger, path, mtime, applies_to,
+      workspace_id, layer, slug, domain, type, verified, trigger, path, mtime,
       trigger_vector, content_vector, entity_vector
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(workspace_id, layer, slug) DO UPDATE SET
       domain=excluded.domain,
       type=excluded.type,
@@ -351,7 +378,6 @@ export function syncSqliteIndex(workspaceRoot = process.cwd()) {
       trigger=excluded.trigger,
       path=excluded.path,
       mtime=excluded.mtime,
-      applies_to=excluded.applies_to,
       trigger_vector=excluded.trigger_vector,
       content_vector=excluded.content_vector,
       entity_vector=excluded.entity_vector
@@ -385,11 +411,9 @@ export function syncSqliteIndex(workspaceRoot = process.cwd()) {
       const type = fm.type || 'general';
       const verified = fm.verified || '';
       const trigger = fm.description || fm.trigger || '';
-      const appliesTo = fm.applies_to ? JSON.stringify(fm.applies_to) : '';
 
       const multiVec = generateMultiVector({
         trigger,
-        applies_to: fm.applies_to,
         body: parsed.body,
         slug: item.slug,
         domain,
@@ -407,7 +431,6 @@ export function syncSqliteIndex(workspaceRoot = process.cwd()) {
         trigger,
         item.filePath,
         item.mtime,
-        appliesTo,
         JSON.stringify(multiVec.trigger_vector),
         JSON.stringify(multiVec.content_vector),
         JSON.stringify(multiVec.entity_vector)
@@ -471,7 +494,6 @@ function searchMemoriesFileBasedFallback(workspaceRoot, queryText, options = {})
 
     const multiVec = generateMultiVector({
       trigger: entry.trigger,
-      applies_to: entry.applies_to,
       body,
       slug: entry.slug,
       domain: entry.domain,
@@ -556,7 +578,7 @@ export function searchMemoriesHybrid(workspaceRoot, queryText, options = {}) {
 
   // 2. Multi-Vector Semantic Retrieval across all active candidates
   const allRows = db.prepare(`
-    SELECT m.slug, m.layer, m.workspace_id, m.domain, m.type, m.trigger, m.applies_to,
+    SELECT m.slug, m.layer, m.workspace_id, m.domain, m.type, m.trigger,
            m.trigger_vector, m.content_vector, m.entity_vector
     FROM memories m
     WHERE (m.workspace_id = ? OR m.workspace_id = 'global')
@@ -582,7 +604,6 @@ export function searchMemoriesHybrid(workspaceRoot, queryText, options = {}) {
     if (!multiVec) {
       multiVec = generateMultiVector({
         trigger: row.trigger,
-        applies_to: row.applies_to ? JSON.parse(row.applies_to) : null,
         body: '',
         slug: row.slug,
         domain: row.domain,
@@ -715,7 +736,10 @@ export function getKnowledgeGraphData(workspaceRoot) {
     rawNodes = db.prepare(`
       SELECT m.slug as id, m.slug, m.layer, m.domain, m.type, m.verified, m.trigger as description,
              COALESCE(t.applied_count, 0) as applied_count,
-             COALESCE(t.recalled_count, 0) as recalled_count
+             COALESCE(t.recalled_count, 0) as recalled_count,
+             COALESCE(t.test_pass_count, 0) as test_pass_count,
+             COALESCE(t.test_fail_count, 0) as test_fail_count,
+             COALESCE(t.efficacy_score, 1.0) as efficacy_score
       FROM memories m
       LEFT JOIN telemetry t ON m.slug = t.slug
       WHERE m.workspace_id = ? OR m.workspace_id = 'global'
@@ -740,7 +764,10 @@ export function getKnowledgeGraphData(workspaceRoot) {
       verified: e.verified,
       description: e.trigger,
       applied_count: tele[e.slug]?.applied_count || 0,
-      recalled_count: tele[e.slug]?.recalled_count || 0
+      recalled_count: tele[e.slug]?.recalled_count || 0,
+      test_pass_count: tele[e.slug]?.test_pass_count || 0,
+      test_fail_count: tele[e.slug]?.test_fail_count || 0,
+      efficacy_score: typeof tele[e.slug]?.efficacy_score === 'number' ? tele[e.slug].efficacy_score : 1.0
     }));
 
     for (const entry of activeEntries) {
@@ -793,6 +820,10 @@ export function getKnowledgeGraphData(workspaceRoot) {
     }
   }
 
+  const avgEfficacy = nodes.length
+    ? Number((nodes.reduce((acc, n) => acc + (n.efficacy_score || 1.0), 0) / nodes.length).toFixed(2))
+    : 1.0;
+
   return {
     nodes,
     links: validLinks,
@@ -801,7 +832,8 @@ export function getKnowledgeGraphData(workspaceRoot) {
       totalNodes: nodes.length,
       totalLinks: validLinks.length,
       brokenLinksCount: brokenLinks.length,
-      domains: [...new Set(nodes.map(n => n.domain))]
+      domains: [...new Set(nodes.map(n => n.domain))],
+      avgEfficacyScore: avgEfficacy
     }
   };
 }
@@ -827,32 +859,45 @@ function writeTelemetryJson(data) {
 }
 
 /**
- * Records telemetry events (recall or application) for memory utility scoring.
+ * Records telemetry events and verification feedback for memory utility and efficacy scoring.
  * Works seamlessly across both SQLite and JSON fallback modes.
  */
-export function recordTelemetryEvent(slug, eventType = 'recall') {
+export function recordTelemetryEvent(slug, eventType = 'recall', details = {}) {
   if (!slug) return;
   const db = getDatabase();
   const nowIso = new Date().toISOString();
 
   if (db) {
     try {
+      db.prepare(`
+        INSERT OR IGNORE INTO telemetry (slug, recalled_count, applied_count, test_pass_count, test_fail_count, efficacy_score)
+        VALUES (?, 0, 0, 0, 0, 1.0)
+      `).run(slug);
+
       if (eventType === 'apply') {
         db.prepare(`
-          INSERT INTO telemetry (slug, applied_count, last_applied)
-          VALUES (?, 1, ?)
-          ON CONFLICT(slug) DO UPDATE SET
-            applied_count = applied_count + 1,
-            last_applied = excluded.last_applied
-        `).run(slug, nowIso);
+          UPDATE telemetry SET applied_count = applied_count + 1, last_applied = ? WHERE slug = ?
+        `).run(nowIso, slug);
+      } else if (eventType === 'test_pass') {
+        db.prepare(`
+          UPDATE telemetry 
+          SET test_pass_count = test_pass_count + 1,
+              efficacy_score = MIN(1.0, efficacy_score + 0.05),
+              last_feedback = ?
+          WHERE slug = ?
+        `).run(details.message || 'test_passed', slug);
+      } else if (eventType === 'test_fail') {
+        db.prepare(`
+          UPDATE telemetry 
+          SET test_fail_count = test_fail_count + 1,
+              efficacy_score = MAX(0.1, efficacy_score - 0.20),
+              last_feedback = ?
+          WHERE slug = ?
+        `).run(details.message || 'test_failed', slug);
       } else {
         db.prepare(`
-          INSERT INTO telemetry (slug, recalled_count, last_recalled)
-          VALUES (?, 1, ?)
-          ON CONFLICT(slug) DO UPDATE SET
-            recalled_count = recalled_count + 1,
-            last_recalled = excluded.last_recalled
-        `).run(slug, nowIso);
+          UPDATE telemetry SET recalled_count = recalled_count + 1, last_recalled = ? WHERE slug = ?
+        `).run(nowIso, slug);
       }
       return;
     } catch {}
@@ -861,16 +906,93 @@ export function recordTelemetryEvent(slug, eventType = 'recall') {
   // Fallback to telemetry.json
   const data = readTelemetryJson();
   if (!data[slug]) {
-    data[slug] = { recalled_count: 0, applied_count: 0, last_recalled: null, last_applied: null };
+    data[slug] = {
+      recalled_count: 0,
+      applied_count: 0,
+      test_pass_count: 0,
+      test_fail_count: 0,
+      efficacy_score: 1.0,
+      last_recalled: null,
+      last_applied: null,
+      last_feedback: null
+    };
   }
   if (eventType === 'apply') {
     data[slug].applied_count = (data[slug].applied_count || 0) + 1;
     data[slug].last_applied = nowIso;
+  } else if (eventType === 'test_pass') {
+    data[slug].test_pass_count = (data[slug].test_pass_count || 0) + 1;
+    data[slug].efficacy_score = Math.min(1.0, (data[slug].efficacy_score || 1.0) + 0.05);
+    data[slug].last_feedback = details.message || 'test_passed';
+  } else if (eventType === 'test_fail') {
+    data[slug].test_fail_count = (data[slug].test_fail_count || 0) + 1;
+    data[slug].efficacy_score = Math.max(0.1, (data[slug].efficacy_score || 1.0) - 0.20);
+    data[slug].last_feedback = details.message || 'test_failed';
   } else {
     data[slug].recalled_count = (data[slug].recalled_count || 0) + 1;
     data[slug].last_recalled = nowIso;
   }
   writeTelemetryJson(data);
+}
+
+/**
+ * Public command: Explicitly records memory efficacy feedback (test_pass, test_fail, applied).
+ */
+export function recordMemoryEfficacy(slug, feedbackType, details = {}) {
+  recordTelemetryEvent(slug, feedbackType, details);
+  const db = getDatabase();
+  if (db) {
+    try {
+      const row = db.prepare('SELECT * FROM telemetry WHERE slug = ?').get(slug);
+      if (row) return row;
+    } catch {}
+  }
+  const data = readTelemetryJson();
+  return data[slug] || { slug, efficacy_score: 1.0 };
+}
+
+/**
+ * Zero-Turn Proactive Recall Probe.
+ * Evaluates natural language input or working context against indexed memory triggers
+ * using dense vector embeddings in < 5ms. Returns advisory banners for high-confidence matches.
+ *
+ * @param {string} workspaceRoot
+ * @param {string} queryOrContext
+ * @param {Object} options
+ * @returns {Object} Proactive probe matches and advisory system messages
+ */
+export function proactiveMemoryProbe(workspaceRoot = process.cwd(), queryOrContext = '', options = {}) {
+  if (!queryOrContext || typeof queryOrContext !== 'string' || !queryOrContext.trim()) {
+    return { triggered: false, count: 0, matches: [], advisoryMessage: '' };
+  }
+
+  const threshold = typeof options.threshold === 'number' ? options.threshold : 0.55;
+  const limit = options.limit || 3;
+  const matches = searchMemoriesHybrid(workspaceRoot, queryOrContext, {
+    limit,
+    mode: 'hybrid'
+  });
+
+  const highConfidence = matches.filter(m => (m.confidenceDecimal || m.confidence / 100) >= threshold);
+
+  if (highConfidence.length === 0) {
+    return { triggered: false, count: 0, matches: [], advisoryMessage: '' };
+  }
+
+  const bullets = highConfidence.map(m => {
+    return `- **[${m.layer}] ${m.slug}** (${m.confidence}% match): ${m.description}`;
+  });
+
+  const advisoryMessage = `> [!NOTE]\n> 🧠 **Proactive Knowledge Advisory (${highConfidence.length} relevant convention(s) detected):**\n` +
+    bullets.join('\n') +
+    `\n> Recall full guidance anytime via \`get_memory_content(slug="...")\`.\n`;
+
+  return {
+    triggered: true,
+    count: highConfidence.length,
+    matches: highConfidence,
+    advisoryMessage
+  };
 }
 
 /**
@@ -922,7 +1044,7 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd()) {
       border: 1px solid var(--border);
       border-radius: 12px;
       padding: 16px;
-      width: 320px;
+      width: 330px;
       display: flex;
       flex-direction: column;
       gap: 12px;
@@ -930,8 +1052,9 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd()) {
     }
 
     h1 { font-size: 16px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
-    .metrics { font-size: 12px; color: var(--text-muted); display: flex; gap: 12px; }
+    .metrics { font-size: 11px; color: var(--text-muted); display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
     .metric-badge { background: #0f172a; padding: 4px 8px; border-radius: 6px; border: 1px solid var(--border); }
+    .metric-badge strong { color: var(--text); }
 
     input#search {
       width: 100%;
@@ -942,9 +1065,9 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd()) {
       color: var(--text);
       font-size: 13px;
     }
-    input#search:focus { outline: none; border-color: #3b82f6; }
+    input#search:focus { outline: none; border-color: #38bdf8; }
 
-    .domains { display: flex; flex-wrap: wrap; gap: 6px; max-height: 120px; overflow-y: auto; }
+    .domains { display: flex; flex-wrap: wrap; gap: 6px; max-height: 90px; overflow-y: auto; }
     .domain-chip {
       font-size: 11px;
       padding: 3px 8px;
@@ -956,7 +1079,38 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd()) {
     }
     .domain-chip.active { background: #3b82f6; color: white; }
 
-    .legend { display: flex; flex-direction: column; gap: 6px; font-size: 11px; color: var(--text-muted); }
+    .studio-actions { display: flex; flex-direction: column; gap: 8px; border-top: 1px solid var(--border); padding-top: 10px; }
+    .studio-btn {
+      background: #334155;
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 8px 12px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      transition: all 0.15s;
+    }
+    .studio-btn:hover { background: #475569; }
+    .studio-btn.active { background: #f59e0b; color: #000; border-color: #f59e0b; }
+    .studio-btn.btn-primary { background: #2563eb; border-color: #3b82f6; }
+    .studio-btn.btn-primary:hover { background: #1d4ed8; }
+
+    .banner {
+      font-size: 11px;
+      padding: 6px 10px;
+      border-radius: 6px;
+      background: rgba(245, 158, 11, 0.15);
+      border: 1px solid #f59e0b;
+      color: #f59e0b;
+    }
+    .hidden { display: none !important; }
+
+    .legend { display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: var(--text-muted); border-top: 1px solid var(--border); padding-top: 8px; }
     .legend-item { display: flex; align-items: center; gap: 8px; }
     .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
 
@@ -968,8 +1122,8 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd()) {
       top: 16px;
       right: 16px;
       bottom: 16px;
-      width: 360px;
-      background: rgba(30, 41, 59, 0.95);
+      width: 380px;
+      background: rgba(30, 41, 59, 0.96);
       backdrop-filter: blur(12px);
       border: 1px solid var(--border);
       border-radius: 12px;
@@ -985,22 +1139,148 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd()) {
     .close-btn { align-self: flex-end; background: none; border: none; color: var(--text-muted); font-size: 18px; cursor: pointer; }
     .drawer-title { font-size: 16px; font-weight: 600; color: #fff; word-break: break-all; }
     .drawer-badge { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 12px; text-transform: uppercase; font-weight: 600; }
-    .drawer-desc { font-size: 13px; line-height: 1.5; color: #cbd5e1; }
-    .drawer-section { border-top: 1px solid var(--border); padding-top: 10px; }
-    .drawer-section h3 { font-size: 12px; text-transform: uppercase; color: var(--text-muted); margin-bottom: 6px; }
-    .link-pill { display: inline-block; font-size: 11px; background: #0f172a; border: 1px solid var(--border); padding: 4px 8px; border-radius: 4px; margin: 2px; }
+    .drawer-section { border-top: 1px solid var(--border); padding-top: 10px; display: flex; flex-direction: column; gap: 8px; }
+    .drawer-section h3 { font-size: 12px; text-transform: uppercase; color: var(--text-muted); }
+
+    .form-group { display: flex; flex-direction: column; gap: 4px; }
+    .form-label { font-size: 11px; font-weight: 600; color: var(--text-muted); }
+    .studio-input, .studio-textarea {
+      background: #0f172a;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 6px 10px;
+      color: var(--text);
+      font-size: 12px;
+      font-family: inherit;
+      width: 100%;
+    }
+    .studio-input:focus, .studio-textarea:focus { outline: none; border-color: #38bdf8; }
+    .verified-row { display: flex; gap: 6px; align-items: center; }
+
+    .small-btn {
+      background: #334155;
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 4px 8px;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: background 0.15s;
+    }
+    .small-btn:hover { background: #475569; }
+    .small-btn.btn-success { background: rgba(16, 185, 129, 0.2); border-color: #10b981; color: #10b981; }
+    .small-btn.btn-success:hover { background: rgba(16, 185, 129, 0.4); }
+    .small-btn.btn-danger { background: rgba(239, 68, 68, 0.2); border-color: #ef4444; color: #ef4444; }
+    .small-btn.btn-danger:hover { background: rgba(239, 68, 68, 0.4); }
+
+    .efficacy-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 10px;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 600;
+      background: #0f172a;
+      border: 1px solid var(--border);
+    }
+
+    .link-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: #0f172a;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 5px 8px;
+      font-size: 11px;
+    }
+    .disconnect-btn {
+      color: #ef4444;
+      background: none;
+      border: none;
+      cursor: pointer;
+      font-size: 13px;
+      padding: 0 4px;
+    }
+
+    /* Modal */
+    #patch-modal {
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0, 0, 0, 0.7);
+      backdrop-filter: blur(4px);
+      z-index: 50;
+      display: none;
+      align-items: center;
+      justify-content: center;
+    }
+    #patch-modal.open { display: flex; }
+    .modal-box {
+      background: #1e293b;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      width: 600px;
+      max-width: 90vw;
+      max-height: 85vh;
+      display: flex;
+      flex-direction: column;
+      box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.7);
+    }
+    .modal-header {
+      padding: 16px 20px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .modal-body {
+      padding: 20px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .modal-body pre {
+      background: #0f172a;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 12px;
+      font-family: monospace;
+      font-size: 12px;
+      color: #38bdf8;
+      overflow-x: auto;
+      max-height: 320px;
+    }
+    .modal-footer {
+      padding: 16px 20px;
+      border-top: 1px solid var(--border);
+      display: flex;
+      justify-content: flex-end;
+      gap: 10px;
+    }
   </style>
 </head>
 <body>
   <div id="controls">
-    <h1>🧠 Knowledge Graph</h1>
+    <h1>🧠 Memory Studio</h1>
     <div class="metrics">
-      <div class="metric-badge">Nodes: <span id="m-nodes">0</span></div>
-      <div class="metric-badge">Edges: <span id="m-links">0</span></div>
-      <div class="metric-badge">Domains: <span id="m-domains">0</span></div>
+      <div class="metric-badge">Nodes: <strong id="m-nodes">0</strong></div>
+      <div class="metric-badge">Edges: <strong id="m-links">0</strong></div>
+      <div class="metric-badge">Domains: <strong id="m-domains">0</strong></div>
+      <div class="metric-badge">Avg Efficacy: <strong id="m-efficacy">100%</strong></div>
     </div>
     <input type="text" id="search" placeholder="Search memory slugs or triggers...">
     <div class="domains" id="domain-chips"></div>
+
+    <div class="studio-actions">
+      <button id="btn-connect-mode" class="studio-btn">🔗 Connect Mode: OFF</button>
+      <div id="connect-banner" class="banner hidden">Connect Mode: Click Source node, then Target node</div>
+      <button id="btn-export-patch" class="studio-btn btn-primary">📦 Export Staged Patch (<span id="staged-count">0</span>)</button>
+    </div>
+
     <div class="legend">
       <div class="legend-item"><span class="dot" style="background:var(--workspace-color)"></span> Workspace Scoped (.agents/)</div>
       <div class="legend-item"><span class="dot" style="background:var(--private-color)"></span> Private Layer (~/.gemini/private/)</div>
@@ -1016,28 +1296,96 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd()) {
   <div id="drawer">
     <button class="close-btn" id="drawer-close">&times;</button>
     <div class="drawer-title" id="d-title"></div>
-    <div><span class="drawer-badge" id="d-badge"></span> <span style="font-size: 12px; color: var(--text-muted);" id="d-domain"></span></div>
-    <div class="drawer-desc" id="d-desc"></div>
+    <div><span class="drawer-badge" id="d-badge"></span> <span style="font-size: 12px; color: var(--text-muted);" id="d-type"></span></div>
+
     <div class="drawer-section">
-      <h3>Operational Utility</h3>
-      <div style="font-size: 12px;" id="d-utility"></div>
+      <h3>Memory Metadata Editor</h3>
+      <div class="form-group">
+        <label class="form-label" for="edit-domain">Domain</label>
+        <input type="text" id="edit-domain" class="studio-input" />
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="edit-desc">Trigger Condition / Description</label>
+        <textarea id="edit-desc" class="studio-textarea" rows="3"></textarea>
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="edit-verified">Verified Date</label>
+        <div class="verified-row">
+          <input type="date" id="edit-verified" class="studio-input" />
+          <button id="btn-bump-today" class="small-btn">📅 Bump to Today</button>
+        </div>
+      </div>
+      <button id="btn-stage-node" class="studio-btn btn-primary" style="margin-top:4px;">💾 Stage Node Edits</button>
+      <span id="stage-feedback" style="font-size:11px;color:#10b981;display:none;text-align:center;">✓ Edits staged!</span>
     </div>
+
     <div class="drawer-section">
-      <h3>Connected Lateral Memories (1-Hop Graph)</h3>
-      <div id="d-links"></div>
+      <h3>Operational Utility & Efficacy</h3>
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <span class="form-label">Efficacy Score:</span>
+        <div class="efficacy-badge" id="d-efficacy-badge">100%</div>
+      </div>
+      <div style="font-size: 12px; color: var(--text-muted);" id="d-utility-stats"></div>
+      <div style="display:flex; gap:6px; margin-top:4px;">
+        <button id="btn-feedback-pass" class="small-btn btn-success" style="flex:1;">👍 Pass (+5%)</button>
+        <button id="btn-feedback-fail" class="small-btn btn-danger" style="flex:1;">👎 Fail (-20%)</button>
+      </div>
+    </div>
+
+    <div class="drawer-section">
+      <h3>Lateral Memory Links</h3>
+      <div id="d-links-list" style="display:flex; flex-direction:column; gap:4px;"></div>
+    </div>
+  </div>
+
+  <div id="patch-modal">
+    <div class="modal-box">
+      <div class="modal-header">
+        <h2 style="font-size: 16px;">📦 Staged Memory Patch</h2>
+        <button class="close-btn" id="modal-close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div id="patch-summary" style="font-size:13px; color: var(--text-muted);"></div>
+        <pre><code id="patch-code"></code></pre>
+      </div>
+      <div class="modal-footer">
+        <button id="btn-copy-patch" class="studio-btn">📋 Copy JSON</button>
+        <button id="btn-download-patch" class="studio-btn btn-primary">⬇️ Download patch.json</button>
+      </div>
     </div>
   </div>
 
   <script>
     const data = ${dataJson};
 
-    document.getElementById('m-nodes').textContent = data.nodes.length;
-    document.getElementById('m-links').textContent = data.links.length;
-    document.getElementById('m-domains').textContent = data.summary.domains.length;
+    // Staged modifications store
+    const staged = {
+      nodeUpdates: {},
+      addedLinks: [],
+      removedLinks: []
+    };
 
-    const domainChipsContainer = document.getElementById('domain-chips');
+    let connectMode = false;
+    let connectSourceNode = null;
+    let selectedNode = null;
     let selectedDomain = null;
 
+    function updateSummaryMetrics() {
+      document.getElementById('m-nodes').textContent = data.nodes.length;
+      document.getElementById('m-links').textContent = data.links.length;
+      document.getElementById('m-domains').textContent = [...new Set(data.nodes.map(n => n.domain))].length;
+      const avgEff = data.nodes.length
+        ? Math.round((data.nodes.reduce((acc, n) => acc + (n.efficacy_score !== undefined ? n.efficacy_score : 1.0), 0) / data.nodes.length) * 100)
+        : 100;
+      document.getElementById('m-efficacy').textContent = avgEff + '%';
+      
+      const stagedCount = Object.keys(staged.nodeUpdates).length + staged.addedLinks.length + staged.removedLinks.length;
+      document.getElementById('staged-count').textContent = stagedCount;
+    }
+
+    updateSummaryMetrics();
+
+    const domainChipsContainer = document.getElementById('domain-chips');
     data.summary.domains.forEach(d => {
       const chip = document.createElement('div');
       chip.className = 'domain-chip';
@@ -1060,61 +1408,87 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd()) {
     const width = window.innerWidth;
     const height = window.innerHeight;
 
+    const defs = svg.append("defs");
+    defs.append("marker")
+      .attr("id", "arrow-overrides")
+      .attr("viewBox", "0 -5 10 10")
+      .attr("refX", 20)
+      .attr("refY", 0)
+      .attr("markerWidth", 6)
+      .attr("markerHeight", 6)
+      .attr("orient", "auto")
+      .append("path")
+      .attr("d", "M0,-5L10,0L0,5")
+      .attr("fill", "#f59e0b");
+
     const g = svg.append("g");
     svg.call(d3.zoom().scaleExtent([0.1, 4]).on("zoom", (event) => g.attr("transform", event.transform)));
 
     const simulation = d3.forceSimulation(data.nodes)
-      .force("link", d3.forceLink(data.links).id(d => d.id).distance(80))
-      .force("charge", d3.forceManyBody().strength(-250))
+      .force("link", d3.forceLink(data.links).id(d => d.id).distance(90))
+      .force("charge", d3.forceManyBody().strength(-280))
       .force("center", d3.forceCenter(width / 2, height / 2))
-      .force("collide", d3.forceCollide().radius(d => getRadius(d) + 12));
+      .force("collide", d3.forceCollide().radius(d => getRadius(d) + 14));
 
-    const link = g.append("g")
-      .selectAll("line")
-      .data(data.links)
-      .enter().append("line")
-      .attr("stroke", d => d.type === 'overrides' ? "#f59e0b" : "#475569")
-      .attr("stroke-width", d => d.type === 'overrides' ? 2 : 1.5)
-      .attr("stroke-dasharray", d => d.type === 'overrides' ? "none" : "4 4");
+    let linkElements = g.append("g").attr("class", "links").selectAll("line");
+    let nodeElements = g.append("g").attr("class", "nodes").selectAll("circle");
+    let labelElements = g.append("g").attr("class", "labels").selectAll("text");
 
-    const node = g.append("g")
-      .selectAll("circle")
-      .data(data.nodes)
-      .enter().append("circle")
-      .attr("r", d => getRadius(d))
-      .attr("fill", d => getNodeColor(d.layer))
-      .attr("stroke", d => d.stale ? "#ef4444" : "#ffffff")
-      .attr("stroke-width", d => d.stale ? 2.5 : 1)
-      .attr("cursor", "pointer")
-      .call(d3.drag()
-        .on("start", dragstarted)
-        .on("drag", dragged)
-        .on("end", dragended))
-      .on("click", (event, d) => showDrawer(d));
+    function renderGraphElements() {
+      linkElements = linkElements.data(data.links, d => \`\${d.source.id || d.source}-\${d.target.id || d.target}\`);
+      linkElements.exit().remove();
+      const linkEnter = linkElements.enter().append("line")
+        .attr("stroke", d => d.type === 'overrides' ? "#f59e0b" : "#475569")
+        .attr("stroke-width", d => d.type === 'overrides' ? 2 : 1.5)
+        .attr("stroke-dasharray", d => d.type === 'overrides' ? "none" : "4 4")
+        .attr("marker-end", d => d.type === 'overrides' ? "url(#arrow-overrides)" : null);
+      linkElements = linkEnter.merge(linkElements);
 
-    const label = g.append("g")
-      .selectAll("text")
-      .data(data.nodes)
-      .enter().append("text")
-      .text(d => d.slug)
-      .attr("font-size", 10)
-      .attr("fill", "#cbd5e1")
-      .attr("dx", 12)
-      .attr("dy", 4)
-      .attr("pointer-events", "none");
+      nodeElements = nodeElements.data(data.nodes, d => d.id);
+      nodeElements.exit().remove();
+      const nodeEnter = nodeElements.enter().append("circle")
+        .attr("r", d => getRadius(d))
+        .attr("fill", d => getNodeColor(d.layer))
+        .attr("stroke", d => d.stale ? "#ef4444" : "#ffffff")
+        .attr("stroke-width", d => d.stale ? 2.5 : 1)
+        .attr("cursor", "pointer")
+        .call(d3.drag()
+          .on("start", dragstarted)
+          .on("drag", dragged)
+          .on("end", dragended))
+        .on("click", (event, d) => onNodeClicked(event, d));
+      nodeElements = nodeEnter.merge(nodeElements);
+
+      labelElements = labelElements.data(data.nodes, d => d.id);
+      labelElements.exit().remove();
+      const labelEnter = labelElements.enter().append("text")
+        .text(d => d.slug)
+        .attr("font-size", 10)
+        .attr("fill", "#cbd5e1")
+        .attr("dx", 14)
+        .attr("dy", 4)
+        .attr("pointer-events", "none");
+      labelElements = labelEnter.merge(labelElements);
+
+      simulation.nodes(data.nodes);
+      simulation.force("link").links(data.links);
+      simulation.alpha(0.3).restart();
+    }
+
+    renderGraphElements();
 
     simulation.on("tick", () => {
-      link
+      linkElements
         .attr("x1", d => d.source.x)
         .attr("y1", d => d.source.y)
         .attr("x2", d => d.target.x)
         .attr("y2", d => d.target.y);
 
-      node
+      nodeElements
         .attr("cx", d => d.x)
         .attr("cy", d => d.y);
 
-      label
+      labelElements
         .attr("x", d => d.x)
         .attr("y", d => d.y);
     });
@@ -1146,24 +1520,89 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd()) {
       d.fy = null;
     }
 
+    // Connect Mode Toggle
+    const btnConnectMode = document.getElementById('btn-connect-mode');
+    const connectBanner = document.getElementById('connect-banner');
+
+    btnConnectMode.onclick = () => {
+      connectMode = !connectMode;
+      connectSourceNode = null;
+      if (connectMode) {
+        btnConnectMode.classList.add('active');
+        btnConnectMode.textContent = '🔗 Connect Mode: ACTIVE';
+        connectBanner.classList.remove('hidden');
+        document.body.style.cursor = 'crosshair';
+      } else {
+        btnConnectMode.classList.remove('active');
+        btnConnectMode.textContent = '🔗 Connect Mode: OFF';
+        connectBanner.classList.add('hidden');
+        document.body.style.cursor = 'default';
+        nodeElements.attr('stroke', d => d.stale ? '#ef4444' : '#ffffff');
+      }
+    };
+
+    function onNodeClicked(event, d) {
+      if (connectMode) {
+        if (!connectSourceNode) {
+          connectSourceNode = d;
+          connectBanner.textContent = \`Source selected: \${d.slug}. Now click target node.\`;
+          nodeElements.attr('stroke', n => n.id === d.id ? '#f59e0b' : (n.stale ? '#ef4444' : '#ffffff'))
+            .attr('stroke-width', n => n.id === d.id ? 4 : (n.stale ? 2.5 : 1));
+        } else if (connectSourceNode.id === d.id) {
+          connectSourceNode = null;
+          connectBanner.textContent = 'Connect Mode: Click Source node, then Target node';
+          nodeElements.attr('stroke', n => n.stale ? '#ef4444' : '#ffffff')
+            .attr('stroke-width', n => n.stale ? 2.5 : 1);
+        } else {
+          // Connect connectSourceNode -> d
+          const relType = window.confirm(\`Create 'overrides' link from \${connectSourceNode.slug} -> \${d.slug}?\\n(Click OK for 'overrides', Cancel for 'related')\`) ? 'overrides' : 'related';
+          const newLink = {
+            source: connectSourceNode,
+            target: d,
+            type: relType
+          };
+          data.links.push(newLink);
+          staged.addedLinks.push({
+            sourceSlug: connectSourceNode.slug,
+            targetSlug: d.slug,
+            type: relType
+          });
+          updateSummaryMetrics();
+          renderGraphElements();
+
+          connectSourceNode = null;
+          connectBanner.textContent = 'Link created! Click next source or toggle off Connect Mode.';
+          nodeElements.attr('stroke', n => n.stale ? '#ef4444' : '#ffffff')
+            .attr('stroke-width', n => n.stale ? 2.5 : 1);
+        }
+        return;
+      }
+
+      showDrawer(d);
+    }
+
     const searchInput = document.getElementById('search');
     searchInput.addEventListener('input', updateHighlights);
 
     function updateHighlights() {
       const query = searchInput.value.toLowerCase().trim();
-      node.attr("opacity", d => {
+      nodeElements.attr("opacity", d => {
         const matchesQuery = !query || d.slug.toLowerCase().includes(query) || (d.description && d.description.toLowerCase().includes(query));
         const matchesDomain = !selectedDomain || d.domain === selectedDomain;
         return (matchesQuery && matchesDomain) ? 1.0 : 0.15;
       });
-      label.attr("opacity", d => {
+      labelElements.attr("opacity", d => {
         const matchesQuery = !query || d.slug.toLowerCase().includes(query) || (d.description && d.description.toLowerCase().includes(query));
         const matchesDomain = !selectedDomain || d.domain === selectedDomain;
         return (matchesQuery && matchesDomain) ? 1.0 : 0.15;
       });
-      link.attr("opacity", d => {
-        const srcMatch = (!query || d.source.slug.toLowerCase().includes(query)) && (!selectedDomain || d.source.domain === selectedDomain);
-        const tgtMatch = (!query || d.target.slug.toLowerCase().includes(query)) && (!selectedDomain || d.target.domain === selectedDomain);
+      linkElements.attr("opacity", d => {
+        const sSlug = d.source.slug || '';
+        const tSlug = d.target.slug || '';
+        const sDom = d.source.domain || '';
+        const tDom = d.target.domain || '';
+        const srcMatch = (!query || sSlug.toLowerCase().includes(query)) && (!selectedDomain || sDom === selectedDomain);
+        const tgtMatch = (!query || tSlug.toLowerCase().includes(query)) && (!selectedDomain || tDom === selectedDomain);
         return (srcMatch && tgtMatch) ? 0.8 : 0.05;
       });
     }
@@ -1172,6 +1611,7 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd()) {
     document.getElementById('drawer-close').onclick = () => drawer.classList.remove('open');
 
     function showDrawer(d) {
+      selectedNode = d;
       drawer.classList.add('open');
       document.getElementById('d-title').textContent = d.slug;
       const badge = document.getElementById('d-badge');
@@ -1179,31 +1619,177 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd()) {
       badge.style.background = getNodeColor(d.layer);
       badge.style.color = '#fff';
 
-      document.getElementById('d-domain').textContent = \`[\${d.domain}] • \${d.type}\`;
-      document.getElementById('d-desc').textContent = d.description || 'No trigger condition defined.';
-      document.getElementById('d-utility').innerHTML = \`
+      document.getElementById('d-type').textContent = \`[\${d.type || 'convention'}]\`;
+
+      // Fill editable fields (checking staged overrides first)
+      const stagedUpdate = staged.nodeUpdates[d.slug] || {};
+      document.getElementById('edit-domain').value = stagedUpdate.domain !== undefined ? stagedUpdate.domain : (d.domain || '');
+      document.getElementById('edit-desc').value = stagedUpdate.description !== undefined ? stagedUpdate.description : (d.description || '');
+      document.getElementById('edit-verified').value = stagedUpdate.verified !== undefined ? stagedUpdate.verified : (d.verified || '');
+
+      renderUtilityStats(d);
+      renderLinksList(d);
+      document.getElementById('stage-feedback').style.display = 'none';
+    }
+
+    function renderUtilityStats(d) {
+      const eff = Math.round((d.efficacy_score !== undefined ? d.efficacy_score : 1.0) * 100);
+      const effBadge = document.getElementById('d-efficacy-badge');
+      effBadge.textContent = eff + '%';
+      effBadge.style.color = eff >= 80 ? '#10b981' : (eff >= 50 ? '#f59e0b' : '#ef4444');
+
+      document.getElementById('d-utility-stats').innerHTML = \`
         <div>• <strong>Applied Count:</strong> \${d.applied_count || 0} times</div>
         <div>• <strong>Recalled Count:</strong> \${d.recalled_count || 0} times</div>
-        <div>• <strong>Verified Date:</strong> \${d.verified || 'Missing'} \${d.stale ? '<span style=\"color:#ef4444\">(STALE > 180d)</span>' : '✅'}</div>
+        <div>• <strong>Test Passes:</strong> \${d.test_pass_count || 0} | <strong>Fails:</strong> \${d.test_fail_count || 0}</div>
+        <div>• <strong>Status:</strong> \${d.stale ? '<span style=\"color:#ef4444\">(STALE > 180d)</span>' : 'Verified & Active ✅'}</div>
+      \`;
+    }
+
+    function renderLinksList(d) {
+      const linksContainer = document.getElementById('d-links-list');
+      linksContainer.innerHTML = '';
+
+      const connectedLinks = data.links.filter(l => {
+        const sId = l.source.id || l.source;
+        const tId = l.target.id || l.target;
+        return sId === d.id || tId === d.id;
+      });
+
+      if (connectedLinks.length === 0) {
+        linksContainer.innerHTML = '<span style=\"font-size: 11px; color: var(--text-muted);\">No lateral connections.</span>';
+        return;
+      }
+
+      connectedLinks.forEach(l => {
+        const sId = l.source.id || l.source;
+        const targetObj = sId === d.id ? l.target : l.source;
+        const targetSlug = targetObj.slug || targetObj.id || targetObj;
+
+        const item = document.createElement('div');
+        item.className = 'link-item';
+        item.innerHTML = \`
+          <span>\${l.type === 'overrides' ? '⚠️ overrides' : '🔗 related'}: <strong>\${targetSlug}</strong></span>
+          <button class=\"disconnect-btn\" title=\"Remove link\">&times;</button>
+        \`;
+        item.querySelector('.disconnect-btn').onclick = () => {
+          data.links = data.links.filter(link => link !== l);
+          staged.removedLinks.push({
+            sourceSlug: (l.source.slug || l.source.id),
+            targetSlug: (l.target.slug || l.target.id),
+            type: l.type
+          });
+          updateSummaryMetrics();
+          renderGraphElements();
+          renderLinksList(d);
+        };
+        linksContainer.appendChild(item);
+      });
+    }
+
+    // Bump to Today
+    document.getElementById('btn-bump-today').onclick = () => {
+      const today = new Date().toISOString().slice(0, 10);
+      document.getElementById('edit-verified').value = today;
+    };
+
+    // Stage Node Edits
+    document.getElementById('btn-stage-node').onclick = () => {
+      if (!selectedNode) return;
+      const newDomain = document.getElementById('edit-domain').value.trim();
+      const newDesc = document.getElementById('edit-desc').value.trim();
+      const newVerified = document.getElementById('edit-verified').value.trim();
+
+      staged.nodeUpdates[selectedNode.slug] = {
+        slug: selectedNode.slug,
+        layer: selectedNode.layer,
+        domain: newDomain,
+        description: newDesc,
+        verified: newVerified
+      };
+
+      // Update in memory node object
+      selectedNode.domain = newDomain;
+      selectedNode.description = newDesc;
+      selectedNode.verified = newVerified;
+      selectedNode.stale = false;
+
+      updateSummaryMetrics();
+      renderGraphElements();
+      renderUtilityStats(selectedNode);
+
+      const fb = document.getElementById('stage-feedback');
+      fb.style.display = 'block';
+      setTimeout(() => { fb.style.display = 'none'; }, 2500);
+    };
+
+    // Quick Feedback buttons
+    document.getElementById('btn-feedback-pass').onclick = () => {
+      if (!selectedNode) return;
+      selectedNode.test_pass_count = (selectedNode.test_pass_count || 0) + 1;
+      selectedNode.efficacy_score = Math.min(1.0, (selectedNode.efficacy_score !== undefined ? selectedNode.efficacy_score : 1.0) + 0.05);
+      renderUtilityStats(selectedNode);
+      updateSummaryMetrics();
+      staged.nodeUpdates[selectedNode.slug] = Object.assign(staged.nodeUpdates[selectedNode.slug] || {}, {
+        slug: selectedNode.slug,
+        efficacy_score: selectedNode.efficacy_score
+      });
+    };
+
+    document.getElementById('btn-feedback-fail').onclick = () => {
+      if (!selectedNode) return;
+      selectedNode.test_fail_count = (selectedNode.test_fail_count || 0) + 1;
+      selectedNode.efficacy_score = Math.max(0.1, (selectedNode.efficacy_score !== undefined ? selectedNode.efficacy_score : 1.0) - 0.20);
+      renderUtilityStats(selectedNode);
+      updateSummaryMetrics();
+      staged.nodeUpdates[selectedNode.slug] = Object.assign(staged.nodeUpdates[selectedNode.slug] || {}, {
+        slug: selectedNode.slug,
+        efficacy_score: selectedNode.efficacy_score
+      });
+    };
+
+    // Patch Modal and Export
+    const patchModal = document.getElementById('patch-modal');
+    document.getElementById('btn-export-patch').onclick = () => {
+      const summaryDiv = document.getElementById('patch-summary');
+      const modCount = Object.keys(staged.nodeUpdates).length;
+      const addCount = staged.addedLinks.length;
+      const remCount = staged.removedLinks.length;
+
+      summaryDiv.innerHTML = \`
+        <strong>Staged Changes:</strong> \${modCount} node(s) modified, \${addCount} link(s) added, \${remCount} link(s) removed.
       \`;
 
-      const connected = data.links
-        .filter(l => (l.source.id === d.id || l.target.id === d.id))
-        .map(l => (l.source.id === d.id ? l.target.slug : l.source.slug));
+      const patchData = {
+        generated_at: new Date().toISOString(),
+        version: "2.0.0",
+        patch: staged
+      };
 
-      const linksDiv = document.getElementById('d-links');
-      linksDiv.innerHTML = '';
-      if (connected.length === 0) {
-        linksDiv.innerHTML = '<span style=\"font-size: 12px; color: var(--text-muted);\">No lateral connections.</span>';
-      } else {
-        [...new Set(connected)].forEach(slug => {
-          const pill = document.createElement('span');
-          pill.className = 'link-pill';
-          pill.textContent = slug;
-          linksDiv.appendChild(pill);
-        });
-      }
-    }
+      const jsonStr = JSON.stringify(patchData, null, 2);
+      document.getElementById('patch-code').textContent = jsonStr;
+      patchModal.classList.add('open');
+    };
+
+    document.getElementById('modal-close').onclick = () => patchModal.classList.remove('open');
+
+    document.getElementById('btn-copy-patch').onclick = () => {
+      const text = document.getElementById('patch-code').textContent;
+      navigator.clipboard.writeText(text).then(() => {
+        alert('Staged patch JSON copied to clipboard!');
+      });
+    };
+
+    document.getElementById('btn-download-patch').onclick = () => {
+      const text = document.getElementById('patch-code').textContent;
+      const blob = new Blob([text], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = \`memory-patch-\${new Date().toISOString().slice(0, 10)}.json\`;
+      a.click();
+      URL.revokeObjectURL(url);
+    };
   </script>
 </body>
 </html>`;
@@ -1264,7 +1850,6 @@ export function detectContradictionsAndDrift(workspaceRoot = process.cwd(), opti
 
     const multiVec = generateMultiVector({
       trigger: entry.trigger,
-      applies_to: entry.applies_to,
       body,
       slug: entry.slug,
       domain: entry.domain,
@@ -1444,14 +2029,8 @@ export function detectContradictionsAndDrift(workspaceRoot = process.cwd(), opti
       }
     }
 
-    // D. Referenced file drift: checks if files explicitly named in applies_to or body exist
+    // D. Referenced file drift: checks if configuration files explicitly named in body exist
     const referencedFiles = [];
-    if (fm.applies_to && Array.isArray(fm.applies_to.file_patterns)) {
-      for (const p of fm.applies_to.file_patterns) {
-        if (!p.includes('*') && !p.includes('{')) referencedFiles.push(p);
-      }
-    }
-
     const configMatches = body.match(/\b([a-zA-Z0-9_\-\.]+\.(json|ya?ml|toml|conf|config\.[a-z]+))\b/g);
     if (configMatches) {
       for (const cf of configMatches) {
