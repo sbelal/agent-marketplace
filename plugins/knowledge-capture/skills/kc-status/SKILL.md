@@ -6,13 +6,15 @@ user-invocable: true
 
 # Skill: Knowledge Capture Status (`/kc-status`)
 
+> **Plugin script location (`<plugin-root>`):** Bundled scripts live in this plugin's `bin/` directory. In Claude Code, `<plugin-root>` is `${CLAUDE_PLUGIN_ROOT}` (Claude Code substitutes the absolute install path). If that variable appears literally (unsubstituted, e.g. in Antigravity), `<plugin-root>` is the plugin directory itself: run the scripts as `./bin/...` from it. Always quote the path.
+
 Display the operational health, Git synchronization status, branch details, per-domain entry breakdown, and staleness audit (`verified` > 180 days or missing) across all memory layers.
 
 ## Workflow
 
 1. Execute the cross-platform status utility (or call `get_layer_statistics` via MCP):
    ```bash
-   node ./bin/status.js
+   node "<plugin-root>/bin/status.js"
    ```
 
 2. Present the formatted output to the developer, explicitly surfacing:

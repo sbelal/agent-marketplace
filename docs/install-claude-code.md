@@ -85,17 +85,19 @@ claude plugin marketplace remove agent-marketplace
 
 ## 💡 Claude Code Commands & Skills
 
+> **Note:** Claude Code namespaces plugin skills by plugin name, so commands are invoked as `/<plugin>:<skill>` (for example `/knowledge-capture:kc-status`). Skill text and Antigravity use the short form (`/kc-status`); treat the two as equivalent.
+
 ### Knowledge Capture (`knowledge-capture`)
-- `/kc-status`: Inspects memory counts, layer health, uncommitted entries, and Git sync status.
-- `/kc-init`: Configures personal and team storage repositories.
-- `/kc-commit`: Stages and commits private memory entries.
-- `/kc-promote`: Promotes a private memory candidate to the team Git branch.
-- `/kc-consolidate`: Deduplicates overlapping entries and optimizes guidelines.
-- `/kc-pull`: Synchronizes upstream team memories.
+- `/knowledge-capture:kc-status`: Inspects memory counts, layer health, uncommitted entries, and Git sync status.
+- `/knowledge-capture:kc-init`: Configures personal and team storage repositories.
+- `/knowledge-capture:kc-commit`: Stages and commits private memory entries.
+- `/knowledge-capture:kc-promote`: Promotes a private memory candidate to the team Git branch.
+- `/knowledge-capture:kc-consolidate`: Deduplicates overlapping entries and optimizes guidelines.
+- `/knowledge-capture:kc-pull`: Synchronizes upstream team memories.
 *Background capabilities (`kc-capture` and `kc-recall`) operate automatically via hook triggers and the MCP server.*
 
 ### Syran: The Logic Officer (`syran-persona`)
 - **Automatic Persona Injection:** The plugin's `SessionStart` hook (`hooks/hooks.json`) automatically injects the Syran persona directives into starting context upon launch.
-- `/syran-consult`: Formally analyzes an architectural dilemma, code change, or proposition for logical validity, probability, and risk.
-- `/syran-status`: Reports the operational readiness, directives, and MCP tool health of the Logic Officer.
+- `/syran-persona:syran-consult`: Formally analyzes an architectural dilemma, code change, or proposition for logical validity, probability, and risk.
+- `/syran-persona:syran-status`: Reports the operational readiness, directives, and MCP tool health of the Logic Officer.
 - **MCP Server Tools (`syran-logic`):** Automatically available to Claude Code: `syran_consult`, `syran_analyze_fallacies`, `syran_evaluate_probability`, and `syran_get_status`.

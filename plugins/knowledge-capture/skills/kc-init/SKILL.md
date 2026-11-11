@@ -6,6 +6,8 @@ user-invocable: true
 
 # Knowledge Capture Setup Wizard (`/kc-init`)
 
+> **Plugin script location (`<plugin-root>`):** Bundled scripts live in this plugin's `bin/` directory. In Claude Code, `<plugin-root>` is `${CLAUDE_PLUGIN_ROOT}` (Claude Code substitutes the absolute install path). If that variable appears literally (unsubstituted, e.g. in Antigravity), `<plugin-root>` is the plugin directory itself: run the scripts as `./bin/...` from it. Always quote the path.
+
 This skill runs an interactive setup wizard to scaffold storage directories, guide the developer through choosing private and team Git remote storage options, test remote connectivity (`git ls-remote`), and configure `settings.json`.
 
 ## Workflow
@@ -13,14 +15,14 @@ This skill runs an interactive setup wizard to scaffold storage directories, gui
 ### 1. Inspect Current Environment
 Execute status inspection to check existing storage directories and configured settings:
 ```bash
-node ./bin/status.js
+node "<plugin-root>/bin/status.js"
 ```
 Report current paths, whether `settings.json` already exists, and whether any layers are currently active or unconfigured.
 
 ### 2. Scaffold Storage Directories
 Run initial scaffolding to guarantee the base directory structure exists:
 ```bash
-node ./bin/setup.js
+node "<plugin-root>/bin/setup.js"
 ```
 Ensures:
 - `~/.gemini/knowledge-capture/private/`
@@ -81,12 +83,12 @@ When the developer provides a repository URL:
 ### 5. Persist Configuration & Initial Clone
 Save the validated configuration:
 ```bash
-node ./bin/setup.js --private-url "<validatedPrivateUrl>" --team-url "<validatedTeamUrl>"
+node "<plugin-root>/bin/setup.js" --private-url "<validatedPrivateUrl>" --team-url "<validatedTeamUrl>"
 ```
 
 If a Team repository was configured, trigger an initial clone:
 ```bash
-node ./bin/pull.js team
+node "<plugin-root>/bin/pull.js" team
 ```
 
 ### 6. Confirm Operational Readiness
