@@ -12,10 +12,7 @@ Display the operational health, Git synchronization status, branch details, per-
 
 ## Workflow
 
-1. Execute the cross-platform status utility (or call `get_layer_statistics` via MCP):
-   ```bash
-   node "<plugin-root>/bin/status.js"
-   ```
+1. Call the MCP tool **`get_layer_statistics`** directly (or execute `node "<plugin-root>/bin/status.js"` if running headlessly from terminal):
 
 2. Present the formatted output to the developer, explicitly surfacing:
    - **Layer Entry Counts:** `Workspace`, `Private`, and `Team` counts (and active total after precedence shadowing).

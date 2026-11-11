@@ -71,11 +71,10 @@ Present proposed candidates (including any `MERGE` actions for co-triggered frag
 ### 5. Mandatory Approval Halt
 Halt the turn and await explicit developer confirmation (e.g., "save all", "approve", "add `<slug>`", or decline). **Never write, rename, or delete memory files on disk without explicit consent.**
 
-### 6. Persist to Disk & Execute Reference Re-Wiring
+### 6. Persist via MCP Tools & Execute Reference Re-Wiring
 Upon developer approval:
-1. **Write Target Memory File:** Write `<target-slug>.md` adhering strictly to the standardized YAML frontmatter schema (`name`, `type`, `domain`, `description`, `verified`, `overrides`, `related`).
-2. **Clean Rename / Merge & Reference Re-Wiring (`REPURPOSE-SLUG` / `EXTEND & RENAME` / `MERGE`):**
-   - **Within `Workspace` or `Private`:** Write `<new-slug>.md` and remove all superseded `<old-slug>.md` file(s) (via `git mv` / `rm` / `fs.unlink`) so orphan files are never left behind.
-   - **Cross-File Reference Update:** Scan all other `.md` files in `Workspace` (`.agents/rules/memory/`) and `Private` (`~/.gemini/knowledge-capture/private/`) and automatically update any `related: [...]` or `overrides: <old-slug>` references so they point to `<new-slug>`.
-   - **Expanding or Merging a `Team` Rule:** If any memory being extended/repurposed/merged lives in read-only `Team` (`<old-team-slug>`), write the unified `<new-slug>.md` in `Private` with `overrides: <old-team-slug>` (or inline list `[<team-slug-a>, <team-slug-b>]`) so the narrower team rule(s) are cleanly shadowed until promoted via `/kc-promote`.
+1. **Execute via MCP Tool:**
+   - For `CREATE` or `EXTEND` / `REPURPOSE-SLUG`: Call the MCP tool `save_memory_entry(layer, slug, oldSlug, title, why, howToApply, type, domain, description, related, overrides, applies_to)`. If `oldSlug` is provided, the tool automatically deletes the old file and re-wires all incoming references atomically!
+   - For `MERGE`: Call the MCP tool `merge_memory_entries(layer, targetSlug, sourceSlugs, title, why, howToApply, type, domain, description, related, overrides)`. The tool writes the target file, deletes all source files, and re-wires all incoming references automatically.
+2. **Expanding or Merging a Read-Only `Team` Rule:** If any memory being extended or merged lives in read-only `Team` (`<old-team-slug>`), write `<new-slug>` to `Private` with `overrides: <old-team-slug>` so the team rule is shadowed until `/kc-promote`.
 3. **No Auto-Commit:** Do not run `git commit` or `git push` during capture. Inform the developer that the changes are saved locally and can be committed/pushed anytime via `/kc-commit`.

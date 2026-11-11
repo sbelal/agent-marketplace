@@ -52,14 +52,15 @@ Output a structured consolidation & lint plan before making any file modificatio
 *(Merged and updated files follow the standardized schema in `AGENTS.md` with refreshed `verified:` timestamps.)*
 ```
 
-**Mandatory Halt:** Ask: *"Captain, do you approve executing these consolidation and lint actions?"*
+**Mandatory Halt:** Ask: *"Do you approve executing these consolidation and lint actions?"*
 Wait for explicit confirmation.
 
-### 4. Execute Filesystem Operations & Reference Re-Wiring
+### 4. Execute Operations & Reference Re-Wiring via MCP Tools
 Upon user confirmation:
-1. Write merged/repurposed memory file(s) with updated `name`, `domain`, expanded `description`, refreshed `verified: YYYY-MM-DD`, and `related: [...]` links.
-2. Delete superseded or pruned file(s) in `Workspace` or `Private` so no orphan files remain.
-3. **Automatic Reference Re-Wiring:** Scan all remaining `.md` files in `Workspace` and `Private` and update any `related: [...]` or `overrides:` references that pointed to merged/renamed slugs so they point to the new canonical slug.
-4. Report Git status and remind the user:
+1. **Execute via MCP Mutation Tools:**
+   - **For Merges:** Call `merge_memory_entries(layer, targetSlug, sourceSlugs, title, why, howToApply, type, domain, description, related, overrides)`. Automatically writes the target file, unlinks all source files, and updates all incoming `related:` and `overrides:` references across the layer!
+   - **For Pruning / Deletions:** Call `delete_memory_entry(layer, slug)`. Removes the file and cleans up dangling references.
+   - **For Refreshed Rules:** Call `save_memory_entry(...)` with bumped `verified: YYYY-MM-DD`.
+2. Report the operational status and remind the user:
    - For **Private** layer: Run `/kc-commit` to review, commit, and push the consolidation.
    - For **Team** layer: Stage changes via `/kc-promote` on an isolated `promote/<date>-<slug>` branch.

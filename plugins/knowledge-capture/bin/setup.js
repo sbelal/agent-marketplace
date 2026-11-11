@@ -62,32 +62,67 @@ export function setupEnvironment(options = {}) {
 
   fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf8');
 
-  // Initialize Private Git repository if configured and missing .git
-  if (settings.privateRepoUrl && !fs.existsSync(path.join(privateDir, '.git'))) {
-    try {
-      execSync('git init -b main', { cwd: privateDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
-      execSync(`git remote add origin "${settings.privateRepoUrl}"`, {
-        cwd: privateDir,
-        env: GIT_EXEC_ENV,
-        stdio: 'ignore'
-      });
-    } catch {
-      // Suppress git init errors
+  // Helper to initialize or clone git repository cleanly
+  function ensureRepoInitialized(targetDir, remoteUrl) {
+    if (!remoteUrl) return;
+    const gitDir = path.join(targetDir, '.git');
+    if (fs.existsSync(gitDir)) {
+      try {
+        execSync(`git remote set-url origin "${remoteUrl}"`, { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
+      } catch {
+        try {
+          execSync(`git remote add origin "${remoteUrl}"`, { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
+        } catch {}
+      }
+      return;
     }
+
+    let hasRemoteBranches = false;
+    try {
+      const lsOut = execSync(`git ls-remote --heads "${remoteUrl}"`, {
+        encoding: 'utf8',
+        timeout: 5000,
+        env: GIT_EXEC_ENV,
+        stdio: ['ignore', 'pipe', 'ignore']
+      }).trim();
+      hasRemoteBranches = lsOut.length > 0;
+    } catch {}
+
+    if (hasRemoteBranches) {
+      try {
+        const hasExistingFiles = fs.existsSync(targetDir) && fs.readdirSync(targetDir).length > 0;
+        if (hasExistingFiles) {
+          execSync('git init -b main', { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
+          execSync(`git remote add origin "${remoteUrl}"`, { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
+          execSync('git fetch origin', { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
+          try {
+            execSync('git branch --set-upstream-to=origin/main main', { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
+          } catch {}
+        } else {
+          fs.rmSync(targetDir, { recursive: true, force: true });
+          execSync(`git clone "${remoteUrl}" "${targetDir}"`, { env: GIT_EXEC_ENV, stdio: 'ignore' });
+        }
+        return;
+      } catch {}
+    }
+
+    try {
+      if (!fs.existsSync(targetDir)) {
+        fs.mkdirSync(targetDir, { recursive: true });
+      }
+      execSync('git init -b main', { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
+      execSync(`git remote add origin "${remoteUrl}"`, { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
+    } catch {}
   }
 
-  // Initialize Team Git repository if configured and missing .git
-  if (settings.teamRepoUrl && !fs.existsSync(path.join(teamDir, '.git'))) {
-    try {
-      execSync('git init -b main', { cwd: teamDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
-      execSync(`git remote add origin "${settings.teamRepoUrl}"`, {
-        cwd: teamDir,
-        env: GIT_EXEC_ENV,
-        stdio: 'ignore'
-      });
-    } catch {
-      // Suppress git init errors
-    }
+  // Initialize Private Git repository if configured
+  if (settings.privateRepoUrl) {
+    ensureRepoInitialized(privateDir, settings.privateRepoUrl);
+  }
+
+  // Initialize Team Git repository if configured
+  if (settings.teamRepoUrl) {
+    ensureRepoInitialized(teamDir, settings.teamRepoUrl);
   }
 
   return {

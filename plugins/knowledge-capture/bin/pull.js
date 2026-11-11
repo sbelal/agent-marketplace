@@ -59,6 +59,9 @@ function main() {
             console.warn(`Run 'git -C "${teamDir}" checkout main' before pulling upstream updates.`);
             exitCode = 1;
           } else {
+            try {
+              execSync(`git branch --set-upstream-to=origin/${branch} "${branch}"`, { cwd: teamDir, stdio: 'ignore' });
+            } catch {}
             console.log(`Executing git pull --ff-only on branch '${branch}'...`);
             const out = execSync('git pull --ff-only', { cwd: teamDir, encoding: 'utf8' });
             console.log(out.trim());
@@ -93,6 +96,10 @@ function main() {
           console.error('Error: Private working copy has uncommitted changes. Run /kc-commit before pulling.');
           exitCode = 1;
         } else {
+          try {
+            const privBranch = execSync('git rev-parse --abbrev-ref HEAD', { cwd: privateDir, encoding: 'utf8' }).trim() || 'main';
+            execSync(`git branch --set-upstream-to=origin/${privBranch} "${privBranch}"`, { cwd: privateDir, stdio: 'ignore' });
+          } catch {}
           console.log('Executing git pull --ff-only...');
           const out = execSync('git pull --ff-only', { cwd: privateDir, encoding: 'utf8' });
           console.log(out.trim());

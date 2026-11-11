@@ -1,29 +1,28 @@
 # Knowledge Capture Protocol
 
-This rule governs persistent memory elicitation, inspection, and multi-layer storage across Antigravity and Claude Code.
+This protocol governs persistent memory elicitation, inspection, and multi-layer storage across Antigravity and Claude Code.
 
 ---
 
 ## 1. Multi-Layer Memory Architecture & Precedence
 
-Knowledge is organized across three distinct tiers with strict resolution precedence:
+Knowledge is organized across three tiers with strict resolution precedence:
 
 1. **Layer 1: Workspace Scoped (`.agents/rules/memory/*.md`) [Highest Precedence]**
-   * Repository-specific rules, internal APIs, and codebase quirks.
-   * Discovered automatically by Antigravity as hierarchical rules; overrides both Private and Team layers.
+   * Repository-specific conventions, internal APIs, and codebase quirks.
+   * Overrides both Private and Team layers.
 2. **Layer 2: Local Global Private (`~/.gemini/knowledge-capture/private/*.md`) [Middle Precedence]**
    * Machine-local developer preferences, personal learnings, and environment quirks.
-   * Version controlled via Git when configured in `settings.json`.
-   * Overrides Team memories on the same subject. An explicit `overrides: <team-slug>` field indicates deliberate supersession, not a conflict.
+   * Version controlled via Git when configured. Overrides Team memories via `overrides: <team-slug>`.
 3. **Layer 3: Team Global (`~/.gemini/knowledge-capture/team/*.md`) [Baseline Precedence]**
-   * Shared organizational standards, verified platform facts, and sanitized architectural patterns.
-   * Synchronized with a shared team Git repository. **Read-only locally; modifications are contributed via branches and GitHub Pull Requests.**
+   * Shared organizational standards, verified platform facts, and architectural patterns.
+   * Synchronized with shared team Git repository. Read-only locally; contributed via promotion branches and Pull Requests.
 
 ---
 
 ## 2. Standardized Memory File Schema
 
-Every memory entry remains a flat `<slug>.md` file within its layer directory and follows this frontmatter format:
+Every memory entry is a flat `<slug>.md` file adhering to this schema:
 
 ```markdown
 ---
@@ -34,6 +33,9 @@ description: <One-line trigger condition: WHEN this memory should be recalled>
 verified: YYYY-MM-DD
 overrides: <team-slug-if-applicable>
 related: [<related-slug-1>, <related-slug-2>]
+applies_to:
+  tools: [run_command]
+  command_patterns: ["<pattern>"]
 ---
 
 # <Title>
@@ -47,99 +49,87 @@ related: [<related-slug-1>, <related-slug-2>]
 <Actionable instructions, commands, or code patterns.>
 ```
 
-### Frontmatter Fields & Classifications
-- `name`: Canonical kebab-case slug matching `<slug>.md`.
-- `type`: `convention` | `platform-fact` | `tool-gotcha` | `preference`.
-- `domain` *(optional, defaults to `"general"`)*: Taxonomic category (e.g., `kubernetes`, `terraform`, `go`, `ci-cd`) used for virtual grouping in `get_memory_summary`.
-- `description`: Trigger condition describing **WHEN** this memory must be recalled.
-- `verified`: `YYYY-MM-DD` date when the guideline was last verified (entries older than 180 days are flagged as stale).
-- `overrides` *(optional)*: Lower-tier slug(s) superseded by this entry (`Workspace > Private > Team`).
-- `related` *(optional, defaults to `[]`)*: Inline array `[slug-a, slug-b]` of 1-hop laterally linked memory slugs resolved by `get_memory_content`.
+### Frontmatter Fields:
+* `name`: Canonical slug matching `<slug>.md`.
+* `type`: `convention` | `platform-fact` | `tool-gotcha` | `preference`.
+* `domain`: Taxonomic category (defaults to `"general"`).
+* `description`: Trigger condition describing WHEN this memory must be recalled.
+* `verified`: `YYYY-MM-DD` verification date (>180 days flags entry as stale).
+* `overrides`: Lower-tier slug superseded by this entry (`Workspace > Private > Team`).
+* `related`: Array of 1-hop laterally linked slugs resolved in `get_memory_content`.
+* `applies_to`: Optional JIT guardrail patterns for pre-tool interception.
 
 ---
 
-## 3. End-of-Task Knowledge Elicitation & Full-Envelope Repurposing (`kc-capture`)
+## 3. End-of-Task Elicitation & Full-Envelope Repurposing (`kc-capture`)
 
-Upon concluding any non-trivial coding task, architectural modification, or deep root-cause/architectural investigation (even if zero code changes were required):
+Execute at task conclusion (including zero-code architectural or debugging investigations):
 
-### When to Capture
-Capture only when an insight meets all four criteria:
-- **Durable:** Useful across multiple sessions and tasks, not transient state or specific incident details.
-- **Actionable:** Clear instructions on when to apply it and what to do.
-- **Specific:** Explains exact syntax, flags, or root causes—not generic advice ("write clean code").
-- **Novel:** Not already documented in repository READMEs, official docs, or existing memory files.
+### Qualification Criteria:
+* **Durable:** Reusable across tasks/sessions, not transient state.
+* **Actionable:** Clear instructions on when to apply and what to do.
+* **Specific:** Exact syntax, flags, or root causes—not generic advice.
+* **Novel:** Not already covered in READMEs, official docs, or memory.
 
-### Elicitation, Full-Envelope Repurposing & Fragmentation Detection Workflow
-1. **Mandatory Pre-Scan:** Always call `get_memory_summary(layer="all")` before formulating any candidate.
-2. **Determine Candidates (Full-Envelope Repurposing & Co-Triggered Defragmentation):**
-   - **Extending an Existing Memory (`EXTEND` / `REPURPOSE-SLUG`):** If a new learning relates to, generalizes, or expands an existing memory, do **not** create a fragmented sibling file and do **not** blindly append paragraphs to the body while leaving a narrow `slug` and `description` untouched (which creates "invisible knowledge"). Update all three dimensions together:
-     - **Slug Evolution (`old-slug -> new-slug`):** Propose renaming the slug (`REPURPOSE-SLUG`) when the combined scope outgrows the original filename.
-     - **Trigger Description Expansion:** Rewrite `description:` so it explicitly covers both the original trigger scenario and the newly added scenarios.
-     - **Unified Content Synthesis:** Refactor `# Title`, `## Why`, and `## How to apply` into a single cohesive guide and update `verified: YYYY-MM-DD`.
-   - **Co-Triggered Memory Fragmentation Detection (`MERGE` or `related` Link):** During candidate determination, check if **2 or more existing memories** from the same `domain` or layer were co-retrieved during this session (or address tightly coupled facets of one concept in the `get_memory_summary` output). If they are orthogonal concerns, link them via `related: [...]`; if they are fragmented facets of the same subsystem, propose a **`MERGE`** candidate (`<slug-a> + <slug-b> -> <proposed-merged-slug>`) with an expanded trigger description.
-3. **Present Candidate Approval Table to Developer:**
-   ```markdown
-   ### 💡 Knowledge Capture Candidates
+### Repurposing & Defragmentation Protocol:
+1. **Mandatory Pre-Scan:** Always invoke `get_memory_summary(layer="all")` before proposing candidates.
+2. **Full-Envelope Repurposing (`EXTEND` / `REPURPOSE-SLUG`):**
+   When new learnings relate to an existing memory, do not create fragmented sibling files or merely append footnotes. Update all three dimensions:
+   * **Slug Evolution:** Propose renaming (`REPURPOSE-SLUG`) if scope expands.
+   * **Trigger Expansion:** Broaden `description:` to cover both scenarios.
+   * **Unified Synthesis:** Refactor `# Title`, `## Why`, and `## How to apply` into a cohesive guide; refresh `verified: YYYY-MM-DD`.
+3. **Co-Triggered Fragmentation Detection (`MERGE`):**
+   If 2+ memories from the same domain were co-retrieved or address tightly coupled facets of one concept, propose merging them (`<slug-a> + <slug-b> -> <merged-slug>`) with an expanded trigger description.
+4. **Candidate Approval Table:**
+   Present candidates to the developer before writing to disk:
 
-   | Action (CREATE \| EXTEND \| REPURPOSE-SLUG \| MERGE) | Layer | Target Slug (Old -> New) | Domain | Updated Trigger Description | Related Slugs | Summary of Content Synthesis |
-   | :--- | :---: | :--- | :---: | :--- | :--- | :--- |
-   | `REPURPOSE-SLUG` | `private` | `k8s-hpa-downscaling -> k8s-hpa-scaling-governance` | `kubernetes` | **Old:** When configuring HPA stabilization windows<br>**New:** When configuring HPA scaling policies, stabilization windows, or PDB alignment | `[k8s-pdb-configuration]` | Synthesizes HPA scale-down stabilization with PDB minAvailable coordination |
-   ```
-4. **Mandatory Approval Halt:** Never write, rename, or delete memory files until the user explicitly approves.
-5. **Filesystem Persistence & Reference Re-Wiring (No Auto-Commit):**
-   - Write the approved `<target-slug>.md` file.
-   - When renaming/merging in `Workspace` or `Private`, remove `<old-slug>.md` and scan all `.md` files in `Workspace` and `Private` to update any `related: [...]` or `overrides: <old-slug>` references to `<new-slug>`.
-   - When expanding or merging a read-only `Team` rule (`<team-slug>`), write `<new-slug>.md` in `Private` with `overrides: <team-slug>` so the narrower team rule is shadowed until `/kc-promote`.
-   - Do not execute `git commit` or `git push` during capture; remind the user to run `/kc-commit`.
+| Action (CREATE \| EXTEND \| REPURPOSE-SLUG \| MERGE) | Layer | Target Slug (Old -> New) | Domain | Updated Trigger Description | Related Slugs | Summary of Content Synthesis |
+| :--- | :---: | :--- | :---: | :--- | :--- | :--- |
+| `REPURPOSE-SLUG` | `private` | `k8s-hpa-downscaling -> k8s-hpa-scaling-governance` | `kubernetes` | **Old:** When configuring HPA stabilization<br>**New:** When configuring HPA scaling, stabilization, or PDB alignment | `[k8s-pdb-configuration]` | Synthesizes HPA scale-down stabilization with PDB minAvailable |
+
+5. **Mandatory Approval Halt:** Never write or delete files without explicit user consent.
+6. **Persistence & Reference Re-Wiring:**
+   * Write approved `<target-slug>.md` using `save_memory_entry` or filesystem write.
+   * When renaming/merging, remove old file(s) and update all incoming `related:` and `overrides:` references across remaining files.
+   * Do not run `git commit`/`push` during capture; remind developer to run `/kc-commit`.
 
 ---
 
-## 4. Model Context Protocol (MCP) Memory Retrieval (`kc-recall`)
+## 4. MCP Memory Retrieval Protocol (`kc-recall`)
 
-When beginning a complex task, consult existing memory using MCP tools with minimal token overhead:
-- **`get_memory_summary(layer?, domain?, query?)`**: Scans guidelines across layers, applies deterministic `Workspace > Private > Team` precedence shadowing, and outputs Markdown tables grouped by `### Domain: <domain>`.
-- **`get_memory_content(layer?, slug?, slugs?)`**: Retrieves full markdown content, frontmatter, and the resolved `### Related Memories Available (1-Hop Graph)` footer. Read only relevant files—never dump the entire store.
-- **`get_layer_statistics()`**: Retrieves entry counts per layer, active domain breakdown, stale entry count (`verified` > 180 days or missing), uncommitted changes, and branch divergence.
+At the start of complex tasks, consult memory with minimal token overhead:
+* **`get_memory_summary(layer?, domain?, query?)`**: Scans guidelines, shadows overridden entries (`Workspace > Private > Team`), and outputs grouped markdown tables.
+* **`get_memory_content(layer?, slug?, slugs?)`**: Retrieves full markdown content, frontmatter, and resolved 1-hop related memory graph footer.
+* **`get_layer_statistics()`**: Returns layer counts, active domains, stale entry counts (>180d), and Git synchronization health.
 
 ---
 
 ## 5. Team Promotion & 4-Point Consolidation Protocol
 
-- **Team Promotion (`/kc-promote <slug>`):**
-  - Personal memories verify and mature in Private storage before entering Team memory.
-  - Promotion creates an isolated Git branch (`promote/<date>-<slug>`), scrubs personal usernames and machine paths, and halts for developer inspection before opening a GitHub Pull Request (`gh pr create`).
-- **4-Point "Lint & Dream" Consolidation (`/kc-consolidate [scope|domain]`):**
-  1. **Fragmented / Co-Triggered Slugs:** Merge narrow slugs in the same `domain` with adjacent trigger descriptions into a repurposed slug and broader trigger description.
-  2. **Orphaned Overrides & Redundant Private Copies:** Prune `Private` entries whose `overrides:` target was removed upstream or already promoted identically to `Team`.
-  3. **Broken Graph Links:** Repair or remove `related: [...]` links pointing to `[unresolved/broken reference]`.
-  4. **Staleness & Contradictions:** Refresh or prune entries where `verified: YYYY-MM-DD` exceeds 180 days or where rules conflict.
+* **Team Promotion (`/kc-promote <slug>`):**
+  Personal memories mature in Private storage before entering Team memory. Promotion creates branch `promote/<date>-<slug>` in `team/`, scrubs personal usernames/paths, and halts for developer inspection before `gh pr create`.
+* **4-Point "Lint & Dream" Consolidation (`/kc-consolidate [scope|domain]`):**
+  1. **Fragmented Slugs:** Merge narrow co-triggered slugs in same domain.
+  2. **Orphaned Overrides & Redundant Copies:** Prune entries whose overrides target disappeared upstream or are already identical in Team.
+  3. **Broken Graph Links:** Repair or prune `related:` links pointing to non-existent slugs.
+  4. **Staleness & Contradictions:** Refresh or prune entries where `verified:` > 180 days or where guidance conflicts.
 
 ---
 
-## 6. Plugin Maintenance, Update Notifications & Autonomous Upgrades
+## 6. Plugin Maintenance & Upgrades
 
-1. **Lightweight Startup Hook Update Notice:**
-   - The `SessionStart` lifecycle hook audits for available plugin and repository updates in the background.
-   - When an update is published, an actionable notification is injected in the session report informing the developer.
-2. **Autonomous Upgrade Execution Upon User Instruction:**
-   - When the user instructs the agent to update plugins (e.g. *"Update knowledge-capture"*, *"Update all plugins"*, or `/kc-update`):
-     - **Inspect Mode:** Query installation state via `node ./bin/install.js --status-json` or inspecting `plugins.json`.
-     - **Source-Mode (`plugins.json`):** Execute `git pull --ff-only` on the repository source or `node ./bin/install.js --update-source`.
-     - **Copy-Mode (`.agents/plugins/` or `~/.gemini/config/plugins/`):** Run `node ./bin/install.js --update <target|all>` (or `npx git+https://github.com/sbelal/agent-marketplace.git --update <target|all>`).
-     - **Preserve User Data:** Reassure the user that personal memory files (`~/.gemini/knowledge-capture/`) and settings are untouched.
-     - **Report Confirmation:** Output an update summary card in chat detailing versions before and after.
+1. **Startup Update Audit:** `SessionStart` hook audits for upstream updates. When available, an actionable notice is injected into the session report.
+2. **Autonomous Upgrade Execution:** When instructed to update:
+   * **Source-Mode (`plugins.json`):** Run `node ./bin/install.js --update-source` or `git pull --ff-only`.
+   * **Copy-Mode (`.agents/plugins/`):** Run `node ./bin/install.js --update <target|all>`.
+   * **Data Safety:** Personal memory files in `~/.gemini/knowledge-capture/` are strictly decoupled from plugin code and never overwritten.
 
 ---
 
-## 7. State-Aware Interactive Setup & Configuration Protocol
+## 7. State-Aware Interactive Setup Protocol
 
-When the user requests setup, configuration, or initialization (e.g. `/kc-init`, `/marketplace`, or *"Set up marketplace plugins"*):
-1. **Never Show Generic CLI Readline Wizards in Chat:** Do not ask the user to run interactive readline terminal scripts.
-2. **State-Aware Inspection & Option Pruning:**
-   - Run `node ./bin/install.js --status-json` first to detect active sources, installed scopes, and settings.
-   - **Crucial Rule:** If the user is currently using a mode (e.g. source-based global install), **prune that option from the choices** so it does not show up as a redundant setup choice.
-3. **Use Harness-Native Choice Interfaces:**
-   - **Google Antigravity:** Use the `ask_question` tool to present structured multiple-choice questions with clickable buttons and write-in input.
-   - **Claude Code:** Use the interactive choices/prompt mechanism in the harness.
-4. **Execute Headless Operations:** Once choices and parameters are collected, invoke commands headlessly with non-interactive flags (`--private-url`, `--team-url`, `--scope`, etc.).
-
+When setup or configuration is requested (e.g. `/kc-init`, `/marketplace`):
+1. **Never Show Generic Terminal Readline Prompts in Chat:** Query `node ./bin/install.js --status-json` first.
+2. **Option Pruning:** Omit redundant options (e.g. do not offer global source install if already active).
+3. **Native Interfaces:** Use `ask_question` modal in Antigravity, and interactive prompts in Claude Code.
+4. **Headless Execution:** Run operations with non-interactive CLI flags (`--private-url`, `--scope`, etc.).

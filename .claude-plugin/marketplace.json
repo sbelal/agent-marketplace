@@ -14,9 +14,9 @@
     },
     {
       "name": "knowledge-capture",
-      "description": "Multi-layered memory plugin supporting workspace, private, and team scopes with MCP scanning, Git synchronization, and promotion workflows.",
+      "description": "Multi-layered persistent memory plugin supporting workspace, private, and team scopes with full CQS stdio MCP server, local SQLite FTS5 hybrid search, JIT guardrails, and Git synchronization.",
       "source": "./plugins/knowledge-capture",
-      "version": "1.0.0"
+      "version": "2.0.0"
     }
   ],
   "metadata": {

@@ -233,7 +233,7 @@ async function main() {
   report += `*Precedence Hierarchy:* **Workspace** overrides **Private**, which overrides **Team**. Recall guidelines on demand via MCP tool \`get_memory_summary\` or \`get_memory_content\`.\n\n`;
 
   report += `#### Operational Recall & Capture Directive\n`;
-  report += `1. **Pre-Task Recall (\`kc-recall\`):** Before executing complex architectural, implementation, or debugging tasks, call \`get_memory_summary\` (using \`domain\` / \`query\` filters as needed) and inspect matching memories via \`get_memory_content\` (including the 1-hop \`Related Memories Available\` graph).\n`;
+  report += `1. **Pre-Task Recall (\`kc-recall\`):** Before executing complex tasks, call \`search_memories(query="...")\` for hybrid semantic matching, or scan \`get_memory_summary\` and inspect matching memories via \`get_memory_content\` (including the 1-hop \`Related Memories Available\` graph).\n`;
   report += `2. **Post-Task Elicitation, Full-Envelope Repurposing & Fragmentation Detection (\`kc-capture\`):** At task completion (including deep root-cause investigations or architectural analyses that required zero code changes), evaluate learnings via \`kc-capture\`. Always run \`get_memory_summary(layer="all")\` first during candidate determination to: (a) prioritize **Full-Envelope Repurposing** (\`EXTEND\` / \`REPURPOSE-SLUG\`: evolving narrow slugs, expanding \`description\` triggers, and synthesizing body content together) over creating fragmented sibling files, and (b) detect **co-triggered memory fragmentation** when 2+ memories from the same domain were recalled together (or overlap in the summary index) and propose a \`MERGE\` candidate.\n`;
 
   // Warnings & Notices

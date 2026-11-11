@@ -14,10 +14,7 @@ Fast-forward the local memory repositories with the latest changes from their up
 
 1. Identify the target store from the command arguments (`team`, `private`, or `all`). Default to `team`.
 
-2. Execute the pull utility:
-   ```bash
-   node "<plugin-root>/bin/pull.js" <target>
-   ```
+2. Call the MCP tool **`sync_memory_layer({ layer: target })`** directly (or execute `node "<plugin-root>/bin/pull.js" <target>` from terminal).
 
 3. Report the outcome cleanly:
    - If changes were pulled, confirm that memory is now up to date.

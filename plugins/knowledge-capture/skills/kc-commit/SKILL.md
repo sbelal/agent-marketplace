@@ -43,7 +43,7 @@ This skill reviews uncommitted changes in `~/.gemini/knowledge-capture/private/`
 
 4. **Request User Approval:**
    Present the list of changed files and proposed commit message in chat.
-   Ask: *"Captain, do you approve staging, committing, and pushing these changes?"*
+   Ask: *"Do you approve staging, committing, and pushing these changes?"*
 
 5. **Execute Commit & Remote Push:**
    Upon approval, execute in `~/.gemini/knowledge-capture/private/`:

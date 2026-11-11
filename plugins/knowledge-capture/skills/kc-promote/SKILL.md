@@ -25,24 +25,14 @@ Confirm before proceeding:
 - Has it been verified against production reality?
 - Does the user want it published organization-wide?
 
-### 2. Prepare the Team Clone
-Inspect `~/.gemini/knowledge-capture/team/`:
-- If `.git` is missing: alert user that team repository must be configured with a remote via `/kc-init`.
-- Check out `main` and ensure the working copy is clean:
-  ```bash
-  git -C ~/.gemini/knowledge-capture/team checkout main
-  git -C ~/.gemini/knowledge-capture/team pull --ff-only
-  ```
-- Create a dedicated promotion branch:
-  ```bash
-  git -C ~/.gemini/knowledge-capture/team checkout -b promote/$(date +%Y-%m-%d)-<slug>
-  ```
-
-### 3. Generalize & Scrub Memory File
-Write `~/.gemini/knowledge-capture/team/<slug>.md` complying with the standardized schema in `AGENTS.md`.
-
-**Mandatory Scrub List:**
-- Remove personal usernames and machine-specific paths (e.g. `C:\Users\...`, `/home/...`).
+### 2. Prepare Promotion Branch & Scrub Memory File
+Call the MCP tool **`prepare_team_promotion({ slug: "<slug>" })`** (or run manually):
+The tool automatically:
+- Checks out `main` in `~/.gemini/knowledge-capture/team/` and pulls latest changes.
+- Creates an isolated Git branch: `promote/<date>-<slug>`.
+- Scrubs personal usernames and machine-specific paths (`/home/...`, `C:\Users\...`).
+- Writes the sanitized team file in `~/.gemini/knowledge-capture/team/<slug>.md`.
+- Returns the exact branch name and `gh pr create` command.
 - Remove ticket/incident numbers unless the memory is explicitly about that artefact.
 - Strip the `overrides:` field.
 - Rewrite first-person phrasing ("I", "my") in neutral, third-person engineering tone.
