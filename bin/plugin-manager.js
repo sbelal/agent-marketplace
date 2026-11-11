@@ -9,7 +9,13 @@
 const fs = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
-const { getPluginsConfig, findSourceEntry, normalizePath } = require('./source-manager');
+const {
+  getPluginsConfig,
+  findSourceEntry,
+  isMarketplaceSourceActive,
+  findMarketplaceSourceEntry,
+  normalizePath
+} = require('./source-manager');
 
 const DEFAULT_EXCLUDES = ['.git', 'node_modules', '.DS_Store', 'Thumbs.db'];
 
@@ -226,6 +232,15 @@ function compareVersions(v1, v2) {
  * @param {string} homeDir 
  * @returns {Object} Full inventory report
  */
+/**
+ * Pure query: Retrieves complete inventory of available plugins, installed states,
+ * and active plugins.json source entries.
+ * 
+ * @param {string} repoRoot 
+ * @param {string} workspaceDir 
+ * @param {string} homeDir 
+ * @returns {Object} Full inventory report
+ */
 function getPluginInventory(repoRoot, workspaceDir = process.cwd(), homeDir = (process.env.USERPROFILE || process.env.HOME || '')) {
   const available = getAvailablePlugins(repoRoot);
   const pluginsSrcDir = path.join(repoRoot, 'plugins');
@@ -233,12 +248,12 @@ function getPluginInventory(repoRoot, workspaceDir = process.cwd(), homeDir = (p
   // Check Workspace Scope
   const wsConfigPath = path.join(workspaceDir, '.agents', 'plugins.json');
   const wsConfig = getPluginsConfig(wsConfigPath);
-  const wsSourceActive = findSourceEntry(wsConfig, pluginsSrcDir);
+  const wsSourceActive = isMarketplaceSourceActive(wsConfig, repoRoot, homeDir);
 
   // Check Global Scope
   const globalConfigPath = homeDir ? path.join(homeDir, '.gemini', 'config', 'plugins.json') : '';
   const globalConfig = globalConfigPath ? getPluginsConfig(globalConfigPath) : { entries: [] };
-  const globalSourceActive = findSourceEntry(globalConfig, pluginsSrcDir);
+  const globalSourceActive = isMarketplaceSourceActive(globalConfig, repoRoot, homeDir);
 
   const items = available.map(plugin => {
     const wsPath = resolvePluginInstallPath(plugin.id, 'workspace', workspaceDir, homeDir);
@@ -281,6 +296,259 @@ function getPluginInventory(repoRoot, workspaceDir = process.cwd(), homeDir = (p
     }
   };
 }
+
+/**
+ * Pure query: Inspects the environment to calculate the current installation state
+ * and derives strictly relevant, contextual actions (filtering out redundant options
+ * such as offering source-based global install when it is already active).
+ * 
+ * @param {string} repoRoot 
+ * @param {string} workspaceDir 
+ * @param {string} homeDir 
+ * @returns {Object} State and filtered relevant actions
+ */
+function getSystemInstallationState(repoRoot, workspaceDir = process.cwd(), homeDir = (process.env.USERPROFILE || process.env.HOME || '')) {
+  const inventory = getPluginInventory(repoRoot, workspaceDir, homeDir);
+  const isGlobalSource = inventory.sources.global.active;
+  const isWorkspaceSource = inventory.sources.workspace.active;
+  const anySourceActive = isGlobalSource || isWorkspaceSource;
+
+  const installedWorkspace = inventory.items.filter(p => p.workspaceInstalled);
+  const installedGlobal = inventory.items.filter(p => p.globalInstalled);
+
+  const updatesAvailable = inventory.items.some(p => p.workspaceNeedsUpdate || p.globalNeedsUpdate);
+
+  // Compute primary installation mode
+  let primaryMode = 'none';
+  if (isGlobalSource && isWorkspaceSource) primaryMode = 'dual-source';
+  else if (isGlobalSource) primaryMode = 'global-source';
+  else if (isWorkspaceSource) primaryMode = 'workspace-source';
+  else if (installedWorkspace.length > 0 || installedGlobal.length > 0) primaryMode = 'copy-deployment';
+
+  // Compute contextual, filtered options based strictly on state
+  const relevantActions = [];
+
+  if (isGlobalSource) {
+    // Current state is Global Source mode.
+    // FILTER OUT: "Install source-based global install (repo clone)" because that is what is currently active!
+    // FILTER OUT: "Install individual plugins globally" because all plugins are mounted globally!
+    relevantActions.push({
+      id: 'check-updates',
+      title: 'Check for Updates & Sync Plugins',
+      description: 'Audit and pull latest plugin updates from git repository',
+      recommended: updatesAvailable
+    });
+    relevantActions.push({
+      id: 'toggle-activation',
+      title: 'Enable / Disable Plugins',
+      description: 'Activate or deactivate individual plugins in Antigravity config',
+      recommended: false
+    });
+    relevantActions.push({
+      id: 'configure-settings',
+      title: 'Configure Plugin Settings',
+      description: 'Configure Knowledge Capture Git remotes or plugin parameters',
+      recommended: false
+    });
+    if (!isWorkspaceSource) {
+      relevantActions.push({
+        id: 'copy-to-workspace',
+        title: 'Pin / Copy Plugin to Workspace',
+        description: 'Bundle specific plugin in .agents/plugins/ for project-level isolation or team commits',
+        recommended: false
+      });
+    }
+    relevantActions.push({
+      id: 'view-inventory',
+      title: 'View Active Plugins & Inventory',
+      description: 'List installed plugins, active sources, and versions',
+      recommended: false
+    });
+    relevantActions.push({
+      id: 'remove-source',
+      title: 'Remove Global Source Mode',
+      description: 'Unlink marketplace source from ~/.gemini/config/plugins.json',
+      recommended: false
+    });
+  } else if (isWorkspaceSource) {
+    // Current state is Workspace Source mode.
+    relevantActions.push({
+      id: 'check-updates',
+      title: 'Check for Updates & Sync Workspace',
+      description: 'Pull latest plugin updates for this repository',
+      recommended: updatesAvailable
+    });
+    relevantActions.push({
+      id: 'toggle-activation',
+      title: 'Enable / Disable Plugins',
+      description: 'Activate or deactivate plugins in Antigravity configuration',
+      recommended: false
+    });
+    relevantActions.push({
+      id: 'configure-settings',
+      title: 'Configure Plugin Settings',
+      description: 'Configure Knowledge Capture storage or persona settings',
+      recommended: false
+    });
+    relevantActions.push({
+      id: 'add-global-source',
+      title: 'Promote Marketplace to Global Scope',
+      description: 'Link repository globally in ~/.gemini/config/plugins.json to use across all workspaces',
+      recommended: false
+    });
+    relevantActions.push({
+      id: 'remove-source',
+      title: 'Remove Workspace Source Mode',
+      description: 'Unlink marketplace source from .agents/plugins.json',
+      recommended: false
+    });
+  } else if (installedWorkspace.length > 0 || installedGlobal.length > 0) {
+    // Current state is Copy Deployment mode.
+    relevantActions.push({
+      id: 'check-updates',
+      title: 'Upgrade Outdated Plugins',
+      description: 'Update copied plugins to latest version',
+      recommended: updatesAvailable
+    });
+    relevantActions.push({
+      id: 'switch-to-source',
+      title: 'Switch to Source-Mode (Recommended)',
+      description: 'Replace copied folders with live plugins.json link for zero-copy git updates',
+      recommended: true
+    });
+    relevantActions.push({
+      id: 'install-plugin',
+      title: 'Install Additional Plugins',
+      description: 'Copy additional plugins from catalog',
+      recommended: false
+    });
+    relevantActions.push({
+      id: 'toggle-activation',
+      title: 'Enable / Disable Plugins',
+      description: 'Activate or deactivate installed plugins',
+      recommended: false
+    });
+    relevantActions.push({
+      id: 'uninstall-plugin',
+      title: 'Uninstall Plugins',
+      description: 'Remove copied plugin directories',
+      recommended: false
+    });
+  } else {
+    // Clean installation (nothing installed yet)
+    relevantActions.push({
+      id: 'add-global-source',
+      title: 'Global Source Mode (Recommended)',
+      description: 'Links monorepo in ~/.gemini/config/plugins.json. Auto-mounts all plugins and auto-updates via git',
+      recommended: true
+    });
+    relevantActions.push({
+      id: 'add-workspace-source',
+      title: 'Workspace Source Mode',
+      description: 'Links monorepo in .agents/plugins.json for current project only',
+      recommended: false
+    });
+    relevantActions.push({
+      id: 'install-copy',
+      title: 'Individual Plugin Copy',
+      description: 'Copies specific plugins directly into workspace or global directory without linking monorepo',
+      recommended: false
+    });
+  }
+
+  return {
+    primaryMode,
+    isGlobalSource,
+    isWorkspaceSource,
+    anySourceActive,
+    installedWorkspaceCount: installedWorkspace.length,
+    installedGlobalCount: installedGlobal.length,
+    updatesAvailable,
+    inventory,
+    relevantActions
+  };
+}
+
+/**
+ * Checks for available updates across installed plugins and upstream repository.
+ * Safe, non-blocking check with timeout.
+ * 
+ * @param {string} repoRoot 
+ * @param {string} homeDir 
+ * @returns {{ hasUpdate: boolean, details: Array<{ id: string, name: string, currentVersion: string, availableVersion: string, scope: string }> }}
+ */
+function checkMarketplaceUpdates(repoRoot, workspaceDir = process.cwd(), homeDir = (process.env.USERPROFILE || process.env.HOME || '')) {
+  const inventory = getPluginInventory(repoRoot, workspaceDir, homeDir);
+  const details = [];
+
+  // Check individual copied plugins
+  for (const item of inventory.items) {
+    if (item.workspaceNeedsUpdate) {
+      details.push({
+        id: item.id,
+        name: item.displayName || item.name,
+        currentVersion: item.workspaceVersion,
+        availableVersion: item.version,
+        scope: 'workspace'
+      });
+    }
+    if (item.globalNeedsUpdate) {
+      details.push({
+        id: item.id,
+        name: item.displayName || item.name,
+        currentVersion: item.globalVersion,
+        availableVersion: item.version,
+        scope: 'global'
+      });
+    }
+  }
+
+  // Check if source repo clone has upstream commits
+  let sourceHasUpdate = false;
+  let sourceCommitsBehind = 0;
+
+  const checkGitDir = (dir) => {
+    if (!fs.existsSync(path.join(dir, '.git'))) return 0;
+    try {
+      execSync('git fetch --dry-run origin', {
+        cwd: dir,
+        timeout: 2500,
+        env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_SSH_COMMAND: 'ssh -o BatchMode=yes -o ConnectTimeout=3' },
+        stdio: ['ignore', 'pipe', 'ignore']
+      });
+      const behind = execSync('git rev-list HEAD..origin/main --count', {
+        cwd: dir,
+        timeout: 1500,
+        encoding: 'utf8',
+        env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+        stdio: ['ignore', 'pipe', 'ignore']
+      }).trim();
+      return parseInt(behind, 10) || 0;
+    } catch {
+      return 0;
+    }
+  };
+
+  if (inventory.sources.global.active || inventory.sources.workspace.active) {
+    const permanentClone = homeDir ? path.join(homeDir, '.gemini', 'sources', 'agent-marketplace') : '';
+    if (permanentClone && fs.existsSync(permanentClone)) {
+      sourceCommitsBehind = checkGitDir(permanentClone);
+    } else if (fs.existsSync(path.join(repoRoot, '.git'))) {
+      sourceCommitsBehind = checkGitDir(repoRoot);
+    }
+    if (sourceCommitsBehind > 0) {
+      sourceHasUpdate = true;
+    }
+  }
+
+  return {
+    hasUpdate: details.length > 0 || sourceHasUpdate,
+    sourceHasUpdate,
+    sourceCommitsBehind,
+    details
+  };
+}
+
 
 // ==========================================
 // EXPLICIT COMMANDS (State Mutation & I/O)
@@ -531,6 +799,8 @@ module.exports = {
   getInstalledPluginInfo,
   compareVersions,
   getPluginInventory,
+  getSystemInstallationState,
+  checkMarketplaceUpdates,
 
   // Commands
   copyDirectory,
@@ -542,3 +812,4 @@ module.exports = {
   uninstallPlugin,
   updatePlugin
 };
+

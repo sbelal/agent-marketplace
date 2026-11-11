@@ -116,9 +116,30 @@ When beginning a complex task, consult existing memory using MCP tools with mini
 
 ---
 
-## 6. Plugin Maintenance & Upgrades
+## 6. Plugin Maintenance, Update Notifications & Autonomous Upgrades
 
-When the user requests to update this plugin (e.g. via `/plugin update knowledge-capture` or "update plugin"):
-- **Source-Mode (`plugins.json`):** When Antigravity mounts this plugin via `plugins.json`, execute `git pull --ff-only` in the source repository to update the code in-place.
-- **Copy-Mode (`.agents/plugins/` or `~/.gemini/config/plugins/`):** Run `npx git+https://github.com/sbelal/agent-marketplace.git --update knowledge-capture`.
-- **Data Preservation Guarantee:** User memories (`~/.gemini/knowledge-capture/`) and settings are decoupled from plugin engine files and remain untouched during upgrades.
+1. **Lightweight Startup Hook Update Notice:**
+   - The `SessionStart` lifecycle hook audits for available plugin and repository updates in the background.
+   - When an update is published, an actionable notification is injected in the session report informing the developer.
+2. **Autonomous Upgrade Execution Upon User Instruction:**
+   - When the user instructs the agent to update plugins (e.g. *"Update knowledge-capture"*, *"Update all plugins"*, or `/kc-update`):
+     - **Inspect Mode:** Query installation state via `node ./bin/install.js --status-json` or inspecting `plugins.json`.
+     - **Source-Mode (`plugins.json`):** Execute `git pull --ff-only` on the repository source or `node ./bin/install.js --update-source`.
+     - **Copy-Mode (`.agents/plugins/` or `~/.gemini/config/plugins/`):** Run `node ./bin/install.js --update <target|all>` (or `npx git+https://github.com/sbelal/agent-marketplace.git --update <target|all>`).
+     - **Preserve User Data:** Reassure the user that personal memory files (`~/.gemini/knowledge-capture/`) and settings are untouched.
+     - **Report Confirmation:** Output an update summary card in chat detailing versions before and after.
+
+---
+
+## 7. State-Aware Interactive Setup & Configuration Protocol
+
+When the user requests setup, configuration, or initialization (e.g. `/kc-init`, `/marketplace`, or *"Set up marketplace plugins"*):
+1. **Never Show Generic CLI Readline Wizards in Chat:** Do not ask the user to run interactive readline terminal scripts.
+2. **State-Aware Inspection & Option Pruning:**
+   - Run `node ./bin/install.js --status-json` first to detect active sources, installed scopes, and settings.
+   - **Crucial Rule:** If the user is currently using a mode (e.g. source-based global install), **prune that option from the choices** so it does not show up as a redundant setup choice.
+3. **Use Harness-Native Choice Interfaces:**
+   - **Google Antigravity:** Use the `ask_question` tool to present structured multiple-choice questions with clickable buttons and write-in input.
+   - **Claude Code:** Use the interactive choices/prompt mechanism in the harness.
+4. **Execute Headless Operations:** Once choices and parameters are collected, invoke commands headlessly with non-interactive flags (`--private-url`, `--team-url`, `--scope`, etc.).
+

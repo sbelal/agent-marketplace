@@ -18,27 +18,30 @@ Antigravity supports two deployment architectures. Use this table to choose the 
 
 ---
 
-## 🚀 Quickstart: Universal Interactive Installer
+## 🚀 Quickstarts: Setting Up Marketplace Plugins
 
-Run the interactive installer directly in your terminal using `npx`:
+### Method A: In-Session Agent Setup (Native "Ask Question" / "Choices" Modal) ⭐
+Instead of switching to a terminal to run a CLI wizard, you can set up plugins directly in Antigravity or Claude Code. The agent uses the harness-native choice interface (`ask_question` in Antigravity or interactive choices in Claude Code) to present clean, clickable options.
+
+Simply ask your agent in chat:
+> **"Set up marketplace plugins"** OR run **`/marketplace`**
+
+The agent automatically runs a state inspection, detects what is already installed, filters out redundant options (e.g. omitting global source mode if already active), and presents only the relevant next actions.
+
+---
+
+### Method B: State-Aware Terminal Installer (CLI Wizard)
+If you prefer running in your terminal, launch the installer via `npx`:
 
 ```bash
 npx git+https://github.com/sbelal/agent-marketplace.git
 ```
 
-The interactive terminal wizard will launch:
-```text
-============================================================
-       🪐 Antigravity Universal Plugin Tool & Manager       
-============================================================
-1. 📦 Install Individual Plugin(s) (Copy Deployment)
-2. 🔗 Add Monorepo as Plugin Source (plugins.json)
-3. 🔄 Check for Updates & Upgrade Plugins
-4. 📋 View Installed Plugins & Active Sources
-5. ⚡ Activate / Deactivate Plugins (Enable / Disable)
-6. 🗑️  Uninstall Plugin or Remove Source Entry
-7. ❌ Exit
-```
+The installer dynamically detects your system state:
+- **If Global Source Mode is already active:** It automatically omits *"Add Monorepo as Plugin Source (Global)"* and *"Install Individual Plugins Globally"*, showing only relevant actions: checking for updates, activating/deactivating plugins, pinning to workspace, or configuring settings.
+- **If Copy-Deployment is active:** It offers upgrading to Source-Mode, checking for updates, or adding more plugins.
+- **If Clean:** It presents the recommended Global Source setup first.
+
 
 ---
 
@@ -164,9 +167,15 @@ npx git+https://github.com/sbelal/agent-marketplace.git --update-source
 git -C /path/to/agent-marketplace pull --ff-only
 ```
 
-#### In-Session Antigravity Update (`/plugin update <name>`):
+#### Autonomous Agent Update (In-Session):
 Inside an active Antigravity chat session:
-- If you ask Antigravity to **"update knowledge-capture"** or run **`/plugin update knowledge-capture`**, the agent checks whether the plugin is registered via `plugins.json` or copied locally, and executes the appropriate update procedure automatically.
+- **Startup Badge:** When a new update is released upstream, the `SessionStart` hook injects an actionable notice in your startup report:
+  `> 🚀 **Plugin Update Available:** A newer version of knowledge-capture is available!`
+- **Agent-Assisted Upgrade:** Simply instruct your agent in chat:
+  > **"Update knowledge-capture"** OR **"Update all plugins"** (or run **`/kc-update`**)
+- **Automated Execution:** The agent checks your deployment mode (Source-Mode vs Copy-Mode), runs the upgrade headlessly, and reports the new versions.
+- **Data Safety:** All memories in `~/.gemini/knowledge-capture/` and personal settings are strictly decoupled from plugin engine files and remain 100% intact.
+
 
 ---
 

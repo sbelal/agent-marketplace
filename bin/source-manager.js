@@ -77,6 +77,74 @@ function findSourceEntry(config, targetPath) {
 }
 
 /**
+ * Pure query: Checks whether an entry path corresponds to this agent marketplace repository.
+ * Accounts for local clone paths, npx permanent cache clones, and relative/absolute variations.
+ * 
+ * @param {string} entryPath 
+ * @param {string} repoRoot 
+ * @param {string} homeDir 
+ * @returns {boolean}
+ */
+function isMarketplaceSourceEntry(entryPath, repoRoot = '', homeDir = '') {
+  if (!entryPath) return false;
+  const normEntry = normalizePath(entryPath).toLowerCase();
+
+  if (repoRoot) {
+    const normRepoPlugins = normalizePath(path.join(repoRoot, 'plugins')).toLowerCase();
+    if (normEntry === normRepoPlugins) return true;
+  }
+
+  if (homeDir) {
+    const normCachePlugins = normalizePath(path.join(homeDir, '.gemini', 'sources', 'agent-marketplace', 'plugins')).toLowerCase();
+    if (normEntry === normCachePlugins) return true;
+  }
+
+  if (normEntry.endsWith('/agent-marketplace/plugins') || normEntry.endsWith('\\agent-marketplace\\plugins')) {
+    return true;
+  }
+
+  // Filesystem inspection if directory exists
+  try {
+    if (fs.existsSync(entryPath)) {
+      if (fs.existsSync(path.join(entryPath, 'knowledge-capture', 'plugin.json')) ||
+          fs.existsSync(path.join(entryPath, 'syran-persona', 'plugin.json'))) {
+        return true;
+      }
+    }
+  } catch {
+    // Ignore fs errors
+  }
+
+  return false;
+}
+
+/**
+ * Pure query: Finds the marketplace source entry in the given config if present.
+ * 
+ * @param {{ entries: Array<{ path: string }> }} config 
+ * @param {string} repoRoot 
+ * @param {string} homeDir 
+ * @returns {{ path: string }|null}
+ */
+function findMarketplaceSourceEntry(config, repoRoot = '', homeDir = '') {
+  if (!config || !Array.isArray(config.entries)) return null;
+  return config.entries.find(entry => isMarketplaceSourceEntry(entry.path, repoRoot, homeDir)) || null;
+}
+
+/**
+ * Pure query: Checks whether marketplace source is active in config.
+ * 
+ * @param {{ entries: Array<{ path: string }> }} config 
+ * @param {string} repoRoot 
+ * @param {string} homeDir 
+ * @returns {boolean}
+ */
+function isMarketplaceSourceActive(config, repoRoot = '', homeDir = '') {
+  return Boolean(findMarketplaceSourceEntry(config, repoRoot, homeDir));
+}
+
+
+/**
  * Pure calculation: Returns a new configuration object with targetPath added.
  * Does not mutate the input config object.
  * 
@@ -189,6 +257,9 @@ module.exports = {
   resolveSourceConfigPath,
   getPluginsConfig,
   findSourceEntry,
+  isMarketplaceSourceEntry,
+  findMarketplaceSourceEntry,
+  isMarketplaceSourceActive,
   calculateConfigWithAddedSource,
   calculateConfigWithRemovedSource,
 

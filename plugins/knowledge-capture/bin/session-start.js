@@ -70,6 +70,79 @@ function safeGitPull(repoDir) {
   }
 }
 
+function checkPluginUpdateNotice(pluginRoot, pluginName, homeDir) {
+  try {
+    const cacheFile = path.join(homeDir, '.gemini', 'config', `.update_check_${pluginName}.json`);
+    const now = Date.now();
+    let cache = null;
+    if (fs.existsSync(cacheFile)) {
+      try {
+        cache = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
+      } catch {}
+    }
+
+    // Check at most once per 60 minutes
+    if (cache && (now - cache.timestamp < 3600 * 1000)) {
+      return cache.hasUpdate ? cache.notice : null;
+    }
+
+    let hasUpdate = false;
+    let notice = '';
+
+    // Check if plugin is inside a git clone (monorepo source mode)
+    const repoGit = path.join(pluginRoot, '..', '..', '.git');
+    if (fs.existsSync(repoGit)) {
+      try {
+        const repoDir = path.dirname(repoGit);
+        execSync('git fetch --dry-run origin', {
+          cwd: repoDir,
+          timeout: 2000,
+          env: GIT_EXEC_ENV,
+          stdio: ['ignore', 'pipe', 'ignore']
+        });
+        const behind = execSync('git rev-list HEAD..origin/main --count', {
+          cwd: repoDir,
+          timeout: 1000,
+          encoding: 'utf8',
+          env: GIT_EXEC_ENV,
+          stdio: ['ignore', 'pipe', 'ignore']
+        }).trim();
+        const count = parseInt(behind, 10) || 0;
+        if (count > 0) {
+          hasUpdate = true;
+          notice = `\n> [!NOTE]\n> 🚀 **Plugin Update Available:** ${count} new update(s) available for \`${pluginName}\` (and marketplace plugins).\n> Instruct me: **"Update ${pluginName}"** or **"Update all plugins"** to pull the latest changes.\n`;
+        }
+      } catch {}
+    } else {
+      // Check copy deployment against permanent cache or manifest
+      const manifestPath = path.join(pluginRoot, 'plugin.json');
+      if (fs.existsSync(manifestPath)) {
+        try {
+          const currentVersion = JSON.parse(fs.readFileSync(manifestPath, 'utf8')).version || '1.0.0';
+          const permManifest = path.join(homeDir, '.gemini', 'sources', 'agent-marketplace', 'plugins', pluginName, 'plugin.json');
+          if (fs.existsSync(permManifest)) {
+            const availVersion = JSON.parse(fs.readFileSync(permManifest, 'utf8')).version || currentVersion;
+            if (availVersion !== currentVersion) {
+              hasUpdate = true;
+              notice = `\n> [!NOTE]\n> 🚀 **Plugin Update Available:** Version v${availVersion} is available for \`${pluginName}\` (installed: v${currentVersion}).\n> Instruct me: **"Update ${pluginName}"** or **"Update all plugins"** to upgrade.\n`;
+            }
+          }
+        } catch {}
+      }
+    }
+
+    try {
+      const parentDir = path.dirname(cacheFile);
+      if (!fs.existsSync(parentDir)) fs.mkdirSync(parentDir, { recursive: true });
+      fs.writeFileSync(cacheFile, JSON.stringify({ timestamp: now, hasUpdate, notice }));
+    } catch {}
+
+    return hasUpdate ? notice : null;
+  } catch {
+    return null;
+  }
+}
+
 async function getStdinPayload() {
   return new Promise((resolve) => {
     if (process.stdin.isTTY) {
@@ -197,6 +270,13 @@ async function main() {
     report += `> Settings file not detected at \`~/.gemini/knowledge-capture/settings.json\`.\n`;
     report += `> The Private layer operates locally without Git sync. Run \`/kc-init\` to configure remotes.\n`;
   }
+
+  // Check for plugin updates and inject notice if available
+  const updateNotice = checkPluginUpdateNotice(pluginRoot, 'knowledge-capture', home);
+  if (updateNotice) {
+    report += updateNotice;
+  }
+
 
   // Dual-platform output formatting:
   // Antigravity passes stdin payload with conversationId and expects JSON injectSteps.

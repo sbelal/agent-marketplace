@@ -66,7 +66,15 @@ claude plugin update knowledge-capture
 claude plugin update --all
 ```
 
+### 3. Autonomous In-Session Update:
+Inside a Claude Code session, when an update is available you will see a startup notice:
+`> 🚀 Plugin Update Available`
+Simply ask Claude in chat:
+> **"Update knowledge-capture"** OR **"Update all plugins"** (or run **`/kc-update`**)
+The agent will execute the update command automatically.
+
 ---
+
 
 ## 🗑️ Uninstallation
 

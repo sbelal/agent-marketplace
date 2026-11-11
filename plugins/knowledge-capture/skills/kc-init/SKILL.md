@@ -29,45 +29,46 @@ Ensures:
 - `~/.gemini/knowledge-capture/team/`
 - `~/.gemini/knowledge-capture/settings.json`
 
-### 3. Present the Interactive Setup Wizard in Chat
-Present the developer with this structured, step-by-step options menu:
+### 3. State-Aware Harness-Native Interactive Choices
 
-```markdown
-### 🧠 Knowledge Capture Setup Wizard
+Inspect the current configuration in `~/.gemini/knowledge-capture/settings.json`.
 
-I will guide you through configuring your persistent memory layers.
+#### Under Google Antigravity:
+Use the **`ask_question`** tool to present native interactive modal choice dialogs to the user.
 
----
+- **Step 3A: Private Memory Layer Question:**
+  - If already configured with a remote URL:
+    - `question`: "Your Private Memory Layer is currently connected to `<currentUrl>`. How would you like to configure it?"
+    - `options`:
+      - "(Recommended) Keep existing remote (`<currentUrl>`)"
+      - "Change GitHub Private Repository URL"
+      - "Switch to Local Machine Only (no remote sync)"
+  - If not configured (or local-only):
+    - `question`: "Where should your Private Memory Layer (Personal Engineering Learnings) be stored?"
+    - `options`:
+      - "(Recommended) GitHub Private Repository - Syncs memories across machines and remote agents"
+      - "Local Machine Only - Store in ~/.gemini/knowledge-capture/private/ without remote sync"
 
-#### Step 1: Private Memory Layer (Personal Engineering Learnings)
-Where should personal preferences, debugging solutions, and custom gotchas be stored?
+- **Step 3B: Team Memory Layer Question:**
+  - If already configured:
+    - `question`: "Your Team Memory Layer is currently connected to `<teamUrl>`. How would you like to configure it?"
+    - `options`:
+      - "(Recommended) Keep existing team remote (`<teamUrl>`)"
+      - "Change Team Shared Git Repository URL"
+      - "Skip / Remove team repository"
+  - If not configured:
+    - `question`: "Do you have a shared Team Git Repository for company-wide engineering guidelines?"
+    - `options`:
+      - "(Recommended) Skip / Local-Only (Default)"
+      - "Connect Team Shared Git Repository"
 
-1. **GitHub Private Repository (Recommended)**
-   - Syncs your personal memories across all laptops and Antigravity remote agents.
-   - Example URLs:
-     - SSH: `git@github.com:<your-username>/my-knowledge-memory.git`
-     - HTTPS: `https://github.com/<your-username>/my-knowledge-memory.git`
-2. **Local Machine Only**
-   - Keeps memories strictly in `~/.gemini/knowledge-capture/private/` without remote syncing.
+#### Under Claude Code:
+Present the same state-aware multiple-choice options using Claude Code's interactive choice prompts.
 
----
+#### Repository URL Prompt:
+If the user chooses to connect or change a GitHub repository, prompt them for the URL (the user can enter it directly via the write-in input in the modal or reply):
+- Example: `git@github.com:<your-username>/my-knowledge-memory.git` or `https://github.com/<your-username>/my-knowledge-memory.git`
 
-#### Step 2: Team Memory Layer (Shared Standards & Conventions)
-Do you have a shared team repository for company-wide engineering guidelines?
-
-1. **Team Shared Git Repository**
-   - Automatically fast-forwards verified team standards on startup and enables `/kc-promote` PRs.
-   - Example URL: `git@github.com:<your-org>/shared-team-memory.git`
-2. **Skip / Local-Only (Default)**
-   - Keep team memory unconfigured for now.
-
----
-👉 **Reply with your choice:**
-- E.g., *"Option 1 for Private (`git@github.com:user/repo.git`) and Option 2 for Team"*, OR
-- *"Local only for both"*
-```
-
-**Halt the turn and await the developer's reply.**
 
 ### 4. Validate Remote Connectivity
 When the developer provides a repository URL:
