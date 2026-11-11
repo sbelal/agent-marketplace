@@ -6,6 +6,20 @@
         "command": "node ./bin/session-start.js",
         "timeout": 15
       }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "node ./bin/session-end.js",
+        "timeout": 10
+      }
+    ],
+    "SessionEnd": [
+      {
+        "type": "command",
+        "command": "node ./bin/session-end.js",
+        "timeout": 10
+      }
     ]
   }
 }

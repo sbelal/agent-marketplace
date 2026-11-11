@@ -182,24 +182,29 @@ export function evaluateProbability(hypotheses = [], prior = 0.5) {
   }
 
   const sanitizedPrior = Math.max(0.01, Math.min(0.99, Number(prior) || 0.5));
-  let totalWeight = 0;
+  let totalLikelihood = 0;
 
-  hypotheses.forEach(h => {
-    totalWeight += (typeof h.weight === 'number' && h.weight > 0) ? h.weight : 1.0;
+  // Compute empirical likelihoods scaled by prior distribution
+  const rawHypotheses = hypotheses.map((h, idx) => {
+    const rawWeight = (typeof h.weight === 'number' && h.weight > 0) ? h.weight : 1.0;
+    const riskFactor = (typeof h.risk === 'number') ? Math.max(0.0, Math.min(1.0, h.risk)) : 0.5;
+    // Bayesian prior weighting: modulate baseline likelihood with prior probability
+    const priorWeight = idx === 0 ? sanitizedPrior : (1.0 - sanitizedPrior) / Math.max(1, hypotheses.length - 1);
+    const likelihood = rawWeight * priorWeight;
+    totalLikelihood += likelihood;
+    return { label: h.label || 'Unlabeled hypothesis', likelihood, riskFactor };
   });
 
-  const evaluations = hypotheses.map(h => {
-    const rawWeight = (typeof h.weight === 'number' && h.weight > 0) ? h.weight : 1.0;
-    const normalizedProb = totalWeight > 0 ? (rawWeight / totalWeight) : (1 / hypotheses.length);
-    const riskFactor = (typeof h.risk === 'number') ? Math.max(0.0, Math.min(1.0, h.risk)) : 0.5;
-
-    // Expected value index: Probability * (1 - Risk)
-    const expectedValue = normalizedProb * (1.0 - riskFactor);
+  const evaluations = rawHypotheses.map(h => {
+    const posteriorProb = totalLikelihood > 0 ? (h.likelihood / totalLikelihood) : (1 / hypotheses.length);
+    // Expected value index: Posterior Probability * (1 - Risk)
+    const expectedValue = posteriorProb * (1.0 - h.riskFactor);
 
     return {
-      label: h.label || 'Unlabeled hypothesis',
-      probability: Number((normalizedProb * 100).toFixed(2)) + '%',
-      risk_factor: Number((riskFactor * 100).toFixed(1)) + '%',
+      label: h.label,
+      probability: Number((posteriorProb * 100).toFixed(2)) + '%',
+      posterior_probability: Number(posteriorProb.toFixed(4)),
+      risk_factor: Number((h.riskFactor * 100).toFixed(1)) + '%',
       expected_value_rating: Number((expectedValue * 100).toFixed(2))
     };
   });

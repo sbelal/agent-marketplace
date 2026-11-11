@@ -281,7 +281,8 @@ async function main() {
   // Dual-platform output formatting:
   // Antigravity passes stdin payload with conversationId and expects JSON injectSteps.
   // Claude Code executes the hook command and injects raw stdout plain text.
-  const isAntigravity = Boolean(payload && payload.conversationId);
+  const isClaudeCode = Boolean(process.env.CLAUDE_PLUGIN_ROOT);
+  const isAntigravity = !isClaudeCode || Boolean(payload && payload.conversationId);
 
   if (isAntigravity) {
     const output = {

@@ -10,14 +10,14 @@ This skill generates a self-contained, interactive HTML visual canvas artifact a
 
 ## Workflow
 
-### 1. Fetch Graph Dataset
-Call the MCP tool **`get_memory_graph`** to retrieve:
+### 1. Fetch Graph Dataset & Generate Canvas
+Call the MCP tool **`generate_knowledge_graph_html`** (or **`get_memory_graph`**) to produce the self-contained D3.js interactive canvas:
 - `nodes`: List of memory nodes with `id`, `slug`, `layer`, `domain`, `type`, `stale` (boolean), `description`, and `applied_count`.
-- `links`: Directed connections between nodes (`related` and `overrides`).
-- `summary`: Total node/link counts and active domains.
+- `links`: Directed connections between nodes (`related` and `overrides`) with referential integrity guarantee.
+- `summary`: Total node/link counts, broken link diagnostics, and active domains.
 
-### 2. Generate Interactive Canvas Artifact
-Create a standalone `.html` artifact in `<appDataDir>/brain/<conversation-id>/knowledge-graph.html` with `ArtifactMetadata` (`UserFacing: true`, `RequestFeedback: false`) featuring:
+### 2. Output Interactive Canvas Artifact
+Write the generated HTML to a standalone `.html` artifact in `<appDataDir>/brain/<conversation-id>/knowledge-graph.html` with `ArtifactMetadata` (`UserFacing: true`, `RequestFeedback: false`) featuring:
 - **D3.js Force Simulation:** Interactive draggable nodes with collision detection and elastic edge links.
 - **Visual Encoding:**
   - **Node Fill Color by Layer:** Workspace = `#a855f7` (Purple), Private = `#3b82f6` (Blue), Team = `#10b981` (Emerald).

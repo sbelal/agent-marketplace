@@ -1,6 +1,6 @@
 {
   "name": "knowledge-capture",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Multi-layered persistent memory system with full CQS stdio MCP server, local SQLite FTS5 hybrid search, JIT guardrails, and Git synchronization.",
   "author": {
     "name": "Sal Belal"

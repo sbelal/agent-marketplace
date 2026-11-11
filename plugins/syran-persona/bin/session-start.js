@@ -138,7 +138,8 @@ async function main() {
     }
   }
 
-  const isAntigravity = Boolean(payload && payload.conversationId);
+  const isClaudeCode = Boolean(process.env.CLAUDE_PLUGIN_ROOT);
+  const isAntigravity = !isClaudeCode || Boolean(payload && payload.conversationId);
   const home = os.homedir();
   const updateNotice = checkPluginUpdateNotice(pluginRoot, 'syran-persona', home);
 
