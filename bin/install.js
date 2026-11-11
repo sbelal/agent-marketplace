@@ -27,6 +27,8 @@ const {
   getInstalledPluginInfo,
   compareVersions,
   getPluginInventory,
+  getSystemInstallationState,
+  checkMarketplaceUpdates,
   installPlugin,
   uninstallPlugin,
   updatePlugin,
@@ -194,51 +196,214 @@ function runInteractiveWizard() {
 
   async function mainMenu() {
     printHeader();
-    console.log('1. 📦 Install Individual Plugin(s) (Copy Deployment)');
-    console.log('2. 🔗 Add Monorepo as Plugin Source (plugins.json)');
-    console.log('3. 🔄 Check for Updates & Upgrade Plugins');
-    console.log('4. 📋 View Installed Plugins & Active Sources');
-    console.log('5. ⚡ Activate / Deactivate Plugins (Enable / Disable)');
-    console.log('6. 🗑️  Uninstall Plugin or Remove Source Entry');
-    console.log('7. ❌ Exit\n');
+    const state = getSystemInstallationState(REPO_ROOT, WORKSPACE_DIR, HOME_DIR);
 
-    const choice = (await prompt('Select an option [1-7]: ')).trim();
+    // State Detection & Notification Banner
+    if (state.isGlobalSource && state.isWorkspaceSource) {
+      console.log('\x1b[32m🪐 Current State: 🔗 Monorepo Source [Dual-Scope Active (Global & Workspace)]\x1b[0m');
+      console.log('\x1b[90mAll catalog plugins are mounted from repository source.\x1b[0m\n');
+    } else if (state.isGlobalSource) {
+      console.log('\x1b[32m🪐 Current State: 🔗 Monorepo Source [Global Scope Active]\x1b[0m');
+      console.log('\x1b[90mAll catalog plugins are mounted globally and automatically updated via git.\x1b[0m\n');
+    } else if (state.isWorkspaceSource) {
+      console.log('\x1b[32m🪐 Current State: 🔗 Monorepo Source [Workspace Scope Active]\x1b[0m');
+      console.log('\x1b[90mCatalog plugins are scoped exclusively to this project.\x1b[0m\n');
+    } else if (state.installedWorkspaceCount > 0 || state.installedGlobalCount > 0) {
+      console.log(`\x1b[33m📦 Current State: Copy Deployment (${state.installedWorkspaceCount} workspace, ${state.installedGlobalCount} global)\x1b[0m\n`);
+    } else {
+      console.log('\x1b[90m⚪ Current State: No marketplace plugins or sources configured yet.\x1b[0m\n');
+    }
 
-    switch (choice) {
-      case '1':
-        await handleInstallPluginMenu(prompt);
-        break;
-      case '2':
-        await handleAddSourceMenu(prompt);
-        break;
-      case '3':
-        await handleUpdateMenu(prompt);
-        break;
-      case '4':
-        printInventoryReport();
-        await prompt('Press Enter to return to main menu...');
-        break;
-      case '5':
-        await handleToggleActivationMenu(prompt);
-        break;
-      case '6':
-        await handleUninstallMenu(prompt);
-        break;
-      case '7':
-      case 'exit':
-      case 'quit':
+    if (state.updatesAvailable) {
+      console.log('\x1b[31m🚀 UPDATE AVAILABLE: One or more installed plugins have newer versions ready to upgrade!\x1b[0m\n');
+    }
+
+    // Dynamically construct menu based on current installation state
+    const menuActions = [];
+
+    if (state.isGlobalSource) {
+      // NOTE: "Install source-based global install (repo clone)" is INTENTIONALLY EXCLUDED
+      // because that is what the user currently is using!
+      menuActions.push({
+        label: state.updatesAvailable ? '🔄 Check for Updates & Upgrade Plugins \x1b[31m[UPDATE AVAILABLE]\x1b[0m' : '🔄 Check for Updates & Pull Latest (git)',
+        handler: () => handleUpdateMenu(prompt)
+      });
+      menuActions.push({
+        label: '⚡ Activate / Deactivate Plugins (Enable / Disable)',
+        handler: () => handleToggleActivationMenu(prompt)
+      });
+      if (!state.isWorkspaceSource) {
+        menuActions.push({
+          label: '📦 Pin / Copy Plugin to Workspace (.agents/plugins/)',
+          handler: () => handleInstallPluginMenu(prompt, 'workspace')
+        });
+      }
+      menuActions.push({
+        label: '📋 View Installed Plugins & Active Sources',
+        handler: async () => {
+          printInventoryReport();
+          await prompt('Press Enter to return to main menu...');
+        }
+      });
+      menuActions.push({
+        label: '🗑️  Remove Global Source Entry',
+        handler: async () => {
+          const confirm = (await prompt('Remove Global Source Mode? (y/N): ')).trim().toLowerCase();
+          if (confirm === 'y') {
+            const configPath = resolveSourceConfigPath('global', WORKSPACE_DIR, HOME_DIR);
+            const targetSourcePath = resolveSourceRegistrationPath(REPO_ROOT, HOME_DIR);
+            removeSourceEntry(configPath, targetSourcePath);
+            console.log(`\x1b[32m✔ Global source removed from ${configPath}.\x1b[0m`);
+          }
+          await prompt('Press Enter to continue...');
+        }
+      });
+    } else if (state.isWorkspaceSource) {
+      menuActions.push({
+        label: state.updatesAvailable ? '🔄 Check for Updates & Upgrade Plugins \x1b[31m[UPDATE AVAILABLE]\x1b[0m' : '🔄 Check for Updates & Pull Latest (git)',
+        handler: () => handleUpdateMenu(prompt)
+      });
+      menuActions.push({
+        label: '⚡ Activate / Deactivate Plugins (Enable / Disable)',
+        handler: () => handleToggleActivationMenu(prompt)
+      });
+      menuActions.push({
+        label: '🔗 Promote Monorepo to Global Scope (~/.gemini/config/plugins.json)',
+        handler: () => handleAddSourceDirect(prompt, 'global')
+      });
+      menuActions.push({
+        label: '📋 View Installed Plugins & Active Sources',
+        handler: async () => {
+          printInventoryReport();
+          await prompt('Press Enter to return to main menu...');
+        }
+      });
+      menuActions.push({
+        label: '🗑️  Remove Workspace Source Entry',
+        handler: async () => {
+          const confirm = (await prompt('Remove Workspace Source Mode? (y/N): ')).trim().toLowerCase();
+          if (confirm === 'y') {
+            const configPath = resolveSourceConfigPath('workspace', WORKSPACE_DIR, HOME_DIR);
+            const targetSourcePath = resolveSourceRegistrationPath(REPO_ROOT, HOME_DIR);
+            removeSourceEntry(configPath, targetSourcePath);
+            console.log(`\x1b[32m✔ Workspace source removed from ${configPath}.\x1b[0m`);
+          }
+          await prompt('Press Enter to continue...');
+        }
+      });
+    } else if (state.installedWorkspaceCount > 0 || state.installedGlobalCount > 0) {
+      menuActions.push({
+        label: state.updatesAvailable ? '🔄 Upgrade Outdated Plugins \x1b[31m[UPDATE AVAILABLE]\x1b[0m' : '🔄 Check for Updates & Upgrade Plugins',
+        handler: () => handleUpdateMenu(prompt)
+      });
+      menuActions.push({
+        label: '⭐ Switch to Global Source-Mode (Recommended - Zero Copy & Auto Git Sync)',
+        handler: () => handleAddSourceDirect(prompt, 'global')
+      });
+      menuActions.push({
+        label: '📦 Install Additional Plugin(s)',
+        handler: () => handleInstallPluginMenu(prompt)
+      });
+      menuActions.push({
+        label: '⚡ Activate / Deactivate Plugins (Enable / Disable)',
+        handler: () => handleToggleActivationMenu(prompt)
+      });
+      menuActions.push({
+        label: '📋 View Installed Plugins & Active Sources',
+        handler: async () => {
+          printInventoryReport();
+          await prompt('Press Enter to return to main menu...');
+        }
+      });
+      menuActions.push({
+        label: '🗑️  Uninstall Plugin',
+        handler: () => handleUninstallMenu(prompt)
+      });
+    } else {
+      menuActions.push({
+        label: '⭐ Add Monorepo as Plugin Source (Global - Recommended)',
+        handler: () => handleAddSourceDirect(prompt, 'global')
+      });
+      menuActions.push({
+        label: '🔗 Add Monorepo as Plugin Source (Workspace Scope)',
+        handler: () => handleAddSourceDirect(prompt, 'workspace')
+      });
+      menuActions.push({
+        label: '📦 Install Individual Plugin(s) (Copy Deployment)',
+        handler: () => handleInstallPluginMenu(prompt)
+      });
+      menuActions.push({
+        label: '📋 View Catalog Inventory',
+        handler: async () => {
+          printInventoryReport();
+          await prompt('Press Enter to return to main menu...');
+        }
+      });
+    }
+
+    menuActions.push({
+      label: '❌ Exit',
+      handler: () => {
         console.log('Goodbye!');
         rl.close();
-        return;
-      default:
-        console.log('\x1b[31mInvalid option. Please choose 1-7.\x1b[0m');
-        break;
+        process.exit(0);
+      }
+    });
+
+    console.log('\x1b[1mAvailable Actions:\x1b[0m');
+    menuActions.forEach((action, idx) => {
+      console.log(`${idx + 1}. ${action.label}`);
+    });
+    console.log('');
+
+    const choice = (await prompt(`Select an option [1-${menuActions.length}]: `)).trim();
+    const choiceIdx = parseInt(choice, 10);
+
+    if (!isNaN(choiceIdx) && choiceIdx >= 1 && choiceIdx <= menuActions.length) {
+      await menuActions[choiceIdx - 1].handler();
+    } else if (choice.toLowerCase() === 'exit' || choice.toLowerCase() === 'quit') {
+      console.log('Goodbye!');
+      rl.close();
+      return;
+    } else {
+      console.log('\x1b[31mInvalid option.\x1b[0m');
     }
 
     await mainMenu();
   }
 
-  async function handleInstallPluginMenu(promptFn) {
+  async function handleAddSourceDirect(promptFn, scope) {
+    const configPath = resolveSourceConfigPath(scope, WORKSPACE_DIR, HOME_DIR);
+    const targetSourcePath = resolveSourceRegistrationPath(REPO_ROOT, HOME_DIR);
+
+    if (isNpxExecution(REPO_ROOT)) {
+      const cloned = ensurePermanentSourceClone(targetSourcePath);
+      if (!cloned) {
+        console.error('\x1b[31mFailed to establish permanent source clone. Aborting.\x1b[0m');
+        await promptFn('Press Enter to continue...');
+        return;
+      }
+    }
+
+    const added = addSourceEntry(configPath, targetSourcePath);
+    if (added) {
+      console.log(`\n\x1b[32m✔ Successfully registered source entry in ${configPath}:\x1b[0m`);
+      console.log(`  \x1b[36m${normalizePath(targetSourcePath)}\x1b[0m`);
+
+      const plugins = getAvailablePlugins(REPO_ROOT);
+      for (const p of plugins) {
+        setPluginEnabled(p.id, true, HOME_DIR);
+      }
+      console.log(`\x1b[32m✔ Automatically activated all catalog plugins (enabled: true in config.json)\x1b[0m`);
+      console.log('\n\x1b[36mRestart your Antigravity agent or IDE session to mount plugins.\x1b[0m\n');
+    } else {
+      console.log(`\n\x1b[33mSource entry already exists in ${configPath}.\x1b[0m\n`);
+    }
+
+    await promptFn('Press Enter to continue...');
+  }
+
+  async function handleInstallPluginMenu(promptFn, forcedScope = null) {
     const plugins = getAvailablePlugins(REPO_ROOT);
     if (plugins.length === 0) {
       console.log('\x1b[31mNo plugins discovered in repository.\x1b[0m');
@@ -259,15 +424,28 @@ function runInteractiveWizard() {
       return;
     }
 
-    console.log('\n\x1b[1mSelect Installation Scope:\x1b[0m');
-    console.log('1. Current Workspace (.agents/plugins/)');
-    console.log('2. Global Machine (~/.gemini/config/plugins/)');
-    console.log('3. < Cancel');
+    let scope = forcedScope;
+    if (!scope) {
+      const state = getSystemInstallationState(REPO_ROOT, WORKSPACE_DIR, HOME_DIR);
+      console.log('\n\x1b[1mSelect Installation Scope:\x1b[0m');
+      console.log('1. Current Workspace (.agents/plugins/)');
+      if (!state.isGlobalSource) {
+        console.log('2. Global Machine (~/.gemini/config/plugins/)');
+        console.log('3. < Cancel');
+      } else {
+        console.log('2. < Cancel (Global already active via source-mode)');
+      }
 
-    const scopeSel = (await promptFn('Choose scope [1-3]: ')).trim();
-    if (scopeSel !== '1' && scopeSel !== '2') return;
+      const scopeSel = (await promptFn('Choose scope: ')).trim();
+      if (scopeSel === '1') {
+        scope = 'workspace';
+      } else if (scopeSel === '2' && !state.isGlobalSource) {
+        scope = 'global';
+      } else {
+        return;
+      }
+    }
 
-    const scope = scopeSel === '1' ? 'workspace' : 'global';
     const targets = (selIdx === plugins.length + 1) ? plugins : [plugins[selIdx - 1]];
 
     for (const p of targets) {
@@ -287,49 +465,6 @@ function runInteractiveWizard() {
     await promptFn('Press Enter to continue...');
   }
 
-  async function handleAddSourceMenu(promptFn) {
-    console.log('\n\x1b[1mAdd Monorepo as Plugin Source (plugins.json)\x1b[0m');
-    console.log('This enables declarative loading for all current and future plugins.');
-    console.log('Updates are applied via `git pull` without re-copying files.\n');
-
-    console.log('1. Workspace Scope (.agents/plugins.json)');
-    console.log('2. Global Scope (~/.gemini/config/plugins.json)');
-    console.log('3. < Cancel');
-
-    const scopeSel = (await promptFn('Choose scope [1-3]: ')).trim();
-    if (scopeSel !== '1' && scopeSel !== '2') return;
-
-    const scope = scopeSel === '1' ? 'workspace' : 'global';
-    const configPath = resolveSourceConfigPath(scope, WORKSPACE_DIR, HOME_DIR);
-    const targetSourcePath = resolveSourceRegistrationPath(REPO_ROOT, HOME_DIR);
-
-    if (isNpxExecution(REPO_ROOT)) {
-      const cloned = ensurePermanentSourceClone(targetSourcePath);
-      if (!cloned) {
-        console.error('\x1b[31mFailed to establish permanent source clone. Aborting.\x1b[0m');
-        await promptFn('Press Enter to continue...');
-        return;
-      }
-    }
-
-    const added = addSourceEntry(configPath, targetSourcePath);
-    if (added) {
-      console.log(`\n\x1b[32m✔ Successfully added source entry in ${configPath}:\x1b[0m`);
-      console.log(`  \x1b[36m${normalizePath(targetSourcePath)}\x1b[0m`);
-
-      // Ensure catalog plugins are enabled in Antigravity configuration
-      const plugins = getAvailablePlugins(REPO_ROOT);
-      for (const p of plugins) {
-        setPluginEnabled(p.id, true, HOME_DIR);
-      }
-      console.log(`\x1b[32m✔ Automatically activated all catalog plugins (enabled: true in config.json)\x1b[0m`);
-      console.log('\n\x1b[36mRestart your Antigravity agent to mount the plugin source.\x1b[0m\n');
-    } else {
-      console.log(`\n\x1b[33mSource entry already exists in ${configPath}.\x1b[0m\n`);
-    }
-
-    await promptFn('Press Enter to continue...');
-  }
 
   async function handleUpdateMenu(promptFn) {
     printUpdateAudit();
@@ -455,6 +590,13 @@ Options:
   --uninstall <id>          Uninstall specific plugin
   --help, -h                Show this help screen
     `);
+    process.exit(0);
+  }
+
+  if (hasFlag('--status-json') || hasFlag('--inventory-json')) {
+    const state = getSystemInstallationState(REPO_ROOT, WORKSPACE_DIR, HOME_DIR);
+    const updateCheck = checkMarketplaceUpdates(REPO_ROOT, WORKSPACE_DIR, HOME_DIR);
+    console.log(JSON.stringify({ ...state, updateCheck }, null, 2));
     process.exit(0);
   }
 

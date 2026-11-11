@@ -33,7 +33,14 @@ A universal, cross-platform plugin marketplace and monorepo engineered for **Goo
 
 ### 🪐 Google Antigravity
 
-Run the universal cross-platform installer wizard in your terminal:
+#### Option 1: In-Session Agent Setup (Interactive Choices) ⭐
+Ask your Antigravity agent directly in chat:
+> **"Set up marketplace plugins"** OR run **`/marketplace`**
+
+The agent automatically detects your current environment state, filters out redundant options (e.g. omitting global source mode if already active), and presents an interactive choices modal (`ask_question`).
+
+#### Option 2: State-Aware CLI Installer Wizard
+Run the installer directly in your terminal:
 
 ```bash
 npx git+https://github.com/sbelal/agent-marketplace.git
@@ -55,7 +62,10 @@ npx git+https://github.com/sbelal/agent-marketplace.git --enable knowledge-captu
 npx git+https://github.com/sbelal/agent-marketplace.git --disable knowledge-capture
 ```
 
+🔄 **Automatic Update Notifications:** The `SessionStart` lifecycle hook alerts you whenever an upstream update is published. Simply tell the agent: **"Update knowledge-capture"** or run **`/kc-update`** to have it upgrade automatically.
+
 📖 **Detailed Antigravity Manual:** See [**`docs/install-antigravity.md`**](./docs/install-antigravity.md) for full walkthroughs, scope options, manual air-gapped installation, and in-session updates.
+
 
 ---
 
