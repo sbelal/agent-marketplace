@@ -106,53 +106,95 @@ export function parseYamlFrontmatter(fileContent) {
 
   const lines = rawYaml.split(/\r?\n/);
   let currentKey = null;
+  let currentSubKey = null;
+  let isSubMap = false;
 
-  for (const line of lines) {
-    const trimmedLine = line.trim();
+  for (let i = 0; i < lines.length; i++) {
+    const rawLine = lines[i];
+    const trimmedLine = rawLine.trim();
     if (!trimmedLine || trimmedLine.startsWith('#')) {
       continue;
     }
 
-    const colonIndex = line.indexOf(':');
-    if (colonIndex > 0 && !line.startsWith(' ') && !line.startsWith('\t')) {
-      const key = line.slice(0, colonIndex).trim();
-      let value = line.slice(colonIndex + 1).trim();
+    const indent = rawLine.search(/\S/);
 
-      // Handle multiline indicators like > or |
-      if (value === '>' || value === '|') {
-        frontmatter[key] = '';
-        currentKey = key;
-        continue;
-      }
+    if (indent === 0) {
+      // Top-level key
+      currentSubKey = null;
+      isSubMap = false;
+      const colonIndex = rawLine.indexOf(':');
+      if (colonIndex > 0) {
+        const key = rawLine.slice(0, colonIndex).trim();
+        let value = rawLine.slice(colonIndex + 1).trim();
 
-      // Handle inline YAML array syntax: [item1, item2]
-      if (value.startsWith('[') && value.endsWith(']')) {
-        frontmatter[key] = parseInlineArrayOrList(value);
-        currentKey = key;
-        continue;
-      }
-
-      value = stripQuotes(value);
-      frontmatter[key] = value;
-      currentKey = key;
-    } else if (currentKey) {
-      if (trimmedLine.startsWith('-')) {
-        // Handle list item
-        if (!Array.isArray(frontmatter[currentKey])) {
-          frontmatter[currentKey] = [];
+        if (value === '' || value === '>' || value === '|') {
+          frontmatter[key] = (value === '>' || value === '|') ? '' : null;
+          currentKey = key;
+        } else if (value.startsWith('[') && value.endsWith(']')) {
+          frontmatter[key] = parseInlineArrayOrList(value);
+          currentKey = key;
+        } else {
+          frontmatter[key] = stripQuotes(value);
+          currentKey = key;
         }
+      }
+    } else if (currentKey) {
+      // Indented line under currentKey
+      const colonIndex = trimmedLine.indexOf(':');
+      if (colonIndex > 0 && !trimmedLine.startsWith('-')) {
+        // Nested subkey (e.g. tools: [run_command])
+        const subKey = trimmedLine.slice(0, colonIndex).trim();
+        let subVal = trimmedLine.slice(colonIndex + 1).trim();
+
+        if (frontmatter[currentKey] === null || typeof frontmatter[currentKey] !== 'object' || Array.isArray(frontmatter[currentKey])) {
+          frontmatter[currentKey] = {};
+        }
+        isSubMap = true;
+        currentSubKey = subKey;
+
+        if (subVal.startsWith('[') && subVal.endsWith(']')) {
+          frontmatter[currentKey][subKey] = parseInlineArrayOrList(subVal);
+        } else if (subVal === '' || subVal === '>' || subVal === '|') {
+          frontmatter[currentKey][subKey] = (subVal === '>' || subVal === '|') ? '' : [];
+        } else {
+          frontmatter[currentKey][subKey] = stripQuotes(subVal);
+        }
+      } else if (trimmedLine.startsWith('-')) {
+        // List item under top-level key or subkey
         const item = stripQuotes(trimmedLine.replace(/^-\s*/, '').trim());
-        if (item) {
-          frontmatter[currentKey].push(item);
+        if (isSubMap && currentSubKey) {
+          if (!Array.isArray(frontmatter[currentKey][currentSubKey])) {
+            frontmatter[currentKey][currentSubKey] = [];
+          }
+          if (item) frontmatter[currentKey][currentSubKey].push(item);
+        } else {
+          if (!Array.isArray(frontmatter[currentKey])) {
+            frontmatter[currentKey] = [];
+          }
+          if (item) frontmatter[currentKey].push(item);
         }
       } else {
         // Continuation of multiline string
-        if (typeof frontmatter[currentKey] === 'string') {
-          const sep = frontmatter[currentKey] ? ' ' : '';
-          frontmatter[currentKey] += sep + trimmedLine;
+        if (isSubMap && currentSubKey) {
+          if (typeof frontmatter[currentKey][currentSubKey] === 'string') {
+            const sep = frontmatter[currentKey][currentSubKey] ? ' ' : '';
+            frontmatter[currentKey][currentSubKey] += sep + trimmedLine;
+          }
+        } else {
+          if (typeof frontmatter[currentKey] === 'string') {
+            const sep = frontmatter[currentKey] ? ' ' : '';
+            frontmatter[currentKey] += sep + trimmedLine;
+          } else if (frontmatter[currentKey] === null) {
+            frontmatter[currentKey] = trimmedLine;
+          }
         }
       }
     }
+  }
+
+  // Convert any remaining null values to empty string
+  for (const [k, v] of Object.entries(frontmatter)) {
+    if (v === null) frontmatter[k] = '';
   }
 
   // Normalize aliases: slug <-> name, trigger <-> description
@@ -201,7 +243,7 @@ export function findMarkdownFiles(dirPath) {
   }
 }
 
-function scanLayerEntries(workspaceRoot, targetLayer = 'all') {
+export function scanLayerEntries(workspaceRoot, targetLayer = 'all') {
   const paths = resolveStoragePaths(workspaceRoot);
   const layersToScan = [];
 
@@ -832,13 +874,15 @@ export function rewireMemoryReferences(workspaceRoot, oldSlug, newSlug) {
         }
 
         // Check overrides
-        if (parsed.frontmatter.overrides === oldSlug) {
-          parsed.frontmatter.overrides = newSlug;
-          modified = true;
-        } else if (Array.isArray(parsed.frontmatter.overrides) && parsed.frontmatter.overrides.includes(oldSlug)) {
-          parsed.frontmatter.overrides = parsed.frontmatter.overrides.map(s => (s === oldSlug ? newSlug : s));
-          parsed.frontmatter.overrides = [...new Set(parsed.frontmatter.overrides)];
-          modified = true;
+        if (parsed.frontmatter.overrides) {
+          const overridesList = parseInlineArrayOrList(parsed.frontmatter.overrides);
+          if (overridesList.includes(oldSlug)) {
+            const updated = overridesList.map(s => (s === oldSlug ? newSlug : s));
+            parsed.frontmatter.overrides = Array.isArray(parsed.frontmatter.overrides)
+              ? [...new Set(updated)]
+              : [...new Set(updated)].join(', ');
+            modified = true;
+          }
         }
 
         if (modified) {
@@ -874,13 +918,19 @@ export function cleanDanglingReferences(workspaceRoot, deletedSlug) {
           modified = true;
         }
 
-        if (parsed.frontmatter.overrides === deletedSlug) {
-          delete parsed.frontmatter.overrides;
-          modified = true;
-        } else if (Array.isArray(parsed.frontmatter.overrides) && parsed.frontmatter.overrides.includes(deletedSlug)) {
-          parsed.frontmatter.overrides = parsed.frontmatter.overrides.filter(s => s !== deletedSlug);
-          if (parsed.frontmatter.overrides.length === 0) delete parsed.frontmatter.overrides;
-          modified = true;
+        if (parsed.frontmatter.overrides) {
+          const overridesList = parseInlineArrayOrList(parsed.frontmatter.overrides);
+          if (overridesList.includes(deletedSlug)) {
+            const updated = overridesList.filter(s => s !== deletedSlug);
+            if (updated.length === 0) {
+              delete parsed.frontmatter.overrides;
+            } else {
+              parsed.frontmatter.overrides = Array.isArray(parsed.frontmatter.overrides)
+                ? updated
+                : updated.join(', ');
+            }
+            modified = true;
+          }
         }
 
         if (modified) {
@@ -921,7 +971,7 @@ export function saveMemoryEntry(workspaceRoot, params = {}) {
   }
 
   const cleanSlug = path.basename(slug.trim()).replace(/\.md$/i, '');
-  if (!cleanSlug || cleanSlug.includes('..')) {
+  if (!cleanSlug || cleanSlug !== slug.trim().replace(/\.md$/i, '') || cleanSlug.includes('..')) {
     throw new Error('Invalid memory slug. Directory traversal is prohibited.');
   }
 
@@ -1068,6 +1118,9 @@ export function deleteMemoryEntry(workspaceRoot, params = {}) {
   if (!slug) throw new Error('A memory slug is required for deletion.');
 
   const cleanSlug = path.basename(slug.trim()).replace(/\.md$/i, '');
+  if (!cleanSlug || cleanSlug !== slug.trim().replace(/\.md$/i, '') || cleanSlug.includes('..')) {
+    throw new Error('Invalid memory slug. Directory traversal is prohibited.');
+  }
   const normLayer = String(layer).toLowerCase();
   const paths = resolveStoragePaths(workspaceRoot);
 
@@ -1153,9 +1206,17 @@ export function prepareTeamPromotion(workspaceRoot, params = {}) {
     throw new Error('Team memory clone is not initialized with Git. Run /kc-init first.');
   }
 
-  // 1. Check out main and pull latest
+  // 1. Detect default branch (main or master) and pull latest
+  let defaultBranch = 'main';
   try {
-    execSync('git checkout main', { cwd: paths.teamDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
+    const branchList = execSync('git branch -a', { cwd: paths.teamDir, env: GIT_EXEC_ENV, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    if (branchList.includes('master') && !branchList.includes('main')) {
+      defaultBranch = 'master';
+    }
+  } catch {}
+
+  try {
+    execSync(`git checkout ${defaultBranch}`, { cwd: paths.teamDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
     execSync('git pull --ff-only', { cwd: paths.teamDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
   } catch {}
 
@@ -1172,13 +1233,19 @@ export function prepareTeamPromotion(workspaceRoot, params = {}) {
   const rawContent = fs.readFileSync(privateFile, 'utf8');
   const parsed = parseYamlFrontmatter(rawContent);
 
-  // Scrub personal usernames and machine paths
+  // Scrub personal usernames (with strict word boundaries) and machine paths
   const home = os.homedir();
-  const username = os.userInfo().username;
-  let scrubbedBody = parsed.body
-    .replaceAll(home, '~')
-    .replaceAll(username, '<developer>')
-    .replace(/[A-Za-z]:\\[Users|Documents][^\s\n]+/gi, '<path>');
+  let username = '';
+  try {
+    username = os.userInfo().username;
+  } catch {}
+
+  let scrubbedBody = parsed.body.replaceAll(home, '~');
+  if (username && username.length > 1) {
+    const escapedUser = username.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    scrubbedBody = scrubbedBody.replace(new RegExp(`\\b${escapedUser}\\b`, 'gi'), '<developer>');
+  }
+  scrubbedBody = scrubbedBody.replace(/[A-Za-z]:\\[Users|Documents][^\s\n]+/gi, '<path>');
 
   const teamFm = {
     name: cleanSlug,
@@ -1198,7 +1265,7 @@ export function prepareTeamPromotion(workspaceRoot, params = {}) {
     slug: cleanSlug,
     branch: branchName,
     stagedFile: targetFile,
-    prCommand: `gh pr create --base main --head "${branchName}" --title "memory: promote ${cleanSlug}" --fill`
+    prCommand: `gh pr create --base ${defaultBranch} --head "${branchName}" --title "memory: promote ${cleanSlug}" --fill`
   };
 }
 
@@ -1252,19 +1319,31 @@ export function checkToolGuardrails(workspaceRoot, commandString, toolName = 'ru
 }
 
 /**
- * Ingests an Architectural Decision Record (ADR) file into Team memory.
+ * Ingests an Architectural Decision Record (ADR) file cleanly into memory.
+ * By default ingests into Workspace layer (or Private layer) to preserve Team clone cleanliness.
+ * If targetLayer is 'team', isolates on a promotion branch.
  */
-export function ingestTeamAdr(workspaceRoot, adrFilePath) {
+export function ingestTeamAdr(workspaceRoot, adrFilePath, options = {}) {
   if (!fs.existsSync(adrFilePath)) {
     throw new Error(`ADR file not found at ${adrFilePath}`);
   }
 
+  const targetLayer = (options.targetLayer || 'workspace').toLowerCase();
   const content = fs.readFileSync(adrFilePath, 'utf8');
   const baseName = path.basename(adrFilePath, path.extname(adrFilePath));
   const slug = `adr-${baseName.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`.replace(/^-|-$/g, '');
 
   const paths = resolveStoragePaths(workspaceRoot);
-  const targetFile = path.join(paths.teamDir, `${slug}.md`);
+  let targetDir = paths.workspaceDir;
+  if (targetLayer === 'private') {
+    targetDir = paths.privateDir;
+  } else if (targetLayer === 'team') {
+    targetDir = paths.teamDir;
+  }
+
+  if (!fs.existsSync(targetDir)) {
+    fs.mkdirSync(targetDir, { recursive: true });
+  }
 
   // Extract title
   const titleMatch = content.match(/^#\s+(.+)$/m);
@@ -1280,14 +1359,153 @@ export function ingestTeamAdr(workspaceRoot, adrFilePath) {
   };
 
   const serialized = serializeYamlFrontmatter(frontmatter, content);
+  const targetFile = path.join(targetDir, `${slug}.md`);
+
+  // If writing to team clone, create an isolated branch so main remains clean
+  let branchName = null;
+  if (targetLayer === 'team' && fs.existsSync(path.join(paths.teamDir, '.git'))) {
+    branchName = `adr/${slug}`;
+    try {
+      execSync(`git checkout -b "${branchName}"`, { cwd: paths.teamDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
+    } catch {
+      try {
+        execSync(`git checkout "${branchName}"`, { cwd: paths.teamDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
+      } catch {}
+    }
+  }
+
   fs.writeFileSync(targetFile, serialized, 'utf8');
 
   return {
     success: true,
     slug,
     title,
+    layer: targetLayer,
+    branch: branchName,
     path: targetFile
   };
+}
+
+/**
+ * Scans workspace codebase for existing patterns, ADRs, linters, and CI workflows
+ * to bootstrap initial Workspace-scoped persistent memories.
+ */
+export function bootstrapRepoMemories(workspaceRoot = process.cwd()) {
+  const candidates = [];
+  const seenSlugs = new Set();
+
+  function addCandidate(cand) {
+    if (seenSlugs.has(cand.slug)) return;
+    seenSlugs.add(cand.slug);
+    candidates.push(cand);
+  }
+
+  // 1. Scan ADR files
+  const adrDirs = ['docs/adr', 'docs/adrs', 'adr', 'doc/adr'];
+  for (const adrDir of adrDirs) {
+    const fullDir = path.join(workspaceRoot, adrDir);
+    if (fs.existsSync(fullDir)) {
+      const files = findMarkdownFiles(fullDir);
+      for (const f of files) {
+        const base = path.basename(f, '.md');
+        if (base.toUpperCase() === 'README' || base.startsWith('template')) continue;
+        try {
+          const content = fs.readFileSync(f, 'utf8');
+          const titleMatch = content.match(/^#\s+(.+)$/m);
+          const title = titleMatch ? titleMatch[1].trim() : `ADR: ${base}`;
+          const slug = `adr-${base.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`.replace(/^-|-$/g, '');
+          addCandidate({
+            slug,
+            title,
+            domain: 'architecture',
+            type: 'convention',
+            description: `When architectural decisions from ${title} apply to development`,
+            why: `Codifies architectural decision record from ${path.relative(workspaceRoot, f)}.`,
+            howToApply: `Refer to ${path.relative(workspaceRoot, f)} for design boundaries and rationale.`,
+            sourceFile: path.relative(workspaceRoot, f)
+          });
+        } catch {}
+      }
+    }
+  }
+
+  // 2. Scan CI/CD Workflows
+  const githubWorkflowsDir = path.join(workspaceRoot, '.github', 'workflows');
+  if (fs.existsSync(githubWorkflowsDir)) {
+    try {
+      const wfFiles = fs.readdirSync(githubWorkflowsDir).filter(f => f.endsWith('.yml') || f.endsWith('.yaml'));
+      if (wfFiles.length > 0) {
+        addCandidate({
+          slug: 'ci-pipeline-conventions',
+          title: 'CI/CD Pipeline Validation & Testing Standards',
+          domain: 'ci-cd',
+          type: 'convention',
+          description: 'When running tests, opening pull requests, or modifying automated workflows',
+          why: `Repository enforces automated CI checks defined in .github/workflows/ (${wfFiles.join(', ')}).`,
+          howToApply: 'Ensure all tests, formatting, and lint suites pass locally before submitting code to upstream branches.',
+          sourceFile: '.github/workflows/'
+        });
+      }
+    } catch {}
+  }
+
+  // 3. Scan Linters & Formatters
+  const linterMap = [
+    { file: '.golangci.yml', slug: 'go-linter-standards', domain: 'go', title: 'GolangCI Linting & Code Hygiene Standards' },
+    { file: '.golangci.yaml', slug: 'go-linter-standards', domain: 'go', title: 'GolangCI Linting & Code Hygiene Standards' },
+    { file: 'ruff.toml', slug: 'python-ruff-standards', domain: 'python', title: 'Python Ruff Formatting & Linting Governance' },
+    { file: '.eslintrc.json', slug: 'eslint-code-standards', domain: 'typescript', title: 'ESLint Coding Standards & Best Practices' },
+    { file: 'biome.json', slug: 'biome-formatting-governance', domain: 'typescript', title: 'Biome Formatting & Linting Governance' }
+  ];
+
+  for (const lint of linterMap) {
+    if (fs.existsSync(path.join(workspaceRoot, lint.file))) {
+      addCandidate({
+        slug: lint.slug,
+        title: lint.title,
+        domain: lint.domain,
+        type: 'convention',
+        description: `When formatting or linting ${lint.domain} codebase files`,
+        why: `Repository enforces strict static analysis via ${lint.file}.`,
+        howToApply: `Verify clean execution with project linter before committing changes.`,
+        sourceFile: lint.file
+      });
+    }
+  }
+
+  // 4. Scan Container & Infrastructure
+  if (fs.existsSync(path.join(workspaceRoot, 'Dockerfile'))) {
+    addCandidate({
+      slug: 'docker-container-build-governance',
+      title: 'Docker Container Build & Packaging Guidelines',
+      domain: 'devops',
+      type: 'platform-fact',
+      description: 'When creating, building, or modifying container images and Dockerfiles',
+      why: 'Repository standardizes container execution via Dockerfile.',
+      howToApply: 'Use multi-stage builds, pin minimal base images, and do not run processes as root.',
+      sourceFile: 'Dockerfile'
+    });
+  }
+
+  // 5. Scan Contributing & Architecture Guidelines
+  const guideFiles = ['CONTRIBUTING.md', 'ARCHITECTURE.md'];
+  for (const gf of guideFiles) {
+    if (fs.existsSync(path.join(workspaceRoot, gf))) {
+      const base = path.basename(gf, '.md').toLowerCase();
+      addCandidate({
+        slug: `project-${base}-governance`,
+        title: `Project ${gf} Conventions`,
+        domain: 'general',
+        type: 'convention',
+        description: `When onboarding or contributing architectural changes to the project`,
+        why: `Core development workflows and governance documented in ${gf}.`,
+        howToApply: `Follow contribution and architecture patterns described in ${gf}.`,
+        sourceFile: gf
+      });
+    }
+  }
+
+  return candidates;
 }
 
 

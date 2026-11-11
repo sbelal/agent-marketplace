@@ -2,6 +2,8 @@
 
 **Knowledge Capture** is an advanced, multi-layered persistent memory plugin engineered for **Google Antigravity** and **Anthropic Claude Code**. It bridges the best practices of Git-backed institutional memory with a zero-dependency Node.js stdio **Model Context Protocol (MCP)** server, automated knowledge elicitation, and human-in-the-loop review guardrails.
 
+> **System Requirement:** Requires **Node.js >= 26.0.0** (LTS). Features zero-dependency SQLite FTS5 hybrid search with an automatic file-based indexing fallback.
+
 ---
 
 ## 🚀 Installation & Setup
@@ -82,13 +84,18 @@ Persistent knowledge is partitioned across three distinct tiers with strict prec
 
 ## 🛠️ Model Context Protocol (MCP) Server
 
-The plugin includes a lightweight, zero-dependency Node.js stdio MCP server (`mcp-server/index.js`) providing side-effect-free query tools complying with Command-Query Separation (CQS):
+The plugin includes a lightweight, zero-dependency Node.js stdio **Model Context Protocol (MCP)** server (`mcp-server/index.js`) providing side-effect-free query tools and state commands complying with Command-Query Separation (CQS). Powered by a **workspace-partitioned SQLite FTS5 engine** with automatic zero-dependency **file-based fallback**:
 
 | Tool | Purpose | Parameters |
 | :--- | :--- | :--- |
-| **`get_memory_summary`** | Scans memory files across layers, parses YAML frontmatters, shadows lower-tier overridden rules (`Workspace > Private > Team`), and outputs Markdown tables grouped by `### Domain: <domain>` (`[Layer \| Slug \| Type \| Overrides \| Related \| Trigger / Description]`). | `layer` (*optional*: `"all"`, `"workspace"`, `"private"`, `"team"`), `domain` (*optional* category filter), `query` (*optional* keyword filter) |
-| **`get_layer_statistics`** | Returns memory entry counts per layer, active domain breakdown (`kubernetes (12), ...`), stale entry counts (`verified` > 180 days or missing), configured Git remotes, working branch states, uncommitted changes, and upstream divergence. | *None* |
-| **`get_memory_content`** | Retrieves the full markdown content, YAML frontmatter, and resolved **1-Hop Related Memories Graph** footer for one or more memory slugs across layers. | `layer` (*optional*: `"all"`, `"workspace"`, `"private"`, `"team"`), `slug` (*optional* string), `slugs` (*optional* `string[]`) |
+| **`get_memory_summary`** | Scans memory files across layers, parses YAML frontmatters, shadows lower-tier overridden rules (`Workspace > Private > Team`), and outputs Markdown tables grouped by `### Domain: <domain>`. | `layer` (*optional*: `"all"`, `"workspace"`, `"private"`, `"team"`), `domain` (*optional*), `query` (*optional*) |
+| **`search_memories`** | Precedence-aware hybrid semantic retrieval combining workspace-partitioned SQLite FTS5 BM25 with token Cosine Similarity (with automatic file-based search fallback). | `query` (*required* string), `limit` (*optional* number, default 5) |
+| **`get_layer_statistics`** | Returns memory entry counts per layer, active domain breakdown, stale entry counts (`verified` > 180 days or missing), configured Git remotes, and uncommitted changes. | *None* |
+| **`get_memory_content`** | Retrieves full markdown content, frontmatter, and resolved **1-Hop Related Memories Graph** footer for one or more memory slugs across layers. | `layer` (*optional*), `slug` (*optional* string), `slugs` (*optional* `string[]`) |
+| **`get_memory_graph`** | Returns referentially validated node-and-link graph dataset with broken link isolation for D3/SVG canvas rendering. | *None* |
+| **`generate_knowledge_graph_html`** | Generates a complete, interactive standalone HTML canvas visualizer with D3.js force physics, domain clustering, staleness alerts, and inspector drawer. | `workspaceRoot` (*optional*) |
+| **`bootstrap_workspace_memories`**| Scans repository ADRs, CI workflows, linters, Dockerfiles, and documentation to discover and propose initial Workspace memory rules on day one. | `workspaceRoot` (*optional*) |
+| **`check_tool_guardrails`** | Evaluates proposed shell commands against JIT memory guardrails (`applies_to`) and returns pre-execution alerts. | `command` (*required*), `tool` (*optional*, default `'run_command'`) |
 
 ---
 
@@ -113,6 +120,8 @@ These skills appear directly in the user's slash command palette:
 | Slash Command / Skill | Arguments | Description |
 | :--- | :--- | :--- |
 | **`/kc-init`** | None | Scaffolds directory layout, tests remote Git connectivity (`git ls-remote`), and configures `settings.json`. |
+| **`/kc-bootstrap`** | None | Scans project ADRs, CI workflows, linters, Dockerfiles, and contribution guides to auto-discover and bootstrap Workspace memory rules. |
+| **`/kc-graph`** | None | Generates an interactive visual knowledge graph HTML artifact with D3.js force physics, domain clusters, and node inspector. |
 | **`/kc-status`** | None | Prints detailed health, active domain breakdown, stale entry counts (`verified` > 180 days), branch names, uncommitted modifications, and upstream ahead/behind counts across layers. |
 | **`/kc-pull`** | `[team\|private\|all]` | Fast-forwards the local team or private memory clone from its configured Git remote upstream. |
 | **`/kc-commit`** | `[message]` | Audits private memory for sensitive credentials, validates upstream remotes, commits pending changes, and pushes to Git. |

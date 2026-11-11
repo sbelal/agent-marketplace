@@ -11,14 +11,16 @@ import {
   syncMemoryLayer,
   prepareTeamPromotion,
   checkToolGuardrails,
-  ingestTeamAdr
+  ingestTeamAdr,
+  bootstrapRepoMemories
 } from './memory-service.js';
 
 import {
   syncSqliteIndex,
   searchMemoriesHybrid,
   getKnowledgeGraphData,
-  recordTelemetryEvent
+  recordTelemetryEvent,
+  generateKnowledgeGraphHtml
 } from './sqlite-index.js';
 
 /**
@@ -304,9 +306,42 @@ const TOOLS = [
         adrPath: {
           type: 'string',
           description: 'Path to the local ADR file.'
+        },
+        targetLayer: {
+          type: 'string',
+          enum: ['workspace', 'private', 'team'],
+          description: "Target layer to ingest the ADR into ('workspace', 'private', or 'team'). Defaults to 'workspace'."
         }
       },
       required: ['adrPath']
+    }
+  },
+  {
+    name: 'bootstrap_workspace_memories',
+    description:
+      'Scans repository configuration, linters, CI workflows, ADRs, Dockerfiles, and documentation to discover and propose initial Workspace-scoped persistent memories.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        workspaceRoot: {
+          type: 'string',
+          description: 'Optional path to the project root directory. Defaults to current working directory.'
+        }
+      }
+    }
+  },
+  {
+    name: 'generate_knowledge_graph_html',
+    description:
+      'Generates a complete, interactive standalone HTML canvas visualizer with D3.js force physics, domain clustering, staleness alerts, and inspector drawer.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        workspaceRoot: {
+          type: 'string',
+          description: 'Optional path to the project root directory. Defaults to current working directory.'
+        }
+      }
     }
   }
 ];
@@ -367,7 +402,7 @@ function handleRequest(message) {
     case 'tools/call': {
       const toolName = params?.name;
       const args = params?.arguments || {};
-      const workspaceRoot = process.cwd();
+      const workspaceRoot = args.workspaceRoot || process.env.WORKSPACE_ROOT || process.cwd();
 
       try {
         let resultData = null;
@@ -404,11 +439,22 @@ function handleRequest(message) {
             );
             resultData = contentObj.content;
             if (args.slug) recordTelemetryEvent(args.slug, 'apply');
+            if (Array.isArray(args.slugs)) {
+              args.slugs.forEach(s => recordTelemetryEvent(s, 'apply'));
+            }
             break;
           }
 
           case 'get_memory_graph':
             resultData = getKnowledgeGraphData(workspaceRoot);
+            break;
+
+          case 'generate_knowledge_graph_html':
+            resultData = generateKnowledgeGraphHtml(workspaceRoot);
+            break;
+
+          case 'bootstrap_workspace_memories':
+            resultData = bootstrapRepoMemories(workspaceRoot);
             break;
 
           case 'check_tool_guardrails':
@@ -442,7 +488,7 @@ function handleRequest(message) {
             break;
 
           case 'ingest_team_adr':
-            resultData = ingestTeamAdr(workspaceRoot, args.adrPath);
+            resultData = ingestTeamAdr(workspaceRoot, args.adrPath, { targetLayer: args.targetLayer || 'workspace' });
             syncSqliteIndex(workspaceRoot);
             break;
 

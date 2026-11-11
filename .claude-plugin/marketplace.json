@@ -10,13 +10,13 @@
       "name": "syran-persona",
       "description": "Adopts the Syran Logic Officer persona globally, providing dispassionate logical analysis and probability-driven counsel.",
       "source": "./plugins/syran-persona",
-      "version": "1.0.0"
+      "version": "1.1.0"
     },
     {
       "name": "knowledge-capture",
-      "description": "Multi-layered persistent memory plugin supporting workspace, private, and team scopes with full CQS stdio MCP server, local SQLite FTS5 hybrid search, JIT guardrails, and Git synchronization.",
+      "description": "Multi-layered persistent memory plugin supporting workspace, private, and team scopes with full CQS stdio MCP server, workspace-partitioned SQLite FTS5 hybrid search, JIT guardrails, and Git synchronization.",
       "source": "./plugins/knowledge-capture",
-      "version": "2.0.0"
+      "version": "2.1.0"
     }
   ],
   "metadata": {

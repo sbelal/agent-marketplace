@@ -1,7 +1,10 @@
 {
   "name": "knowledge-capture-mcp",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Zero-dependency Stdio MCP Server for Knowledge Capture multi-layered memory (Full CQS)",
   "type": "module",
-  "main": "index.js"
+  "main": "index.js",
+  "engines": {
+    "node": ">=26.0.0"
+  }
 }

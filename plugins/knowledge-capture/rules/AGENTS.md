@@ -108,6 +108,10 @@ At the start of complex tasks, consult memory with minimal token overhead:
 
 * **Team Promotion (`/kc-promote <slug>`):**
   Personal memories mature in Private storage before entering Team memory. Promotion creates branch `promote/<date>-<slug>` in `team/`, scrubs personal usernames/paths, and halts for developer inspection before `gh pr create`.
+* **Repository Bootstrapping (`/kc-bootstrap`):**
+  Scans project ADRs (`docs/adr/`), CI workflows (`.github/workflows/`), linters (`.golangci.yml`, `ruff.toml`, `.eslintrc`), and Dockerfiles to auto-discover and propose initial Workspace memory rules on day one.
+* **Interactive Knowledge Graph (`/kc-graph`):**
+  Generates an interactive D3.js canvas artifact (`knowledge-graph.html`) displaying color-coded layers, domain clusters, staleness alerts, and inspector drawer.
 * **4-Point "Lint & Dream" Consolidation (`/kc-consolidate [scope|domain]`):**
   1. **Fragmented Slugs:** Merge narrow co-triggered slugs in same domain.
   2. **Orphaned Overrides & Redundant Copies:** Prune entries whose overrides target disappeared upstream or are already identical in Team.
