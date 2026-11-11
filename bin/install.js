@@ -568,10 +568,14 @@ function runInteractiveWizard() {
 
 function runCliDispatcher(args) {
   const getArg = (flag) => {
-    const idx = args.indexOf(flag);
-    return idx !== -1 && idx + 1 < args.length ? args[idx + 1] : null;
+    const prefix = `${flag}=`;
+    for (let i = 0; i < args.length; i++) {
+      if (args[i] === flag && i + 1 < args.length) return args[i + 1];
+      if (args[i].startsWith(prefix)) return args[i].slice(prefix.length);
+    }
+    return null;
   };
-  const hasFlag = (flag) => args.includes(flag);
+  const hasFlag = (flag) => args.includes(flag) || args.some(a => a.startsWith(`${flag}=`));
 
   if (hasFlag('--help') || hasFlag('-h')) {
     console.log(`

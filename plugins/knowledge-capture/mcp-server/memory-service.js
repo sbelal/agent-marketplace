@@ -12,8 +12,11 @@ export function getHomeDir() {
 }
 
 export function resolveStoragePaths(workspaceRoot = process.cwd()) {
-  const home = getHomeDir();
-  const baseDir = path.join(home, '.gemini', 'knowledge-capture');
+  const baseDir = process.env.KC_STORAGE_DIR || (
+    process.env.GEMINI_HOME
+      ? path.join(process.env.GEMINI_HOME, 'knowledge-capture')
+      : path.join(getHomeDir(), '.gemini', 'knowledge-capture')
+  );
   return {
     baseDir,
     settingsPath: path.join(baseDir, 'settings.json'),
@@ -232,15 +235,24 @@ export function findMarkdownFiles(dirPath) {
     return [];
   }
 
-  try {
-    const entries = fs.readdirSync(dirPath, { withFileTypes: true });
-    return entries
-      .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith('.md'))
-      .sort((a, b) => a.name.localeCompare(b.name))
-      .map((entry) => path.join(dirPath, entry.name));
-  } catch {
-    return [];
+  const results = [];
+  function scan(currentDir) {
+    try {
+      const entries = fs.readdirSync(currentDir, { withFileTypes: true });
+      for (const entry of entries) {
+        const fullPath = path.join(currentDir, entry.name);
+        if (entry.isDirectory()) {
+          if (!entry.name.startsWith('.') && entry.name !== 'node_modules') {
+            scan(fullPath);
+          }
+        } else if (entry.isFile() && entry.name.toLowerCase().endsWith('.md')) {
+          results.push(fullPath);
+        }
+      }
+    } catch {}
   }
+  scan(dirPath);
+  return results.sort((a, b) => path.basename(a).localeCompare(path.basename(b)));
 }
 
 export function scanLayerEntries(workspaceRoot, targetLayer = 'all') {
@@ -806,7 +818,7 @@ export function getMemoryContent(workspaceRoot, layer, slug, slugs) {
  */
 export function serializeYamlFrontmatter(frontmatter, body) {
   const lines = ['---'];
-  const keys = ['name', 'type', 'domain', 'description', 'verified', 'overrides', 'related', 'applies_to'];
+  const keys = ['name', 'type', 'domain', 'description', 'verified', 'overrides', 'related'];
 
   for (const k of keys) {
     if (frontmatter[k] !== undefined && frontmatter[k] !== null && frontmatter[k] !== '') {
@@ -962,8 +974,7 @@ export function saveMemoryEntry(workspaceRoot, params = {}) {
     trigger,
     verified,
     overrides,
-    related = [],
-    applies_to
+    related = []
   } = params;
 
   if (!slug || typeof slug !== 'string') {
@@ -1012,9 +1023,6 @@ export function saveMemoryEntry(workspaceRoot, params = {}) {
   if (overrides) {
     frontmatter.overrides = overrides;
   }
-  if (applies_to) {
-    frontmatter.applies_to = applies_to;
-  }
 
   const fileContent = serializeYamlFrontmatter(frontmatter, markdownBody);
   const targetFile = path.join(targetDir, `${cleanSlug}.md`);
@@ -1055,8 +1063,7 @@ export function mergeMemoryEntries(workspaceRoot, params = {}) {
     description,
     verified,
     related = [],
-    overrides,
-    applies_to
+    overrides
   } = params;
 
   if (!targetSlug) {
@@ -1083,8 +1090,7 @@ export function mergeMemoryEntries(workspaceRoot, params = {}) {
     description,
     verified,
     related,
-    overrides,
-    applies_to
+    overrides
   });
 
   // 2. Remove source files and rewire references to targetSlug
@@ -1270,52 +1276,133 @@ export function prepareTeamPromotion(workspaceRoot, params = {}) {
 }
 
 /**
- * Pure query: Checks pending tool calls against memory guardrails (JIT Interception).
+ * Pure query: Historical Tacit Knowledge Archeology (/kc-archeology).
+ * Analyzes git commit history, diffs, and issue references to discover past bug fixes,
+ * workarounds, and gotchas, proposing draft memory candidates.
+ *
+ * @param {string} workspaceRoot
+ * @param {Object} options
+ * @returns {Object} Discovered tacit knowledge candidates from git history
  */
-export function checkToolGuardrails(workspaceRoot, commandString, toolName = 'run_command') {
-  if (!commandString || typeof commandString !== 'string') return [];
-  const paths = resolveStoragePaths(workspaceRoot);
-  const dirs = [paths.workspaceDir, paths.privateDir, paths.teamDir];
-  const alerts = [];
-  const lowerCmd = commandString.toLowerCase();
-
-  for (const dir of dirs) {
-    const files = findMarkdownFiles(dir);
-    for (const file of files) {
-      try {
-        const raw = fs.readFileSync(file, 'utf8');
-        const parsed = parseYamlFrontmatter(raw);
-        const appliesTo = parsed.frontmatter.applies_to;
-        if (!appliesTo) continue;
-
-        let matched = false;
-        if (Array.isArray(appliesTo.tools) && !appliesTo.tools.includes(toolName)) {
-          continue;
-        }
-
-        if (Array.isArray(appliesTo.command_patterns)) {
-          for (const pat of appliesTo.command_patterns) {
-            const cleanPat = pat.replace(/\*/g, '').toLowerCase().trim();
-            if (cleanPat && lowerCmd.includes(cleanPat)) {
-              matched = true;
-              break;
-            }
-          }
-        }
-
-        if (matched) {
-          alerts.push({
-            slug: parsed.frontmatter.name || path.basename(file, '.md'),
-            domain: parsed.frontmatter.domain || 'general',
-            description: parsed.frontmatter.description || 'Execution Guardrail',
-            message: `⚠️ Guardrail Alert [${parsed.frontmatter.name || path.basename(file, '.md')}]: ${parsed.frontmatter.description || ''}`
-          });
-        }
-      } catch {}
-    }
+export function mineGitHistoryMemories(workspaceRoot = process.cwd(), options = {}) {
+  const maxCommits = options.maxCommits || 100;
+  const gitDir = path.join(workspaceRoot, '.git');
+  if (!fs.existsSync(gitDir)) {
+    return {
+      status: 'NOT_A_GIT_REPO',
+      message: 'Workspace is not a Git repository.',
+      candidates: []
+    };
   }
 
-  return alerts;
+  let logOutput = '';
+  try {
+    logOutput = execSync(
+      `git log -n ${maxCommits} --no-merges --format="COMMIT:%H|%an|%ad|%s%n%b%nEND_COMMIT" --date=short`,
+      { cwd: workspaceRoot, encoding: 'utf8', timeout: 5000, env: GIT_EXEC_ENV }
+    );
+  } catch (err) {
+    return {
+      status: 'GIT_ERROR',
+      message: err.message,
+      candidates: []
+    };
+  }
+
+  const commitBlocks = logOutput.split(/^COMMIT:/m).filter(b => b.trim());
+  const candidates = [];
+  const seenSlugs = new Set();
+
+  // Scan existing memories to prevent proposing duplicates
+  const { activeEntries } = scanLayerEntries(workspaceRoot, 'all');
+  const existingSlugs = new Set(activeEntries.map(e => e.slug));
+
+  const gotchaPatterns = [
+    /\b(fix(?:ed|es)?|bug|hotfix|patch)\b/i,
+    /\b(workaround|gotcha|caveat|quirk)\b/i,
+    /\b(revert(?:ed|s)?|undo)\b/i,
+    /\b(race condition|deadlock|memory leak|oom|timeout)\b/i,
+    /\b(deprecat(?:ed|ion)|breaking change)\b/i
+  ];
+
+  for (const block of commitBlocks) {
+    const lines = block.split(/\r?\n/);
+    const header = lines[0] || '';
+    const parts = header.split('|');
+    if (parts.length < 4) continue;
+
+    const hash = parts[0].trim();
+    const author = parts[1].trim();
+    const date = parts[2].trim();
+    const subject = parts.slice(3).join('|').trim();
+    const bodyLines = lines.slice(1).filter(l => l.trim() && l.trim() !== 'END_COMMIT');
+    const fullMessage = `${subject}\n${bodyLines.join('\n')}`;
+
+    const isMatch = gotchaPatterns.some(p => p.test(subject) || p.test(fullMessage));
+    if (!isMatch) continue;
+
+    // Detect domain
+    let domain = 'general';
+    const lowerMsg = fullMessage.toLowerCase();
+    if (lowerMsg.includes('k8s') || lowerMsg.includes('kube') || lowerMsg.includes('pod') || lowerMsg.includes('helm')) domain = 'kubernetes';
+    else if (lowerMsg.includes('terraform') || lowerMsg.includes('hcl')) domain = 'terraform';
+    else if (lowerMsg.includes('docker') || lowerMsg.includes('container') || lowerMsg.includes('image')) domain = 'devops';
+    else if (lowerMsg.includes('ci') || lowerMsg.includes('workflow') || lowerMsg.includes('action')) domain = 'ci-cd';
+    else if (lowerMsg.includes('db') || lowerMsg.includes('postgres') || lowerMsg.includes('sql') || lowerMsg.includes('mongo')) domain = 'database';
+    else if (lowerMsg.includes('test') || lowerMsg.includes('jest') || lowerMsg.includes('vitest')) domain = 'testing';
+    else if (lowerMsg.includes('node') || lowerMsg.includes('npm') || lowerMsg.includes('typescript') || lowerMsg.includes('js')) domain = 'javascript';
+    else if (lowerMsg.includes('python') || lowerMsg.includes('pip') || lowerMsg.includes('py')) domain = 'python';
+    else if (lowerMsg.includes('go') || lowerMsg.includes('golang')) domain = 'go';
+
+    // Type
+    const type = (lowerMsg.includes('revert') || lowerMsg.includes('workaround') || lowerMsg.includes('gotcha'))
+      ? 'tool-gotcha'
+      : 'convention';
+
+    // Slug generation
+    const cleanSubject = subject
+      .toLowerCase()
+      .replace(/^(fix|feat|chore|refactor|docs|test|style|perf)\s*(\([^)]+\))?:\s*/i, '')
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-|-$/g, '')
+      .slice(0, 45);
+
+    const slug = `git-${cleanSubject}`.replace(/^-|-$/g, '');
+    if (!slug || seenSlugs.has(slug) || existingSlugs.has(slug)) continue;
+    seenSlugs.add(slug);
+
+    const title = subject.replace(/^(fix|feat|chore|refactor|docs|test|style|perf)\s*(\([^)]+\))?:\s*/i, '');
+    const titleFormatted = title.charAt(0).toUpperCase() + title.slice(1);
+
+    const why = `Uncovered from Git history (commit ${hash.slice(0, 8)} on ${date} by ${author}):\n${fullMessage.trim()}`;
+    const howToApply = `Review the resolution in commit ${hash.slice(0, 8)} to avoid similar regressions or issues when working in the ${domain} domain.`;
+
+    candidates.push({
+      slug,
+      title: titleFormatted,
+      domain,
+      type,
+      description: `When handling ${domain} tasks or encountering issues related to ${title}`,
+      verified: date,
+      why,
+      howToApply,
+      sourceCommit: {
+        hash: hash.slice(0, 8),
+        author,
+        date,
+        subject
+      }
+    });
+
+    if (candidates.length >= 10) break;
+  }
+
+  return {
+    status: 'SUCCESS',
+    commits_analyzed: commitBlocks.length,
+    candidates_found: candidates.length,
+    candidates
+  };
 }
 
 /**
@@ -1609,7 +1696,7 @@ export function autoElicitSessionKnowledge(workspaceRoot = process.cwd()) {
       slug: 'session-test-regression-rules',
       title: 'Test Verification and Regression Rules',
       domain: 'testing',
-      type: 'gotcha',
+      type: 'tool-gotcha',
       layer: 'workspace',
       description: 'When running or writing test suites for recently modified modules',
       suggested_body: `# Test Verification and Regression Rules\n\n## Why It Matters\nNew test fixtures or assertions were established in this session.\n\n## How to Apply\n- Ensure tests run deterministically without background task hanging.\n- Maintain separation between mock environments and real storage.`
@@ -1623,7 +1710,7 @@ export function autoElicitSessionKnowledge(workspaceRoot = process.cwd()) {
       slug: `${moduleName}-session-patterns`,
       title: `${moduleName} Architecture & Implementation Decisions`,
       domain: 'architecture',
-      type: 'pattern',
+      type: 'convention',
       layer: 'workspace',
       description: `When modifying or extending the ${moduleName} module`,
       suggested_body: `# ${moduleName} Architecture & Implementation Decisions\n\n## Why It Matters\nKey modifications were made to \`${primaryFile}\` in this session.\n\n## How to Apply\n- Adhere to established module interface contracts and Single Responsibility Principle.\n- Verify caller dependencies before refactoring.`
@@ -1637,7 +1724,11 @@ export function autoElicitSessionKnowledge(workspaceRoot = process.cwd()) {
   return result;
 }
 
-export { detectContradictionsAndDrift } from './sqlite-index.js';
+export {
+  detectContradictionsAndDrift,
+  proactiveMemoryProbe,
+  recordMemoryEfficacy
+} from './sqlite-index.js';
 
 
 

@@ -200,9 +200,14 @@ function handleRequest(message) {
         sendJsonRpc({
           jsonrpc: '2.0',
           id,
-          error: {
-            code: -32603,
-            message: `Internal error executing '${toolName}': ${err.message}`
+          result: {
+            content: [
+              {
+                type: 'text',
+                text: `Error executing tool '${toolName}': ${err.message}`
+              }
+            ],
+            isError: true
           }
         });
       }
