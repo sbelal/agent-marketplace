@@ -96,6 +96,7 @@ The plugin includes a lightweight, zero-dependency Node.js stdio **Model Context
 | **`generate_knowledge_graph_html`** | Generates a complete, interactive standalone HTML canvas visualizer with D3.js force physics, domain clustering, staleness alerts, and inspector drawer. | `workspaceRoot` (*optional*) |
 | **`bootstrap_workspace_memories`**| Scans repository ADRs, CI workflows, linters, Dockerfiles, and documentation to discover and propose initial Workspace memory rules on day one. | `workspaceRoot` (*optional*) |
 | **`auto_elicit_session_knowledge`**| Audits uncommitted working tree diffs and modified files to detect and propose session-end memory candidates before closing a session or compacting context. | `workspaceRoot` (*optional*) |
+| **`detect_contradictions_and_drift`**| Audits active memories for semantic contradictions (opposing directives on similar tasks) and codebase drift (missing referenced files, runtime engine mismatches, staleness). | `workspaceRoot` (*optional*), `domain` (*optional*), `threshold` (*optional*) |
 | **`check_tool_guardrails`** | Evaluates proposed shell commands against JIT memory guardrails (`applies_to`) and returns pre-execution alerts. | `command` (*required*), `tool` (*optional*, default `'run_command'`) |
 
 ---
@@ -128,6 +129,7 @@ These skills appear directly in the user's slash command palette:
 | **`/kc-init`** | None | Scaffolds directory layout, tests remote Git connectivity (`git ls-remote`), and configures `settings.json`. |
 | **`/kc-bootstrap`** | None | Scans project ADRs, CI workflows, linters, Dockerfiles, and contribution guides to auto-discover and bootstrap Workspace memory rules. |
 | **`/kc-elicit`** | None | Audits uncommitted workspace diffs to auto-synthesize and propose session-end memories before closing. |
+| **`/kc-drift`** | `[domain]` | Runs the Semantic Contradiction & Codebase Drift Detection Engine across memories to discover conflicting directives and outdated rules. |
 | **`/kc-graph`** | None | Generates an interactive visual knowledge graph HTML artifact with D3.js force physics, domain clusters, and node inspector. |
 | **`/kc-status`** | None | Prints detailed health, active domain breakdown, stale entry counts (`verified` > 180 days), branch names, uncommitted modifications, and upstream ahead/behind counts across layers. |
 | **`/kc-pull`** | `[team\|private\|all]` | Fast-forwards the local team or private memory clone from its configured Git remote upstream. |

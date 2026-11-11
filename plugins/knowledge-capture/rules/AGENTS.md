@@ -116,6 +116,8 @@ At the start of complex tasks, consult memory with minimal token overhead:
   Generates an interactive D3.js canvas artifact (`knowledge-graph.html`) displaying color-coded layers, domain clusters, staleness alerts, and inspector drawer.
 * **Multi-Vector Hybrid Retrieval (`search_memories`):**
   Retrieves memories using Reciprocal Rank Fusion (RRF) combining lexical BM25 with multi-facet dense embeddings across trigger intent (50%), content rules (35%), and entity tags (15%). Gracefully falls back to file-based multi-vector ranking.
+* **Semantic Contradiction & Drift Engine (`/kc-drift`):**
+  Audits active memories across all layers for semantic contradictions (opposing directives on similar tasks without explicit `overrides:`) and codebase drift (missing referenced files, runtime engine mismatches, dangling overrides, and staleness).
 * **4-Point "Lint & Dream" Consolidation (`/kc-consolidate [scope|domain]`):**
   1. **Fragmented Slugs:** Merge narrow co-triggered slugs in same domain.
   2. **Orphaned Overrides & Redundant Copies:** Prune entries whose overrides target disappeared upstream or are already identical in Team.

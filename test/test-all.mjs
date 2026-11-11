@@ -24,7 +24,8 @@ import {
   generateDenseEmbedding,
   computeDenseCosineSimilarity,
   generateMultiVector,
-  computeMultiVectorSimilarity
+  computeMultiVectorSimilarity,
+  detectContradictionsAndDrift
 } from '../plugins/knowledge-capture/mcp-server/sqlite-index.js';
 
 import {
@@ -267,6 +268,61 @@ description: Lower tier private rule that should be shadowed
   const sessionEndPath = path.resolve('plugins/knowledge-capture/bin/session-end.js');
   assert.ok(fs.existsSync(sessionEndPath), 'bin/session-end.js must exist');
   console.log('  ✔ Passed: Session-End Auto-Elicitation Sentinel audits workspace modifications.\n');
+
+  // ==========================================
+  // TEST 10: Semantic Contradiction & Drift Engine (/kc-drift)
+  // ==========================================
+  console.log('Test 10: Semantic Contradiction & Codebase Drift Detection Engine...');
+  const driftWs = path.join(tempRoot, 'drift-ws');
+  const driftMemoryDir = path.join(driftWs, '.agents', 'rules', 'memory');
+  fs.mkdirSync(driftMemoryDir, { recursive: true });
+
+  // Create package.json with Node >=26 requirement
+  fs.writeFileSync(path.join(driftWs, 'package.json'), JSON.stringify({
+    name: 'drift-test-project',
+    engines: { node: '>=26.0.0' }
+  }), 'utf8');
+
+  // Rule A: Mandates pnpm, mentions missing .eslintrc.json and old Node 18, verified 2 years ago
+  fs.writeFileSync(path.join(driftMemoryDir, 'pkg-pnpm-standards.md'), `---
+name: pkg-pnpm-standards
+domain: javascript
+type: convention
+description: When managing dependencies and package installations
+verified: 2023-01-01
+---
+
+# Package Management Standards
+
+Always use pnpm for package installations and lockfile consistency.
+Requires Node 18 runtime. Check configuration in .eslintrc.json.
+`, 'utf8');
+
+  // Rule B: Contradictory rule mandating npm
+  fs.writeFileSync(path.join(driftMemoryDir, 'pkg-npm-standards.md'), `---
+name: pkg-npm-standards
+domain: javascript
+type: convention
+description: When managing dependencies and installing node packages
+verified: 2026-05-01
+---
+
+# NPM Package Standards
+
+Never use pnpm, always enforce npm install with package-lock.json.
+`, 'utf8');
+
+  const driftAudit = detectContradictionsAndDrift(driftWs);
+  assert.equal(driftAudit.status, 'DRIFT_DETECTED', 'Audit must detect issues in drift workspace');
+  assert.ok(driftAudit.contradictions.length >= 1, 'Must detect opposing toolchain contradiction between pnpm and npm');
+  assert.equal(driftAudit.contradictions[0].severity, 'high', 'Toolchain conflict must be high severity');
+  assert.ok(driftAudit.contradictions[0].conflict_reason.includes('pnpm'), 'Conflict reason must mention pnpm');
+
+  // Verify drift detection categories
+  assert.ok(driftAudit.drifts.some(d => d.type === 'staleness_drift'), 'Must detect staleness drift (> 180 days)');
+  assert.ok(driftAudit.drifts.some(d => d.type === 'referenced_file_missing'), 'Must detect missing .eslintrc.json');
+  assert.ok(driftAudit.drifts.some(d => d.type === 'runtime_engine_drift'), 'Must detect Node 18 vs >=26.0.0 engine mismatch');
+  console.log('  ✔ Passed: Semantic Contradiction and Drift Engine accurately detects rule conflicts and codebase divergence.\n');
 
   console.log('============================================================');
   console.log('🎉 ALL TESTS PASSED SUCCESSFULLY!');

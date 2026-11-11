@@ -1637,4 +1637,7 @@ export function autoElicitSessionKnowledge(workspaceRoot = process.cwd()) {
   return result;
 }
 
+export { detectContradictionsAndDrift } from './sqlite-index.js';
+
+
 

@@ -21,7 +21,8 @@ import {
   searchMemoriesHybrid,
   getKnowledgeGraphData,
   recordTelemetryEvent,
-  generateKnowledgeGraphHtml
+  generateKnowledgeGraphHtml,
+  detectContradictionsAndDrift
 } from './sqlite-index.js';
 
 /**
@@ -363,6 +364,28 @@ const TOOLS = [
         }
       }
     }
+  },
+  {
+    name: 'detect_contradictions_and_drift',
+    description:
+      'Audits persistent memories across layers for semantic contradictions (opposing directives on similar tasks) and codebase drift (missing referenced files, runtime engine mismatches, staleness).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        workspaceRoot: {
+          type: 'string',
+          description: 'Optional path to the project root directory. Defaults to current working directory.'
+        },
+        domain: {
+          type: 'string',
+          description: 'Optional category filter to isolate contradiction checks to a specific domain.'
+        },
+        threshold: {
+          type: 'number',
+          description: 'Semantic similarity threshold for contradiction evaluation (default: 0.65).'
+        }
+      }
+    }
   }
 ];
 
@@ -523,6 +546,13 @@ function handleRequest(message) {
 
           case 'auto_elicit_session_knowledge':
             resultData = autoElicitSessionKnowledge(workspaceRoot);
+            break;
+
+          case 'detect_contradictions_and_drift':
+            resultData = detectContradictionsAndDrift(workspaceRoot, {
+              domain: args.domain,
+              threshold: args.threshold
+            });
             break;
 
           default:
