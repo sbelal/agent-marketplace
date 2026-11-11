@@ -216,18 +216,9 @@ async function main() {
     process.stdout.write(JSON.stringify(output) + '\n');
   } else {
     // Under Claude Code, rules/AGENTS.md is not loaded automatically by the plugin runtime.
-    // Injecting it alongside the startup report guarantees 100% feature and protocol parity.
-    let fullClaudeContext = report;
-    const rulesPath = path.join(pluginRoot, 'rules', 'AGENTS.md');
-    if (fs.existsSync(rulesPath)) {
-      try {
-        const rulesContent = fs.readFileSync(rulesPath, 'utf8');
-        fullClaudeContext += `\n\n---\n\n${rulesContent}\n`;
-      } catch {
-        // Fallback to report only
-      }
-    }
-    process.stdout.write(fullClaudeContext + '\n');
+    // It is injected by the separate bin/claude-rules.js SessionStart hook, because Claude Code
+    // caps each hook's stdout at 10,000 characters and report + rules together exceed that.
+    process.stdout.write(report + '\n');
   }
 }
 

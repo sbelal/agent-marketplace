@@ -6,6 +6,8 @@ user-invocable: true
 
 # Promote Memory to Team (`/kc-promote`)
 
+> **Plugin script location (`<plugin-root>`):** Bundled scripts live in this plugin's `bin/` directory. In Claude Code, `<plugin-root>` is `${CLAUDE_PLUGIN_ROOT}` (Claude Code substitutes the absolute install path). If that variable appears literally (unsubstituted, e.g. in Antigravity), `<plugin-root>` is the plugin directory itself: run the scripts as `./bin/...` from it. Always quote the path.
+
 This skill promotes personal memories from `~/.gemini/knowledge-capture/private/` into `~/.gemini/knowledge-capture/team/`.
 
 > [!IMPORTANT]
@@ -83,4 +85,4 @@ If the user approves in a subsequent turn:
 1. Stage, commit, and push the branch.
 2. Open the GitHub PR with `gh pr create`.
 3. Provide the PR URL and remind the user to check out `main` once the PR is merged:
-   `git -C ~/.gemini/knowledge-capture/team checkout main && node ./bin/pull.js`
+   `git -C ~/.gemini/knowledge-capture/team checkout main && node "<plugin-root>/bin/pull.js"`
