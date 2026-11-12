@@ -134,8 +134,8 @@ At the start of complex tasks, consult memory with minimal token overhead using 
 
 ## 7. State-Aware Interactive Setup Protocol
 
-When setup or configuration is requested (e.g. `/kc-init`, `/marketplace`):
-1. **Never Show Generic Terminal Readline Prompts in Chat:** Query `npx git+https://github.com/sbelal/agent-marketplace.git --status-json` first (or use the cached local script in `~/.gemini/sources/agent-marketplace/bin/install.js` if already cloned).
-2. **Option Pruning:** Omit redundant options (e.g. do not offer global source install if already active).
-3. **Native Interfaces:** Use `ask_question` modal in Antigravity, and interactive prompts in Claude Code.
-4. **Headless Execution:** Run operations with non-interactive CLI flags (`--private-url`, `--scope`, etc.).
+When setup is requested (e.g. `/kc-init`, `/marketplace`):
+1. **No Raw Readline Prompts:** Query `npx git+https://github.com/sbelal/agent-marketplace.git --status-json` first (or use `~/.gemini/sources/agent-marketplace/bin/install.js` if present).
+2. **Option Pruning:** Omit redundant options (e.g. skip global source install if active).
+3. **Native UI:** Use `ask_question` in Antigravity, interactive prompts in Claude Code.
+4. **Headless Flags:** Run via non-interactive CLI flags (`--private-url`, `--scope`, etc.).

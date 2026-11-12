@@ -1795,6 +1795,85 @@ Discovered from MCP client roots/list URI.
   assert.ok(consultRes.confidence_assessment && consultRes.confidence_assessment.level, 'consultLogic must include confidence_assessment');
   console.log('  ✔ Passed: Syran handles missing minimize scores, weight=0, and structured logical evidence accurately.\n');
 
+  // ==========================================
+  // TEST 42: Single Canonical Hook & Plugin Config Sync & Runtime Adapter
+  // ==========================================
+  console.log('Test 42: Canonical Manifest Sync, Version Propagation & Hook Runtime Adapter...');
+  const { syncManifests, validateCanonicalManifest } = requireCjs('../bin/sync-manifests.js');
+
+  const mockMarket = path.join(tempRoot, 'mock-marketplace');
+  const mockPluginDir = path.join(mockMarket, 'plugins', 'demo-plugin');
+  fs.mkdirSync(path.join(mockPluginDir, 'bin'), { recursive: true });
+  fs.mkdirSync(path.join(mockPluginDir, 'mcp-server'), { recursive: true });
+  fs.mkdirSync(path.join(mockMarket, '.claude-plugin'), { recursive: true });
+
+  fs.writeFileSync(path.join(mockPluginDir, 'bin', 'start.js'), 'console.log("ok");\n', 'utf8');
+  fs.writeFileSync(path.join(mockPluginDir, 'mcp-server', 'index.js'), 'console.log("mcp");\n', 'utf8');
+  fs.writeFileSync(path.join(mockPluginDir, 'package.json'), JSON.stringify({ name: 'demo-plugin', version: '0.0.1' }, null, 2) + '\n', 'utf8');
+  fs.writeFileSync(path.join(mockPluginDir, 'mcp-server', 'package.json'), JSON.stringify({ name: 'demo-mcp', version: '0.0.1' }, null, 2) + '\n', 'utf8');
+  fs.writeFileSync(path.join(mockMarket, '.claude-plugin', 'marketplace.json'), JSON.stringify({ name: 'mock', plugins: [] }, null, 2) + '\n', 'utf8');
+
+  // Verify validation catches missing referenced script & invalid platforms
+  const invalidErrors = validateCanonicalManifest('demo-plugin', mockPluginDir, {
+    name: 'demo-plugin',
+    version: '2.5.0',
+    hooks: {
+      SessionStart: [
+        { type: 'command', command: 'node "${CLAUDE_PLUGIN_ROOT}/bin/missing.js"', platforms: ['invalid-platform'] }
+      ]
+    }
+  });
+  assert.ok(invalidErrors.some(e => e.includes('invalid platforms')), 'Must reject unknown hook platforms');
+  assert.ok(invalidErrors.some(e => e.includes('bin/missing.js')), 'Must reject missing ${CLAUDE_PLUGIN_ROOT} hook script');
+
+  // Write valid canonical manifest with timeout and matcher
+  fs.writeFileSync(path.join(mockPluginDir, 'plugin.manifest.json'), JSON.stringify({
+    name: 'demo-plugin',
+    displayName: 'Demo Plugin',
+    version: '2.5.0',
+    description: 'Demo canonical plugin',
+    mcpServers: {
+      demo: { command: 'node', args: ['${CLAUDE_PLUGIN_ROOT}/mcp-server/index.js'] }
+    },
+    hooks: {
+      SessionStart: [
+        { type: 'command', command: 'node "${CLAUDE_PLUGIN_ROOT}/bin/start.js"', timeout: 12, matcher: 'startup' }
+      ]
+    }
+  }, null, 2) + '\n', 'utf8');
+
+  const syncRes = syncManifests({ repoRoot: mockMarket, checkMode: false });
+  assert.equal(syncRes.validationErrors.length, 0, 'Valid canonical manifest must have zero validation errors');
+
+  const ccHooksGenerated = JSON.parse(fs.readFileSync(path.join(mockPluginDir, 'hooks', 'hooks.json'), 'utf8'));
+  assert.equal(ccHooksGenerated.hooks.SessionStart[0].matcher, 'startup', 'Claude Code hooks must preserve matcher');
+  assert.equal(ccHooksGenerated.hooks.SessionStart[0].hooks[0].timeout, 12, 'Claude Code hooks must preserve timeout');
+
+  const pkgSynced = JSON.parse(fs.readFileSync(path.join(mockPluginDir, 'package.json'), 'utf8'));
+  const mcpPkgSynced = JSON.parse(fs.readFileSync(path.join(mockPluginDir, 'mcp-server', 'package.json'), 'utf8'));
+  assert.equal(pkgSynced.version, '2.5.0', 'Plugin package.json version must sync from plugin.manifest.json');
+  assert.equal(mcpPkgSynced.version, '2.5.0', 'MCP server package.json version must sync from plugin.manifest.json');
+
+  const checkAfterSync = syncManifests({ repoRoot: mockMarket, checkMode: true });
+  assert.equal(checkAfterSync.driftCount, 0, 'Synchronized mock marketplace must have 0 drift');
+
+  // Verify claude-rules.js uses canonical hook-runtime platform detection (CLAUDE_CODE=1 vs Antigravity)
+  const claudeRulesScript = path.resolve('plugins/knowledge-capture/bin/claude-rules.js');
+  const ccRulesOut = execFileSync(process.execPath, [claudeRulesScript], {
+    env: { ...process.env, CLAUDE_CODE: '1', CLAUDE_PLUGIN_ROOT: '' },
+    input: '{}',
+    encoding: 'utf8'
+  });
+  assert.ok(ccRulesOut.includes('Knowledge Capture'), 'CLAUDE_CODE=1 without CLAUDE_PLUGIN_ROOT must still emit rules via hook-runtime');
+
+  const agRulesOut = execFileSync(process.execPath, [claudeRulesScript], {
+    env: { ...process.env, CLAUDE_CODE: '', CLAUDE_PLUGIN_ROOT: '' },
+    input: JSON.stringify({ conversationId: 'conv-123' }),
+    encoding: 'utf8'
+  });
+  assert.deepEqual(JSON.parse(agRulesOut), { injectSteps: [] }, 'Antigravity hook invocation must return empty injectSteps JSON');
+  console.log('  ✔ Passed: Canonical manifest sync, version propagation, validation, and hook-runtime verified.\n');
+
   console.log('============================================================');
   console.log('🎉 ALL TESTS PASSED SUCCESSFULLY!');
   console.log('============================================================\n');

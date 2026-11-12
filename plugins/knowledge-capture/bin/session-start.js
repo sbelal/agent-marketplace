@@ -7,6 +7,12 @@ import { fileURLToPath } from 'node:url';
 import { execFileSync, execFile } from 'node:child_process';
 import { getLayerStatistics } from '../mcp-server/memory-service.js';
 import { resolveStoragePaths } from '../mcp-server/core/storage-paths.js';
+import {
+  getStdinPayload,
+  resolveHookWorkspace,
+  detectHookPlatform,
+  emitHookMessage
+} from './hook-runtime.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -176,49 +182,15 @@ function checkPluginUpdateNotice(pluginRoot, pluginName, homeDir) {
   }
 }
 
-async function getStdinPayload() {
-  return new Promise((resolve) => {
-    if (process.stdin.isTTY) {
-      return resolve({});
-    }
-    let data = '';
-    const timer = setTimeout(() => {
-      process.stdin.pause();
-      resolve({});
-    }, 150);
-
-    process.stdin.setEncoding('utf8');
-    process.stdin.on('data', (chunk) => {
-      data += chunk;
-    });
-    process.stdin.on('end', () => {
-      clearTimeout(timer);
-      process.stdin.pause();
-      try {
-        resolve(data.trim() ? JSON.parse(data.trim()) : {});
-      } catch {
-        resolve({});
-      }
-    });
-    process.stdin.resume();
-  });
-}
-
 async function main() {
   // Read stdin context if piped (with 150ms fallback to prevent hangs)
-  let workspaceRoot = process.cwd();
   let payload = {};
   try {
     payload = await getStdinPayload();
-    if (Array.isArray(payload.workspacePaths) && payload.workspacePaths.length > 0) {
-      workspaceRoot = payload.workspacePaths[0];
-    }
   } catch {
     // Stdin reading fallback to process.cwd()
   }
-  if (process.env.WORKSPACE_DIR) {
-    workspaceRoot = process.env.WORKSPACE_DIR;
-  }
+  const workspaceRoot = resolveHookWorkspace(payload);
 
   const paths = resolveStoragePaths(workspaceRoot);
   const settings = paths.settings;
@@ -332,39 +304,19 @@ async function main() {
 
   // Dual-platform output formatting:
   // Antigravity passes stdin payload with conversationId and expects JSON injectSteps.
-  // Claude Code executes the hook command and injects raw stdout plain text.
-  const isClaudeCode = Boolean(process.env.CLAUDE_PLUGIN_ROOT || process.env.CLAUDE_CODE);
-  const isAntigravity = !isClaudeCode || Boolean(payload && payload.conversationId);
-
-  if (isAntigravity) {
-    const output = {
-      injectSteps: [
-        {
-          systemMessage: {
-            systemMessage: report
-          }
-        }
-      ]
-    };
-    process.stdout.write(JSON.stringify(output) + '\n');
-  } else {
-    // Under Claude Code, rules/AGENTS.md is not loaded automatically by the plugin runtime.
-    // It is injected by the separate bin/claude-rules.js SessionStart hook, because Claude Code
-    // caps each hook's stdout at 10,000 characters and report + rules together exceed that.
-    process.stdout.write(report + '\n');
-  }
+  // Claude Code executes the hook command and injects raw stdout plain text
+  // (rules/AGENTS.md is injected separately by bin/claude-rules.js to respect Claude's 10,000-char hook cap).
+  const { isAntigravity } = detectHookPlatform(payload);
+  emitHookMessage(report, { isAntigravity });
 }
 
 main()
   .then(() => {
     process.exit(0);
   })
-  .catch((err) => {
+  .catch(() => {
     // Ensure hook never crashes the agent startup
-    if (process.env.CLAUDE_PLUGIN_ROOT || process.env.CLAUDE_CODE) {
-      process.stdout.write(`[knowledge-capture] Startup check completed.\n`);
-    } else {
-      process.stdout.write(JSON.stringify({ injectSteps: [] }) + '\n');
-    }
+    const { isAntigravity } = detectHookPlatform();
+    emitHookMessage(isAntigravity ? '' : '[knowledge-capture] Startup check completed.', { isAntigravity });
     process.exit(0);
   });

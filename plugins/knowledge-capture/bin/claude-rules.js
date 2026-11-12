@@ -18,31 +18,46 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  getStdinPayload,
+  detectHookPlatform,
+  emitHookMessage
+} from './hook-runtime.js';
 
 const CLAUDE_HOOK_OUTPUT_LIMIT = 10000;
 
 const __filename = fileURLToPath(import.meta.url);
 const pluginRoot = path.dirname(path.dirname(__filename));
 
-const isClaudeCode = Boolean(process.env.CLAUDE_PLUGIN_ROOT);
+async function main() {
+  let payload = {};
+  try {
+    payload = await getStdinPayload();
+  } catch {}
 
-if (!isClaudeCode) {
-  // Antigravity discovers rules/AGENTS.md natively; return empty injectSteps to comply with Antigravity hook schema
-  process.stdout.write(JSON.stringify({ injectSteps: [] }) + '\n');
-  process.exit(0);
-}
+  const { isAntigravity } = detectHookPlatform(payload);
 
-try {
-  const rulesPath = path.join(pluginRoot, 'rules', 'AGENTS.md');
-  const rules = fs.readFileSync(rulesPath, 'utf8').trim();
-  if (rules.length > CLAUDE_HOOK_OUTPUT_LIMIT) {
-    process.stderr.write(
-      `[knowledge-capture] rules/AGENTS.md is ${rules.length} characters; Claude Code truncates hook output above ${CLAUDE_HOOK_OUTPUT_LIMIT}.\n`
-    );
+  if (isAntigravity) {
+    // Antigravity discovers rules/AGENTS.md natively; return empty injectSteps to comply with Antigravity hook schema
+    emitHookMessage('', { isAntigravity: true });
+    return;
   }
-  process.stdout.write(rules + '\n');
-} catch {
-  // Never block session startup
+
+  try {
+    const rulesPath = path.join(pluginRoot, 'rules', 'AGENTS.md');
+    const rules = fs.readFileSync(rulesPath, 'utf8').trim();
+    if (rules.length > CLAUDE_HOOK_OUTPUT_LIMIT) {
+      process.stderr.write(
+        `[knowledge-capture] rules/AGENTS.md is ${rules.length} characters; Claude Code truncates hook output above ${CLAUDE_HOOK_OUTPUT_LIMIT}.\n`
+      );
+    }
+    emitHookMessage(rules, { isAntigravity: false });
+  } catch {
+    // Never block session startup
+  }
 }
-process.exit(0);
+
+main()
+  .then(() => process.exit(0))
+  .catch(() => process.exit(0));
 

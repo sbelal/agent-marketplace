@@ -4,10 +4,15 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { autoElicitSessionKnowledge } from '../mcp-server/memory-service.js';
+import {
+  getStdinPayload,
+  resolveHookWorkspace,
+  detectHookPlatform,
+  emitHookMessage
+} from './hook-runtime.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const pluginRoot = path.dirname(__dirname);
 
 /**
  * SessionEnd / Stop Lifecycle Hook Handler for Knowledge Capture
@@ -19,46 +24,12 @@ const pluginRoot = path.dirname(__dirname);
  * 4. Outputs injectSteps system message (Antigravity) or plaintext (Claude Code)
  */
 
-async function getStdinPayload() {
-  return new Promise((resolve) => {
-    if (process.stdin.isTTY) {
-      return resolve({});
-    }
-    let data = '';
-    const timer = setTimeout(() => {
-      process.stdin.pause();
-      resolve({});
-    }, 150);
-
-    process.stdin.setEncoding('utf8');
-    process.stdin.on('data', (chunk) => {
-      data += chunk;
-    });
-    process.stdin.on('end', () => {
-      clearTimeout(timer);
-      process.stdin.pause();
-      try {
-        resolve(data.trim() ? JSON.parse(data.trim()) : {});
-      } catch {
-        resolve({});
-      }
-    });
-    process.stdin.resume();
-  });
-}
-
 async function main() {
-  let workspaceRoot = process.cwd();
   let payload = {};
   try {
     payload = await getStdinPayload();
-    if (Array.isArray(payload.workspacePaths) && payload.workspacePaths.length > 0) {
-      workspaceRoot = payload.workspacePaths[0];
-    }
   } catch {}
-  if (process.env.WORKSPACE_DIR) {
-    workspaceRoot = process.env.WORKSPACE_DIR;
-  }
+  const workspaceRoot = resolveHookWorkspace(payload);
 
   const audit = autoElicitSessionKnowledge(workspaceRoot, payload);
 
@@ -90,23 +61,11 @@ async function main() {
     }
   }
 
-  const isClaudeCode = Boolean(process.env.CLAUDE_PLUGIN_ROOT || process.env.CLAUDE_CODE);
-  if (isClaudeCode) {
-    process.stdout.write(report + '\n');
-  } else {
-    const output = {
-      injectSteps: [
-        {
-          systemMessage: {
-            systemMessage: report
-          }
-        }
-      ]
-    };
-    process.stdout.write(JSON.stringify(output) + '\n');
-  }
+  const { isAntigravity } = detectHookPlatform(payload);
+  emitHookMessage(report, { isAntigravity });
 }
 
 main()
   .then(() => process.exit(0))
   .catch(() => process.exit(0)); // Fail-safe: never block session exit
+
