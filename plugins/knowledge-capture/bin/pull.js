@@ -68,15 +68,12 @@ function main() {
 
   let exitCode = 0;
 
-  const shouldPullTeam = target === 'team' || target === 'all' || (specificSlug && paths.activeTeamDirs.some(t => t.slug === specificSlug));
+  const shouldPullTeam = target === 'team' || target === 'all' || Boolean(specificSlug);
 
   if (shouldPullTeam) {
-    if (paths.activeTeamDirs && paths.activeTeamDirs.length > 0) {
-      const targets = specificSlug 
-        ? paths.activeTeamDirs.filter(t => t.slug === specificSlug)
-        : paths.activeTeamDirs;
-
-      if (targets.length === 0 && specificSlug) {
+    if (specificSlug) {
+      const targets = (paths.activeTeamDirs || []).filter(t => t.slug === specificSlug);
+      if (targets.length === 0) {
         console.error(`Error: Team repository with slug '${specificSlug}' not found in settings.`);
         exitCode = 1;
       } else {
@@ -85,6 +82,12 @@ function main() {
           if (res !== 0) exitCode = res;
           console.log('');
         }
+      }
+    } else if (paths.activeTeamDirs && paths.activeTeamDirs.length > 0) {
+      for (const tRepo of paths.activeTeamDirs) {
+        const res = pullSingleRepo(tRepo.dir, `Team Memory [${tRepo.slug}]`, tRepo.url);
+        if (res !== 0) exitCode = res;
+        console.log('');
       }
     } else if (settings?.teamRepoUrl) {
       const res = pullSingleRepo(paths.teamDir, 'Team Memory Layer', settings.teamRepoUrl);

@@ -227,6 +227,9 @@ async function main() {
   } catch {
     // Stdin reading fallback to process.cwd()
   }
+  if (process.env.WORKSPACE_DIR) {
+    workspaceRoot = process.env.WORKSPACE_DIR;
+  }
 
   const paths = resolveStoragePaths(workspaceRoot);
   const settings = paths.settings;

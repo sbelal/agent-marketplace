@@ -623,7 +623,23 @@ Always specify runs-on: [self-hosted, linux, x64].
   await syncSqliteIndex(ws1Root);
   reposList = getTeamRepositories(ws1Root);
   assert.equal(reposList.find(r => r.slug === 'platform-eng'), undefined, 'Removed repo must not be in list');
-  console.log('  ✔ Passed: Multi-team repository addition, scoping, activation toggling, and removal verified.\n');
+
+  // 18.6 Verify bin/pull.js handles invalid team slug gracefully with error code 1
+  let pullErr = null;
+  try {
+    const pullBinPath = path.resolve('plugins/knowledge-capture/bin/pull.js');
+    execFileSync(process.execPath, [pullBinPath, 'invalid-slug'], {
+      cwd: ws1Root,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+  } catch (err) {
+    pullErr = err;
+  }
+  assert.ok(pullErr, 'Pulling an invalid team slug must exit with non-zero status');
+  assert.equal(pullErr.status, 1);
+  assert.ok(pullErr.stderr.includes("Team repository with slug 'invalid-slug' not found"));
+  console.log('  ✔ Passed: Multi-team repository addition, scoping, activation toggling, invalid-slug validation, and removal verified.\n');
 
   // ==========================================
   // TEST 19: Command-Query Separation (CQS) in Hybrid Search
