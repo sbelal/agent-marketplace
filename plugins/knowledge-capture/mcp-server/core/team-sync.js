@@ -19,6 +19,24 @@ function validateSafeGitUrl(url) {
   }
 }
 
+function assertContainment(targetPath, rootDir, label = 'path') {
+  const resolvedRoot = path.resolve(rootDir);
+  const resolvedTarget = path.resolve(targetPath);
+  const rel = path.relative(resolvedRoot, resolvedTarget);
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) {
+    throw new Error(`Security error: ${label} "${targetPath}" must resolve inside "${resolvedRoot}".`);
+  }
+  if (fs.existsSync(resolvedRoot) && fs.existsSync(resolvedTarget)) {
+    const realRoot = fs.realpathSync(resolvedRoot);
+    const realTarget = fs.realpathSync(resolvedTarget);
+    const realRel = path.relative(realRoot, realTarget);
+    if (!realRel || realRel.startsWith('..') || path.isAbsolute(realRel)) {
+      throw new Error(`Security error: ${label} symlink resolves outside "${realRoot}".`);
+    }
+  }
+  return resolvedTarget;
+}
+
 /**
  * Returns all configured team repositories with active states, entry counts, and git health.
  */
@@ -37,8 +55,8 @@ export function getTeamRepositories(workspaceRoot = process.cwd()) {
     let entriesCount = 0;
     if (fs.existsSync(repoDir)) {
       try {
-        const files = fs.readdirSync(repoDir);
-        entriesCount = files.filter(f => f.endsWith('.md') && f.toUpperCase() !== 'README.MD').length;
+        const files = findMarkdownFiles(repoDir);
+        entriesCount = files.filter(f => path.basename(f, '.md').toUpperCase() !== 'README').length;
       } catch {}
     }
 
@@ -255,7 +273,9 @@ export function removeTeamRepository(arg1 = process.cwd(), arg2 = {}, arg3 = nul
   }
 
   slug = String(slug || '').trim().toLowerCase();
-  if (!slug) throw new Error('Slug is required');
+  if (!slug || !/^[a-z0-9_-]+$/.test(slug)) {
+    throw new Error(`Invalid team repository slug: "${slug}". Only alphanumeric, "-", and "_" characters are permitted.`);
+  }
 
   const paths = resolveStoragePaths(workspaceRoot);
   const settings = getSettings(paths.baseDir);
@@ -269,7 +289,7 @@ export function removeTeamRepository(arg1 = process.cwd(), arg2 = {}, arg3 = nul
   saveSettings(settings, paths.baseDir);
 
   if (deleteFiles) {
-    const targetDir = path.join(paths.teamDir, slug);
+    const targetDir = assertContainment(path.join(paths.teamDir, slug), paths.teamDir, 'team directory');
     try {
       if (fs.existsSync(targetDir)) {
         fs.rmSync(targetDir, { recursive: true, force: true });
@@ -451,20 +471,23 @@ export function resolveTeamConflict(workspaceRoot = process.cwd(), options = {})
   const paths = resolveStoragePaths(workspaceRoot);
   const cleanSlug = path.basename(slug.trim()).replace(/\.md$/i, '');
   let resolvedPrivateSlug = cleanSlug;
-  let privateFile = path.join(paths.privateDir, `${cleanSlug}.md`);
+  let privateFile = assertContainment(path.join(paths.privateDir, `${cleanSlug}.md`), paths.privateDir, 'privateFile');
+
+  if (options.privatePath) {
+    const safePrivatePath = assertContainment(options.privatePath, paths.privateDir, 'privatePath');
+    if (!fs.existsSync(privateFile) && fs.existsSync(safePrivatePath)) {
+      privateFile = safePrivatePath;
+      resolvedPrivateSlug = path.basename(privateFile, '.md');
+    }
+  }
 
   if (!fs.existsSync(privateFile) && options.privateSlug) {
     const cleanPriv = path.basename(options.privateSlug.trim()).replace(/\.md$/i, '');
-    const altFile = path.join(paths.privateDir, `${cleanPriv}.md`);
+    const altFile = assertContainment(path.join(paths.privateDir, `${cleanPriv}.md`), paths.privateDir, 'privateSlug');
     if (fs.existsSync(altFile)) {
       privateFile = altFile;
       resolvedPrivateSlug = cleanPriv;
     }
-  }
-
-  if (!fs.existsSync(privateFile) && options.privatePath && fs.existsSync(options.privatePath)) {
-    privateFile = options.privatePath;
-    resolvedPrivateSlug = path.basename(privateFile, '.md');
   }
 
   if (!fs.existsSync(privateFile)) {
@@ -497,6 +520,8 @@ export function resolveTeamConflict(workspaceRoot = process.cwd(), options = {})
   if (!fs.existsSync(privateFile)) {
     throw new Error(`Private memory file not found: ${privateFile}`);
   }
+
+  privateFile = assertContainment(privateFile, paths.privateDir, 'privateFile');
 
   if (resolution === 'adopt_team') {
     fs.unlinkSync(privateFile);

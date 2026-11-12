@@ -63,11 +63,29 @@ export function setupEnvironment(options = {}) {
     }
   }
 
+  function validateSafeGitUrl(url) {
+    if (url && String(url).trim().startsWith('-')) {
+      throw new Error('Invalid repository URL: must not start with "-".');
+    }
+  }
+
+  function assertSafeSlug(slug) {
+    const clean = String(slug || '').trim();
+    if (!clean || !/^[a-z0-9_-]+$/i.test(clean)) {
+      throw new Error(`Invalid team repository slug "${slug}". Only alphanumeric, "-", and "_" characters are permitted.`);
+    }
+    return clean;
+  }
+
   if (options.privateRepoUrl !== undefined) {
-    settings.privateRepoUrl = options.privateRepoUrl.trim();
+    const cleanPriv = options.privateRepoUrl.trim();
+    validateSafeGitUrl(cleanPriv);
+    settings.privateRepoUrl = cleanPriv;
   }
   if (options.teamRepoUrl !== undefined) {
-    settings.teamRepoUrl = options.teamRepoUrl.trim();
+    const cleanTeam = options.teamRepoUrl.trim();
+    validateSafeGitUrl(cleanTeam);
+    settings.teamRepoUrl = cleanTeam;
   }
   if (options.embeddingEngine !== undefined) {
     settings.embeddingEngine = options.embeddingEngine.toLowerCase().trim() === 'heuristic' ? 'heuristic' : 'onnx';
@@ -76,7 +94,8 @@ export function setupEnvironment(options = {}) {
   // Multi-Team Repositories by Slug (Explicit or Auto-Derived from URL)
   const teamUrl = (options.teamRepoUrl || options.teamUrl || '').trim();
   if (teamUrl) {
-    const slug = (options.teamRepoSlug ? options.teamRepoSlug.trim() : deriveTeamRepoSlug(teamUrl));
+    validateSafeGitUrl(teamUrl);
+    const slug = options.teamRepoSlug ? assertSafeSlug(options.teamRepoSlug) : deriveTeamRepoSlug(teamUrl);
     const existingIdx = settings.teamRepos.findIndex(r => r.slug === slug);
     if (existingIdx >= 0) {
       settings.teamRepos[existingIdx].url = teamUrl;
@@ -140,13 +159,15 @@ export function setupEnvironment(options = {}) {
   // Helper to initialize or clone git repository cleanly
   function ensureRepoInitialized(targetDir, remoteUrl) {
     if (!remoteUrl) return;
+    const cleanUrl = String(remoteUrl).trim();
+    validateSafeGitUrl(cleanUrl);
     const gitDir = path.join(targetDir, '.git');
     if (fs.existsSync(gitDir)) {
       try {
-        execFileSync('git', ['remote', 'set-url', 'origin', remoteUrl], { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
+        execFileSync('git', ['remote', 'set-url', '--', 'origin', cleanUrl], { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
       } catch {
         try {
-          execFileSync('git', ['remote', 'add', 'origin', remoteUrl], { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
+          execFileSync('git', ['remote', 'add', '--', 'origin', cleanUrl], { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
         } catch {}
       }
       return;
@@ -154,7 +175,7 @@ export function setupEnvironment(options = {}) {
 
     let hasRemoteBranches = false;
     try {
-      const lsOut = execFileSync('git', ['ls-remote', '--heads', remoteUrl], {
+      const lsOut = execFileSync('git', ['ls-remote', '--heads', '--', cleanUrl], {
         encoding: 'utf8',
         timeout: 5000,
         env: GIT_EXEC_ENV,
@@ -168,14 +189,14 @@ export function setupEnvironment(options = {}) {
         const hasExistingFiles = fs.existsSync(targetDir) && fs.readdirSync(targetDir).length > 0;
         if (hasExistingFiles) {
           execFileSync('git', ['init', '-b', 'main'], { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
-          execFileSync('git', ['remote', 'add', 'origin', remoteUrl], { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
+          execFileSync('git', ['remote', 'add', '--', 'origin', cleanUrl], { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
           execFileSync('git', ['fetch', 'origin'], { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
           try {
             execFileSync('git', ['branch', '--set-upstream-to=origin/main', 'main'], { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
           } catch {}
         } else {
           fs.rmSync(targetDir, { recursive: true, force: true });
-          execFileSync('git', ['clone', remoteUrl, targetDir], { env: GIT_EXEC_ENV, stdio: 'ignore' });
+          execFileSync('git', ['clone', '--', cleanUrl, targetDir], { env: GIT_EXEC_ENV, stdio: 'ignore' });
         }
         return;
       } catch {}
@@ -186,7 +207,7 @@ export function setupEnvironment(options = {}) {
         fs.mkdirSync(targetDir, { recursive: true });
       }
       execFileSync('git', ['init', '-b', 'main'], { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
-      execFileSync('git', ['remote', 'add', 'origin', remoteUrl], { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
+      execFileSync('git', ['remote', 'add', '--', 'origin', cleanUrl], { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
     } catch {}
   }
 
@@ -199,7 +220,13 @@ export function setupEnvironment(options = {}) {
   if (Array.isArray(settings.teamRepos) && settings.teamRepos.length > 0) {
     for (const repo of settings.teamRepos) {
       if (repo && repo.slug && repo.url && repo.active !== false) {
-        ensureRepoInitialized(path.join(teamDir, repo.slug), repo.url);
+        const safeSlug = assertSafeSlug(repo.slug);
+        const resolvedTeamRoot = path.resolve(teamDir);
+        const repoTargetDir = path.resolve(resolvedTeamRoot, safeSlug);
+        const rel = path.relative(resolvedTeamRoot, repoTargetDir);
+        if (rel && !rel.startsWith('..') && !path.isAbsolute(rel)) {
+          ensureRepoInitialized(repoTargetDir, repo.url);
+        }
       }
     }
   } else if (settings.teamRepoUrl) {
@@ -219,8 +246,12 @@ export function testRemoteConnectivity(url) {
   if (!url || typeof url !== 'string' || !url.trim()) {
     return { ok: false, error: 'Empty URL' };
   }
+  const cleanUrl = url.trim();
+  if (cleanUrl.startsWith('-')) {
+    return { ok: false, error: 'Invalid repository URL: must not start with "-".' };
+  }
   try {
-    execFileSync('git', ['ls-remote', url.trim(), 'HEAD'], {
+    execFileSync('git', ['ls-remote', '--', cleanUrl, 'HEAD'], {
       encoding: 'utf8',
       timeout: 5000,
       env: GIT_EXEC_ENV,
@@ -367,7 +398,7 @@ async function runInteractiveWizard() {
   if (options.teamRepoUrl) {
     console.log('\n\x1b[36mPerforming initial Team memory clone/pull...\x1b[0m');
     try {
-      execFileSync('git', ['clone', options.teamRepoUrl, res.teamDir], {
+      execFileSync('git', ['clone', '--', options.teamRepoUrl, res.teamDir], {
         env: GIT_EXEC_ENV,
         stdio: 'inherit'
       });
@@ -385,57 +416,71 @@ async function runInteractiveWizard() {
   console.log('  • \x1b[36m/kc-elicit\x1b[0m   - Elicit and record reusable learnings at the end of a session\n');
 }
 
-// Entrypoint
-const args = process.argv.slice(2);
-const options = {};
-let hasFlags = false;
+function runSetupCli() {
+  const args = process.argv.slice(2);
+  const options = {};
+  let hasFlags = false;
 
-for (let i = 0; i < args.length; i++) {
-  if (args[i] === '--private-url' && args[i + 1]) {
-    options.privateRepoUrl = args[++i];
-    hasFlags = true;
-  } else if (args[i] === '--team-url' && args[i + 1]) {
-    options.teamRepoUrl = args[++i];
-    hasFlags = true;
-  } else if (args[i] === '--embedding-engine' && args[i + 1]) {
-    options.embeddingEngine = args[++i];
-    hasFlags = true;
-  } else if (args[i].startsWith('--embedding-engine=')) {
-    options.embeddingEngine = args[i].split('=')[1];
-    hasFlags = true;
-  } else if (args[i] === '--no-install') {
-    options.installDependencies = false;
-    hasFlags = true;
-  } else if (args[i] === '--team-repo-slug' && args[i + 1]) {
-    options.teamRepoSlug = args[++i];
-    hasFlags = true;
-  } else if (args[i] === '--team-repo-url' && args[i + 1]) {
-    options.teamRepoUrl = args[++i];
-    hasFlags = true;
-  } else if (args[i] === '--activate-team' && args[i + 1]) {
-    options.activateTeamSlug = args[++i];
-    hasFlags = true;
-  } else if (args[i] === '--deactivate-team' && args[i + 1]) {
-    options.deactivateTeamSlug = args[++i];
-    hasFlags = true;
-  } else if (args[i] === '--remove-team' && args[i + 1]) {
-    options.removeTeamSlug = args[++i];
-    hasFlags = true;
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--private-url' && args[i + 1]) {
+      options.privateRepoUrl = args[++i];
+      hasFlags = true;
+    } else if (args[i] === '--team-url' && args[i + 1]) {
+      options.teamRepoUrl = args[++i];
+      hasFlags = true;
+    } else if (args[i] === '--embedding-engine' && args[i + 1]) {
+      options.embeddingEngine = args[++i];
+      hasFlags = true;
+    } else if (args[i].startsWith('--embedding-engine=')) {
+      options.embeddingEngine = args[i].split('=')[1];
+      hasFlags = true;
+    } else if (args[i] === '--no-install') {
+      options.installDependencies = false;
+      hasFlags = true;
+    } else if (args[i] === '--team-repo-slug' && args[i + 1]) {
+      options.teamRepoSlug = args[++i];
+      hasFlags = true;
+    } else if (args[i] === '--team-repo-url' && args[i + 1]) {
+      options.teamRepoUrl = args[++i];
+      hasFlags = true;
+    } else if (args[i] === '--activate-team' && args[i + 1]) {
+      options.activateTeamSlug = args[++i];
+      hasFlags = true;
+    } else if (args[i] === '--deactivate-team' && args[i + 1]) {
+      options.deactivateTeamSlug = args[++i];
+      hasFlags = true;
+    } else if (args[i] === '--remove-team' && args[i + 1]) {
+      options.removeTeamSlug = args[++i];
+      hasFlags = true;
+    }
+  }
+
+  try {
+    if (hasFlags) {
+      // Headless mode
+      const result = setupEnvironment(options);
+      console.log(JSON.stringify(result, null, 2));
+    } else if (process.stdin.isTTY) {
+      // Interactive TUI mode
+      runInteractiveWizard().catch((err) => {
+        console.error(`\x1b[31mSetup failed: ${err.message}\x1b[0m`);
+        process.exit(1);
+      });
+    } else {
+      // Non-interactive fallback without flags (e.g. piped or automated script)
+      const result = setupEnvironment({});
+      console.log(JSON.stringify(result, null, 2));
+    }
+  } catch (err) {
+    console.error(`\x1b[31mSetup failed: ${err.message}\x1b[0m`);
+    process.exit(1);
   }
 }
 
-if (hasFlags) {
-  // Headless mode
-  const result = setupEnvironment(options);
-  console.log(JSON.stringify(result, null, 2));
-} else if (process.stdin.isTTY) {
-  // Interactive TUI mode
-  runInteractiveWizard().catch((err) => {
-    console.error(`\x1b[31mSetup failed: ${err.message}\x1b[0m`);
-    process.exit(1);
-  });
-} else {
-  // Non-interactive fallback without flags (e.g. piped or automated script)
-  const result = setupEnvironment({});
-  console.log(JSON.stringify(result, null, 2));
+const isDirectCli = process.argv[1] && (
+  fs.realpathSync(process.argv[1]) === fs.realpathSync(fileURLToPath(import.meta.url))
+);
+
+if (isDirectCli) {
+  runSetupCli();
 }

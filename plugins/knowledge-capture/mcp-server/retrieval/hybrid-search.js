@@ -23,13 +23,15 @@ export function isIndexDirty(workspaceRoot = process.cwd()) {
 
   try {
     const dimRow = db.prepare('SELECT val FROM meta WHERE key = ?').get('embedding_dim');
-    if (dimRow && parseInt(dimRow.val, 10) !== activeConfig.dimensions) {
+    if (!dimRow || parseInt(dimRow.val, 10) !== activeConfig.dimensions) {
       return true;
     }
-  } catch {}
+  } catch {
+    return true;
+  }
 
   const checkRowStmt = db.prepare(
-    'SELECT mtime FROM memories WHERE workspace_id = ? AND layer = ? AND team_slug = ? AND path = ?'
+    'SELECT mtime, (trigger_vector IS NOT NULL AND content_vector IS NOT NULL AND entity_vector IS NOT NULL) AS has_vec FROM memories WHERE workspace_id = ? AND layer = ? AND team_slug = ? AND path = ?'
   );
 
   let diskCount = 0;
@@ -43,7 +45,7 @@ export function isIndexDirty(workspaceRoot = process.cwd()) {
         const stats = fs.statSync(f);
         const mtime = Math.floor(stats.mtimeMs);
         const row = checkRowStmt.get(wsId, layer, teamSlug, f);
-        if (!row || row.mtime !== mtime) {
+        if (!row || row.mtime !== mtime || !row.has_vec) {
           return true;
         }
       } catch {

@@ -111,7 +111,7 @@ export class LayerProvider {
           scope: 'global'
         });
       }
-    } else {
+    } else if (!this.settings?.teamRepos || this.settings.teamRepos.length === 0) {
       layers.push({
         key: 'team',
         teamSlug: 'default',
@@ -142,6 +142,9 @@ export class LayerProvider {
         return null;
       }
       return this.paths.activeTeamDirs[0].dir;
+    }
+    if (this.settings?.teamRepos && this.settings.teamRepos.length > 0) {
+      return null;
     }
     return (!teamSlug || teamSlug.toLowerCase() === 'default') ? this.paths.teamDir : null;
   }
@@ -186,8 +189,7 @@ export class LayerProvider {
             return { layer: 'team', teamSlug: tRepo.slug, path: match.path, slug: match.slug };
           }
         }
-      }
-      if (!targetTeamSlug || targetTeamSlug === 'default') {
+      } else if ((!this.settings?.teamRepos || this.settings.teamRepos.length === 0) && (!targetTeamSlug || targetTeamSlug === 'default')) {
         const match = findFileInLayerDir(this.paths.teamDir, cleanSlug);
         if (match) {
           return { layer: 'team', teamSlug: 'default', path: match.path, slug: match.slug };

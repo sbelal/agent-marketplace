@@ -653,9 +653,14 @@ export function saveMemoryEntry(workspaceRoot, params = {}) {
 
   let rewiredCount = 0;
   if (oldSlug && oldSlug !== cleanSlug) {
-    const oldFile = path.join(targetDir, `${oldSlug.replace(/\.md$/i, '')}.md`);
-    if (fs.existsSync(oldFile)) {
-      fs.unlinkSync(oldFile);
+    const rawOld = oldSlug.trim().replace(/\.md$/i, '');
+    const cleanOld = path.basename(rawOld);
+    if (cleanOld && cleanOld === rawOld && !cleanOld.includes('..')) {
+      const lp = createLayerProvider(workspaceRoot);
+      const oldMatch = lp.findMemoryFile(cleanOld, normLayer);
+      if (oldMatch && oldMatch.path !== targetFile && fs.existsSync(oldMatch.path)) {
+        fs.unlinkSync(oldMatch.path);
+      }
     }
     rewiredCount = rewireMemoryReferences(workspaceRoot, oldSlug, cleanSlug);
   }
@@ -694,8 +699,9 @@ export function mergeMemoryEntries(workspaceRoot, params = {}) {
   }
 
   const normLayer = String(layer).toLowerCase();
-  const paths = resolveStoragePaths(workspaceRoot);
-  const targetDir = normLayer === 'workspace' ? paths.workspaceDir : paths.privateDir;
+  if (normLayer !== 'workspace' && normLayer !== 'private') {
+    throw new Error(`Direct writes are only permitted to 'workspace' or 'private' layer. Got '${layer}'.`);
+  }
 
   const saveRes = saveMemoryEntry(workspaceRoot, {
     layer: normLayer,
@@ -712,14 +718,19 @@ export function mergeMemoryEntries(workspaceRoot, params = {}) {
     overrides
   });
 
+  const lp = createLayerProvider(workspaceRoot);
   let totalRewired = 0;
   for (const src of sourceSlugs) {
-    const cleanSrc = src.replace(/\.md$/i, '').trim();
-    if (cleanSrc === saveRes.slug) continue;
+    const rawSrc = String(src || '').trim().replace(/\.md$/i, '');
+    const cleanSrc = path.basename(rawSrc);
+    if (!cleanSrc || cleanSrc !== rawSrc || cleanSrc.includes('..')) {
+      throw new Error('Invalid source slug. Directory traversal is prohibited.');
+    }
+    if (cleanSrc.toLowerCase() === saveRes.slug.toLowerCase()) continue;
 
-    const srcPath = path.join(targetDir, `${cleanSrc}.md`);
-    if (fs.existsSync(srcPath)) {
-      fs.unlinkSync(srcPath);
+    const srcMatch = lp.findMemoryFile(cleanSrc, normLayer);
+    if (srcMatch && srcMatch.path !== saveRes.path && fs.existsSync(srcMatch.path)) {
+      fs.unlinkSync(srcMatch.path);
     }
     totalRewired += rewireMemoryReferences(workspaceRoot, cleanSrc, saveRes.slug);
   }
@@ -743,22 +754,27 @@ export function deleteMemoryEntry(workspaceRoot, params = {}) {
     throw new Error('Invalid memory slug. Directory traversal is prohibited.');
   }
   const normLayer = String(layer).toLowerCase();
-  const paths = resolveStoragePaths(workspaceRoot);
+  if (normLayer !== 'workspace' && normLayer !== 'private') {
+    throw new Error(`Direct deletes are only permitted on 'workspace' or 'private' layer. Got '${layer}'.`);
+  }
 
-  const targetDir = normLayer === 'workspace' ? paths.workspaceDir : paths.privateDir;
-  const filePath = path.join(targetDir, `${cleanSlug}.md`);
+  const lp = createLayerProvider(workspaceRoot);
+  const match = lp.findMemoryFile(cleanSlug, normLayer);
 
-  if (!fs.existsSync(filePath)) {
+  if (!match || !fs.existsSync(match.path)) {
     return { success: false, message: `File '${cleanSlug}.md' not found in layer '${normLayer}'.` };
   }
 
-  fs.unlinkSync(filePath);
-  const cleanedReferences = cleanDanglingReferences(workspaceRoot, cleanSlug);
+  fs.unlinkSync(match.path);
+  let cleanedReferences = cleanDanglingReferences(workspaceRoot, cleanSlug);
+  if (match.slug && match.slug !== cleanSlug) {
+    cleanedReferences += cleanDanglingReferences(workspaceRoot, match.slug);
+  }
 
   return {
     success: true,
     layer: normLayer,
-    deletedSlug: cleanSlug,
+    deletedSlug: match.slug || cleanSlug,
     cleanedReferences
   };
 }

@@ -614,11 +614,22 @@ Options:
     process.exit(0);
   }
 
-  const scopeArg = (getArg('--scope') || 'workspace').toLowerCase();
-  const scope = (scopeArg === 'global' || scopeArg === 'g') ? 'global' : 'workspace';
+  let scope = 'workspace';
+  if (hasFlag('--scope')) {
+    const rawScope = getArg('--scope');
+    const scopeArg = (rawScope || '').toLowerCase();
+    if (scopeArg === 'global' || scopeArg === 'g') {
+      scope = 'global';
+    } else if (scopeArg === 'workspace' || scopeArg === 'w') {
+      scope = 'workspace';
+    } else {
+      console.error(`\x1b[31mError: Invalid --scope value '${rawScope || ''}'. Must be 'workspace' or 'global'.\x1b[0m`);
+      process.exit(1);
+    }
+  }
 
   const validateToggleTarget = (flagName, rawVal) => {
-    if (!rawVal || !/^[a-zA-Z0-9_-]+$/.test(rawVal)) {
+    if (!rawVal || rawVal.startsWith('-') || !/^[a-zA-Z0-9_-]+$/.test(rawVal)) {
       console.error(`\x1b[31mError: Invalid or missing plugin ID for ${flagName}.\x1b[0m`);
       process.exit(1);
     }
@@ -667,7 +678,11 @@ Options:
   }
 
   const pluginArg = getArg('--plugin');
-  if (pluginArg) {
+  if (hasFlag('--plugin')) {
+    if (!pluginArg || pluginArg.startsWith('-')) {
+      console.error('\x1b[31mError: Missing plugin ID for --plugin. Usage: --plugin <id|all>\x1b[0m');
+      process.exit(1);
+    }
     const plugins = getAvailablePlugins(REPO_ROOT);
     const targets = pluginArg.toLowerCase() === 'all'
       ? plugins
@@ -708,7 +723,7 @@ Options:
 
   const updateArg = getArg('--update');
   if (updateArg || hasFlag('--update')) {
-    const target = (updateArg || 'all').toLowerCase();
+    const target = (!updateArg || updateArg.startsWith('-') ? 'all' : updateArg).toLowerCase();
     const inventory = getPluginInventory(REPO_ROOT, WORKSPACE_DIR, HOME_DIR);
     let count = 0;
 
@@ -735,7 +750,11 @@ Options:
   }
 
   const uninstallArg = getArg('--uninstall');
-  if (uninstallArg) {
+  if (hasFlag('--uninstall')) {
+    if (!uninstallArg || uninstallArg.startsWith('-')) {
+      console.error('\x1b[31mError: Missing target for --uninstall. Usage: --uninstall <id|source>\x1b[0m');
+      process.exit(1);
+    }
     if (uninstallArg.toLowerCase() === 'source') {
       const configPath = resolveSourceConfigPath(scope, WORKSPACE_DIR, HOME_DIR);
       const targetSourcePath = resolveSourceRegistrationPath(REPO_ROOT, HOME_DIR);
@@ -746,18 +765,23 @@ Options:
         console.log(`\x1b[33mSource entry not found in ${configPath}.\x1b[0m`);
       }
     } else {
-      const res = uninstallPlugin(uninstallArg, scope, WORKSPACE_DIR, HOME_DIR);
-      if (res.success) {
-        console.log(`\x1b[32m✔ Successfully uninstalled ${uninstallArg} from ${scope}.\x1b[0m`);
-      } else {
-        console.log(`\x1b[33mPlugin ${uninstallArg} was not found in ${scope}.\x1b[0m`);
+      try {
+        const res = uninstallPlugin(uninstallArg, scope, WORKSPACE_DIR, HOME_DIR);
+        if (res.success) {
+          console.log(`\x1b[32m✔ Successfully uninstalled ${uninstallArg} from ${scope}.\x1b[0m`);
+        } else {
+          console.log(`\x1b[33mPlugin ${uninstallArg} was not found in ${scope}.\x1b[0m`);
+        }
+      } catch (err) {
+        console.error(`\x1b[31m✖ Failed uninstalling ${uninstallArg}: ${err.message}\x1b[0m`);
+        process.exit(1);
       }
     }
     process.exit(0);
   }
 
-  // Fallback to interactive wizard if no recognizable flag provided
-  runInteractiveWizard();
+  console.error(`\x1b[31mError: Unrecognized or incomplete arguments: ${args.join(' ')}. Run --help for usage.\x1b[0m`);
+  process.exit(1);
 }
 
 // ==========================================

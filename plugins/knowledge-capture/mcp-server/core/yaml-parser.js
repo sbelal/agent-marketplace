@@ -1,10 +1,16 @@
 export function stripQuotes(str) {
   const s = String(str || '').trim();
-  if (
-    (s.startsWith('"') && s.endsWith('"')) ||
-    (s.startsWith("'") && s.endsWith("'"))
-  ) {
+  if (s.startsWith('"') && s.endsWith('"') && s.length >= 2) {
+    try {
+      const parsed = JSON.parse(s);
+      if (typeof parsed === 'string') {
+        return parsed;
+      }
+    } catch {}
     return s.slice(1, -1).trim();
+  }
+  if (s.startsWith("'") && s.endsWith("'") && s.length >= 2) {
+    return s.slice(1, -1).replace(/''/g, "'").trim();
   }
   return s;
 }

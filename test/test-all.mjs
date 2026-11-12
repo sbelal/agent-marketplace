@@ -38,6 +38,9 @@ import {
   resolveTeamConflict
 } from '../plugins/knowledge-capture/mcp-server/memory-service.js';
 
+import { mergeMemoryEntries } from '../plugins/knowledge-capture/mcp-server/core/memory-store.js';
+import { pullSingleRepo, validateSafeGitUrl } from '../plugins/knowledge-capture/bin/pull.js';
+import { setupEnvironment, testRemoteConnectivity } from '../plugins/knowledge-capture/bin/setup.js';
 import { startStudioServer } from '../plugins/knowledge-capture/bin/studio.js';
 
 import {
@@ -1873,6 +1876,230 @@ Discovered from MCP client roots/list URI.
   });
   assert.deepEqual(JSON.parse(agRulesOut), { injectSteps: [] }, 'Antigravity hook invocation must return empty injectSteps JSON');
   console.log('  ✔ Passed: Canonical manifest sync, version propagation, validation, and hook-runtime verified.\n');
+
+  // ==========================================
+  // TEST 43: Security Hardening (privatePath Traversal, Team Slug Guard, Git Option Injection, Installer CLI Validation)
+  // ==========================================
+  console.log('Test 43: Security Hardening Across Team Sync, Pull/Setup & Installer CLI...');
+  const secWs = path.join(tempRoot, 'sec-hardening-ws');
+  fs.mkdirSync(path.join(secWs, '.agents', 'rules', 'memory'), { recursive: true });
+  const outsideSecretFile = path.join(tempRoot, 'outside-secret.md');
+  fs.writeFileSync(outsideSecretFile, '# DO NOT DELETE\nSensitive outside content.\n', 'utf8');
+
+  assert.throws(
+    () => resolveTeamConflict(secWs, { slug: 'nonexistent-rule', resolution: 'adopt_team', privatePath: outsideSecretFile }),
+    /Security error: privatePath/,
+    'resolveTeamConflict must reject privatePath outside paths.privateDir'
+  );
+  assert.ok(fs.existsSync(outsideSecretFile), 'Outside file must never be deleted by resolveTeamConflict');
+
+  assert.throws(
+    () => removeTeamRepository('../evil-dir', true, secWs),
+    /Invalid team repository slug/,
+    'removeTeamRepository must reject traversal slugs'
+  );
+
+  // Git flag injection guards in setup.js & pull.js
+  assert.throws(() => validateSafeGitUrl('--upload-pack=evil'), /Invalid repository URL/, 'validateSafeGitUrl must reject leading "-"');
+  assert.equal(pullSingleRepo(path.join(tempRoot, 'pull-evil'), 'Evil', '--upload-pack=evil'), 1, 'pullSingleRepo must fail cleanly on leading "-" URL');
+  assert.equal(testRemoteConnectivity('--upload-pack=evil').ok, false, 'testRemoteConnectivity must reject leading "-" URL');
+
+  const fakeHome = path.join(tempRoot, 'fake-home');
+  fs.mkdirSync(fakeHome, { recursive: true });
+  let setupBadUrlStatus = 0;
+  try {
+    execFileSync(process.execPath, [path.resolve('plugins/knowledge-capture/bin/setup.js'), '--private-url', '--upload-pack=evil', '--no-install'], {
+      env: { ...process.env, HOME: fakeHome },
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+  } catch (err) {
+    setupBadUrlStatus = err.status;
+  }
+  assert.equal(setupBadUrlStatus, 1, 'setup.js CLI must exit with code 1 on leading "-" repository URL');
+
+  // pull.js null/missing settings safety
+  const emptyPullStorage = path.join(tempRoot, 'empty-pull-storage');
+  fs.mkdirSync(emptyPullStorage, { recursive: true });
+  const pullPrivOut = execFileSync(process.execPath, [path.resolve('plugins/knowledge-capture/bin/pull.js'), 'private'], {
+    cwd: secWs,
+    env: { ...process.env, KC_STORAGE_DIR: emptyPullStorage },
+    encoding: 'utf8'
+  });
+  assert.ok(pullPrivOut.includes('Repository URL is not configured'), 'pull.js private must handle empty settings safely');
+
+  // bin/install.js CLI edge cases
+  const runInstallerFail = (cliArgs) => {
+    try {
+      execFileSync(process.execPath, [path.resolve('bin/install.js'), ...cliArgs], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe']
+      });
+      return { status: 0, stderr: '' };
+    } catch (err) {
+      return { status: err.status, stderr: err.stderr || '' };
+    }
+  };
+  assert.equal(runInstallerFail(['--scope', 'bogus', '--list']).status, 0); // --list exits before --scope check
+  assert.equal(runInstallerFail(['--scope', 'bogus', '--enable', 'knowledge-capture']).status, 1, 'Invalid --scope must exit 1');
+  assert.equal(runInstallerFail(['--plugin']).status, 1, '--plugin without value must exit 1');
+  assert.equal(runInstallerFail(['--uninstall']).status, 1, '--uninstall without value must exit 1');
+  const badUninstall = runInstallerFail(['--uninstall', '../evil']);
+  assert.equal(badUninstall.status, 1, '--uninstall with traversal ID must fail cleanly with exit 1');
+  assert.ok(!badUninstall.stderr.includes('    at '), 'Invalid --uninstall must print clean error instead of uncaught stack trace');
+  console.log('  ✔ Passed: All path containment, git option injection, and CLI validation guards verified.\n');
+
+  // ==========================================
+  // TEST 44: Deactivated Team Non-Leakage, Nested Subdirs, YAML Round-Trip, Dirty Vectors & Studio Workspace Switch
+  // ==========================================
+  console.log('Test 44: Deactivated Team Isolation, Nested Subdir Ops, YAML Escaping, Vector Dirty Check & Studio Switching...');
+  const bugFixWs1 = path.join(tempRoot, 'bugfix-ws-1');
+  const bugFixWs2 = path.join(tempRoot, 'bugfix-ws-2');
+  const bugFixMem1 = path.join(bugFixWs1, '.agents', 'rules', 'memory');
+  const bugFixMem2 = path.join(bugFixWs2, '.agents', 'rules', 'memory');
+  fs.mkdirSync(path.join(bugFixMem1, 'k8s'), { recursive: true });
+  fs.mkdirSync(bugFixMem2, { recursive: true });
+
+  // 1. Nested Team File Counting & Deactivated Team Isolation in LayerProvider
+  const activeTeamRes = addTeamRepository('team-visible', '', 'Visible Team', bugFixWs1);
+  const hiddenTeamRes = addTeamRepository('team-hidden', '', 'Hidden Team', bugFixWs1);
+  fs.mkdirSync(path.join(activeTeamRes.targetDir, 'adr'), { recursive: true });
+  fs.writeFileSync(path.join(activeTeamRes.targetDir, 'README.md'), '# Team Readme\n', 'utf8');
+  fs.writeFileSync(path.join(activeTeamRes.targetDir, 'adr', 'adr-001.md'), `---
+name: adr-001
+domain: architecture
+type: convention
+description: Nested ADR entry in team repository
+---
+# ADR 001
+`, 'utf8');
+  fs.writeFileSync(path.join(hiddenTeamRes.targetDir, 'secret-inactive-rule.md'), `---
+name: secret-inactive-rule
+domain: security
+type: convention
+description: Must not leak when deactivated
+---
+# Secret Inactive
+`, 'utf8');
+
+  setTeamRepositoryActive('team-hidden', false, bugFixWs1);
+  const teamReposList = getTeamRepositories(bugFixWs1);
+  const visibleInfo = teamReposList.find(r => r.slug === 'team-visible');
+  assert.equal(visibleInfo.entriesCount, 1, 'getTeamRepositories must recursively count nested team markdown files excluding README.md');
+
+  const bugLp = createLayerProvider(bugFixWs1);
+  assert.ok(bugLp.findMemoryFile('adr-001', 'all'), 'Active nested team entry must be found');
+  assert.equal(bugLp.findMemoryFile('secret-inactive-rule', 'all'), null, 'Deactivated team entry must NEVER leak via LayerProvider fallback');
+  assert.equal(bugLp.findMemoryFile('secret-inactive-rule', 'team'), null, 'Deactivated team entry must NEVER leak in team layer lookup');
+
+  // Deactivate all team repos and verify still isolated
+  setTeamRepositoryActive('team-visible', false, bugFixWs1);
+  const allDeactivatedLp = createLayerProvider(bugFixWs1);
+  assert.equal(allDeactivatedLp.findMemoryFile('adr-001', 'all'), null, 'All-deactivated teamRepos must not expose Team files via default fallback');
+  assert.equal(allDeactivatedLp.getActiveLayers().some(l => l.key === 'team'), false, 'getActiveLayers must omit default team when teamRepos are all inactive');
+
+  removeTeamRepository('team-visible', true, bugFixWs1);
+  removeTeamRepository('team-hidden', true, bugFixWs1);
+
+  // 2. Nested Subdir Delete / Merge / Rename & Invalid Layer Rejection in memory-store.js
+  assert.throws(
+    () => deleteMemoryEntry(bugFixWs1, { layer: 'team', slug: 'anything' }),
+    /Direct deletes are only permitted/,
+    'deleteMemoryEntry must reject non-writable layer instead of silently targeting privateDir'
+  );
+  assert.throws(
+    () => mergeMemoryEntries(bugFixWs1, { layer: 'invalid-layer', targetSlug: 't', sourceSlugs: ['s'] }),
+    /Direct writes are only permitted/,
+    'mergeMemoryEntries must reject invalid layer instead of silently targeting privateDir'
+  );
+
+  const nestedDelFile = path.join(bugFixMem1, 'k8s', 'nested-pod-rule.md');
+  fs.writeFileSync(nestedDelFile, `---
+name: nested-pod-rule
+domain: devops
+type: convention
+description: Nested pod policy
+related: [nested-merge-src]
+---
+# Nested Pod Rule
+`, 'utf8');
+  const nestedDelRes = deleteMemoryEntry(bugFixWs1, { layer: 'workspace', slug: 'nested-pod-rule' });
+  assert.equal(nestedDelRes.success, true, 'deleteMemoryEntry must locate and delete entries inside nested subdirectories');
+  assert.equal(fs.existsSync(nestedDelFile), false, 'Nested file must be unlinked from disk');
+
+  const nestedMergeSrc = path.join(bugFixMem1, 'k8s', 'nested-merge-src.md');
+  fs.writeFileSync(nestedMergeSrc, `---
+name: nested-merge-src
+domain: devops
+type: convention
+description: Nested merge source
+---
+# Nested Merge Source
+`, 'utf8');
+  const mergedNested = mergeMemoryEntries(bugFixWs1, {
+    layer: 'workspace',
+    targetSlug: 'merged-k8s-rule',
+    sourceSlugs: ['nested-merge-src'],
+    title: 'Merged K8s Rule',
+    why: 'Consolidated policy',
+    howToApply: 'Apply everywhere'
+  });
+  assert.equal(mergedNested.success, true);
+  assert.equal(fs.existsSync(nestedMergeSrc), false, 'mergeMemoryEntries must remove source entries inside nested subdirectories');
+
+  // 3. YAML Double-Quoted Scalar With Embedded Quotes & Newlines Round-Trip
+  const complexScalarDesc = 'Quote "hello" with\nline two: #tag';
+  const complexYaml = serializeYamlFrontmatter({
+    name: 'yaml-complex-roundtrip',
+    domain: 'testing',
+    description: complexScalarDesc,
+    related: ['ref-alpha', 'ref "quoted"']
+  }, '# Complex Body\n');
+  const parsedComplexYaml = parseYamlFrontmatter(complexYaml);
+  assert.equal(parsedComplexYaml.frontmatter.description, complexScalarDesc, 'Double-quoted YAML scalar with quotes & newlines must round-trip losslessly');
+  assert.deepEqual(parsedComplexYaml.frontmatter.related, ['ref-alpha', 'ref "quoted"'], 'Double-quoted YAML array items with quotes must round-trip cleanly');
+
+  // 4. isIndexDirty Must Detect Vectorless Rows Created by syncSqliteMetadataSync (getKnowledgeGraphData)
+  fs.writeFileSync(path.join(bugFixMem2, 'vector-canary.md'), `---
+name: vector-canary
+domain: platform
+type: platform-fact
+description: Canary for checking trigger_vector presence in isIndexDirty
+verified: 2026-04-01
+---
+# Vector Canary
+Ensures vector indexing runs after metadata-only graph sync.
+`, 'utf8');
+  // Calling getKnowledgeGraphData triggers syncSqliteMetadataSync (writes rows with trigger_vector = NULL)
+  getKnowledgeGraphData(bugFixWs2);
+  assert.equal(isIndexDirty(bugFixWs2), true, 'isIndexDirty must return true when indexed rows lack embedding vectors');
+  await syncSqliteIndex(bugFixWs2);
+  assert.equal(isIndexDirty(bugFixWs2), false, 'isIndexDirty must return false once syncSqliteIndex computes vectors');
+
+  // 5. renderVisualMemoryStudio Must Rebind Server When Workspace Changes
+  const studioWs1 = await renderVisualMemoryStudio(bugFixWs1, {
+    mode: 'browser',
+    autoOpen: false,
+    port: 4311,
+    artifactDir: path.join(tempRoot, 'artifacts'),
+    fileName: 'studio-ws1.html'
+  });
+  assert.equal(studioWs1.workspace, path.resolve(bugFixWs1));
+  const health1 = await (await fetch(`${studioWs1.serverUrl}/api/health`)).json();
+  assert.equal(health1.workspace, path.resolve(bugFixWs1));
+
+  const studioWs2 = await renderVisualMemoryStudio(bugFixWs2, {
+    mode: 'browser',
+    autoOpen: false,
+    port: 4311,
+    artifactDir: path.join(tempRoot, 'artifacts'),
+    fileName: 'studio-ws2.html'
+  });
+  assert.equal(studioWs2.workspace, path.resolve(bugFixWs2));
+  const health2 = await (await fetch(`${studioWs2.serverUrl}/api/health`)).json();
+  assert.equal(health2.workspace, path.resolve(bugFixWs2), 'renderVisualMemoryStudio must restart/rebind HTTP server when workspaceRoot changes');
+  await stopStudioService();
+  console.log('  ✔ Passed: Deactivated team isolation, nested subdir ops, YAML round-trip, dirty-vector detection & studio switching verified.\n');
 
   console.log('============================================================');
   console.log('🎉 ALL TESTS PASSED SUCCESSFULLY!');

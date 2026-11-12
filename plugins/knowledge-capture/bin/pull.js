@@ -2,6 +2,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { resolveStoragePaths, GIT_EXEC_ENV } from '../mcp-server/core/storage-paths.js';
 
@@ -9,17 +10,55 @@ import { resolveStoragePaths, GIT_EXEC_ENV } from '../mcp-server/core/storage-pa
  * CLI Utility: Pull latest memory updates from Git upstream (Cross-platform, Multi-Team Support)
  */
 
-function pullSingleRepo(repoDir, label, repoUrl) {
+export function validateSafeGitUrl(url) {
+  if (url && String(url).trim().startsWith('-')) {
+    throw new Error('Invalid repository URL: must not start with "-".');
+  }
+}
+
+function detectDefaultBranch(repoDir) {
+  try {
+    const sym = execFileSync('git', ['symbolic-ref', 'refs/remotes/origin/HEAD', '--short'], {
+      cwd: repoDir,
+      encoding: 'utf8',
+      env: GIT_EXEC_ENV,
+      stdio: ['ignore', 'pipe', 'ignore']
+    }).trim();
+    if (sym) return sym.replace(/^origin\//, '');
+  } catch {}
+  try {
+    const branches = execFileSync('git', ['branch', '--list', 'main', 'master'], {
+      cwd: repoDir,
+      encoding: 'utf8',
+      env: GIT_EXEC_ENV,
+      stdio: ['ignore', 'pipe', 'ignore']
+    });
+    if (branches.includes('master') && !branches.includes('main')) {
+      return 'master';
+    }
+  } catch {}
+  return 'main';
+}
+
+export function pullSingleRepo(repoDir, label, repoUrl) {
   console.log(`=== Pulling ${label} (${repoDir}) ===`);
   if (!repoUrl) {
     console.log(`Notice: Repository URL is not configured for ${label}.`);
     return 0;
   }
+  const cleanUrl = String(repoUrl).trim();
+  try {
+    validateSafeGitUrl(cleanUrl);
+  } catch (err) {
+    console.error(`Error pulling ${label}: ${err.message}`);
+    return 1;
+  }
+
   if (!fs.existsSync(path.join(repoDir, '.git'))) {
-    console.log(`${label} clone not found. Initializing clone from ${repoUrl}...`);
+    console.log(`${label} clone not found. Initializing clone from ${cleanUrl}...`);
     try {
       fs.mkdirSync(path.dirname(repoDir), { recursive: true });
-      execFileSync('git', ['clone', repoUrl, repoDir], { stdio: 'inherit', env: GIT_EXEC_ENV });
+      execFileSync('git', ['clone', '--', cleanUrl, repoDir], { stdio: 'inherit', env: GIT_EXEC_ENV });
       console.log(`${label} cloned successfully.`);
       return 0;
     } catch (err) {
@@ -29,17 +68,27 @@ function pullSingleRepo(repoDir, label, repoUrl) {
   }
 
   try {
-    const dirty = execFileSync('git', ['status', '--porcelain'], { cwd: repoDir, encoding: 'utf8', env: GIT_EXEC_ENV }).trim();
-    if (dirty) {
+    const dirtyRaw = execFileSync('git', ['status', '--porcelain', '-z'], {
+      cwd: repoDir,
+      encoding: 'utf8',
+      env: GIT_EXEC_ENV
+    });
+    const dirtyEntries = dirtyRaw ? dirtyRaw.split('\0').filter(Boolean) : [];
+    if (dirtyEntries.length > 0) {
       console.error(`Error: ${label} working copy has uncommitted changes. Stash or commit before pulling:`);
-      console.error(dirty);
+      console.error(dirtyEntries.join('\n'));
       return 1;
     }
 
-    const branch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: repoDir, encoding: 'utf8', env: GIT_EXEC_ENV }).trim() || 'main';
+    const branch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
+      cwd: repoDir,
+      encoding: 'utf8',
+      env: GIT_EXEC_ENV
+    }).trim() || detectDefaultBranch(repoDir);
     if (branch.startsWith('promote/')) {
+      const baseBranch = detectDefaultBranch(repoDir);
       console.warn(`Warning: ${label} is currently on a promotion branch: '${branch}'.`);
-      console.warn(`Run 'git -C "${repoDir}" checkout main' before pulling upstream updates.`);
+      console.warn(`Run 'git -C "${repoDir}" checkout ${baseBranch}' before pulling upstream updates.`);
       return 1;
     }
 
@@ -60,7 +109,7 @@ function pullSingleRepo(repoDir, label, repoUrl) {
 function main() {
   const workspaceRoot = process.cwd();
   const paths = resolveStoragePaths(workspaceRoot);
-  const settings = paths.settings;
+  const settings = paths.settings || {};
 
   const args = process.argv.slice(2);
   const target = args[0] || 'team'; // 'team', 'private', 'all', or specific team slug
@@ -74,12 +123,24 @@ function main() {
     if (specificSlug) {
       const targets = (paths.activeTeamDirs || []).filter(t => t.slug.toLowerCase() === specificSlug.toLowerCase());
       if (targets.length === 0) {
-        const inactiveRepo = (paths.settings?.teamRepos || []).find(r => r.slug.toLowerCase() === specificSlug.toLowerCase());
+        const inactiveRepo = (settings.teamRepos || []).find(r => r.slug.toLowerCase() === specificSlug.toLowerCase());
         if (inactiveRepo) {
-          console.log(`Notice: Team repository '${specificSlug}' is configured but currently inactive in settings. Pulling updates...`);
-          const inactiveDir = path.join(paths.teamDir, inactiveRepo.slug);
-          const res = pullSingleRepo(inactiveDir, `Team Memory [${inactiveRepo.slug}]`, inactiveRepo.url);
-          if (res !== 0) exitCode = res;
+          if (!/^[a-z0-9_-]+$/i.test(inactiveRepo.slug)) {
+            console.error(`Error: Invalid team repository slug '${inactiveRepo.slug}'.`);
+            exitCode = 1;
+          } else {
+            const resolvedTeamRoot = path.resolve(paths.teamDir);
+            const inactiveDir = path.resolve(resolvedTeamRoot, inactiveRepo.slug);
+            const rel = path.relative(resolvedTeamRoot, inactiveDir);
+            if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) {
+              console.error(`Error: Team repository path '${inactiveDir}' escapes team directory.`);
+              exitCode = 1;
+            } else {
+              console.log(`Notice: Team repository '${specificSlug}' is configured but currently inactive in settings. Pulling updates...`);
+              const res = pullSingleRepo(inactiveDir, `Team Memory [${inactiveRepo.slug}]`, inactiveRepo.url);
+              if (res !== 0) exitCode = res;
+            }
+          }
         } else {
           console.error(`Error: Team repository with slug '${specificSlug}' not found in settings.`);
           exitCode = 1;
@@ -97,7 +158,7 @@ function main() {
         if (res !== 0) exitCode = res;
         console.log('');
       }
-    } else if (settings?.teamRepoUrl) {
+    } else if (settings.teamRepoUrl) {
       const res = pullSingleRepo(paths.teamDir, 'Team Memory Layer', settings.teamRepoUrl);
       if (res !== 0) exitCode = res;
       console.log('');
@@ -107,7 +168,7 @@ function main() {
   }
 
   if (target === 'private' || target === 'all') {
-    const res = pullSingleRepo(paths.privateDir, 'Private Memory Layer', settings.privateRepoUrl);
+    const res = pullSingleRepo(paths.privateDir, 'Private Memory Layer', settings?.privateRepoUrl);
     if (res !== 0) exitCode = res;
     console.log('');
   }
@@ -115,4 +176,10 @@ function main() {
   process.exit(exitCode);
 }
 
-main();
+const isDirectCli = process.argv[1] && (
+  fs.realpathSync(process.argv[1]) === fs.realpathSync(fileURLToPath(import.meta.url))
+);
+
+if (isDirectCli) {
+  main();
+}

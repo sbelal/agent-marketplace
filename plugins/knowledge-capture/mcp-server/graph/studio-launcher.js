@@ -7,6 +7,7 @@ import { resolveStoragePaths } from '../core/storage-paths.js';
 import { startStudioServer, openBrowser } from '../../bin/studio.js';
 
 let activeStudioInstance = null;
+let activeStudioWorkspace = null;
 
 /**
  * Universal Visual Memory Studio Launcher.
@@ -28,9 +29,10 @@ export async function renderVisualMemoryStudio(workspaceRoot = process.cwd(), op
     options.platform === 'claude'
   );
 
+  const resolvedWorkspace = path.resolve(workspaceRoot);
   const mode = options.mode || (isClaudeCode ? 'browser' : 'in_chat');
-  const graphData = getKnowledgeGraphData(workspaceRoot);
-  const paths = resolveStoragePaths(workspaceRoot);
+  const graphData = getKnowledgeGraphData(resolvedWorkspace);
+  const paths = resolveStoragePaths(resolvedWorkspace);
 
   // Determine artifact directory for HTML persistence
   let artifactDir = options.artifactDir || process.env.ARTIFACT_DIR;
@@ -50,14 +52,19 @@ export async function renderVisualMemoryStudio(workspaceRoot = process.cwd(), op
   // Start or reuse Studio HTTP server BEFORE rendering HTML in browser mode so the resolved port & token are embedded
   let serverInfo = activeStudioInstance;
   if (mode === 'browser' || (isClaudeCode && mode !== 'in_chat')) {
+    if (serverInfo && (activeStudioWorkspace !== resolvedWorkspace || serverInfo.server?.listening === false)) {
+      await stopStudioService();
+      serverInfo = null;
+    }
     if (!serverInfo) {
       try {
         serverInfo = await startStudioServer({
-          workspaceRoot,
+          workspaceRoot: resolvedWorkspace,
           port: options.port || 4242,
           autoOpen: options.autoOpen ?? true
         });
         activeStudioInstance = serverInfo;
+        activeStudioWorkspace = resolvedWorkspace;
       } catch {
         serverInfo = { url: `http://127.0.0.1:${options.port || 4242}`, studioToken: '' };
       }
@@ -67,7 +74,7 @@ export async function renderVisualMemoryStudio(workspaceRoot = process.cwd(), op
   }
 
   const resolvedServerUrl = serverInfo?.url || `http://127.0.0.1:${options.port || 4242}`;
-  const htmlContent = generateKnowledgeGraphHtml(workspaceRoot, {
+  const htmlContent = generateKnowledgeGraphHtml(resolvedWorkspace, {
     compact: options.compact ?? (mode === 'in_chat'),
     serverUrl: resolvedServerUrl,
     studioToken: serverInfo?.studioToken || ''
@@ -84,6 +91,7 @@ export async function renderVisualMemoryStudio(workspaceRoot = process.cwd(), op
       status: 'ready',
       platform: 'claude_code',
       mode: 'browser',
+      workspace: resolvedWorkspace,
       serverUrl: serverInfo.url,
       offlineHtmlPath: htmlPath,
       stats: {
@@ -120,6 +128,7 @@ export async function renderVisualMemoryStudio(workspaceRoot = process.cwd(), op
 export async function stopStudioService() {
   if (activeStudioInstance && typeof activeStudioInstance.close === 'function') {
     await activeStudioInstance.close();
-    activeStudioInstance = null;
   }
+  activeStudioInstance = null;
+  activeStudioWorkspace = null;
 }
