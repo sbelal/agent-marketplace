@@ -35,7 +35,6 @@ Write the generated HTML to a standalone `.html` artifact in `<appDataDir>/brain
 ### 3. Surface Graph Link in Chat
 Display a summary card in chat with metrics (total nodes, active domains, stale alerts) and point the developer to the newly generated knowledge graph artifact.
 
-### 4. Persisting Studio Changes (`apply_memory_patch`)
-When the developer makes modifications or links nodes in Memory Studio and exports a patch:
-- Pass the structured patch object to the MCP tool **`apply_memory_patch(patch)`**.
-- The server atomically modifies the corresponding markdown files across layers using POSIX atomic writes, updates `related` and `overrides` arrays, and immediately synchronizes the SQLite index with zero downtime.
+### 4. Direct Browser Saving vs Staged Patch
+- **Direct 1-Click Saving (`/kc-studio`):** To edit and save directly from your browser without copying patch JSONs, launch the standalone studio server via `/kc-studio` or `node ./plugins/knowledge-capture/bin/studio.js`.
+- **Staged Patch Application (`apply_memory_patch`):** When viewing an offline HTML artifact or file, click "Export Patch" and pass the JSON payload to the MCP tool `apply_memory_patch(patch)`. The server atomically writes to disk and updates SQLite.

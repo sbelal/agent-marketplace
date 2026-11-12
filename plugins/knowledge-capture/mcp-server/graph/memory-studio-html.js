@@ -289,11 +289,16 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd()) {
       <button class="studio-btn" id="btn-connect-mode" title="Toggle edge drawing mode: click source then target to link">
         <span>🔗 Connect Mode</span>
       </button>
+      <button class="studio-btn" id="btn-save-disk" style="display:none; background:#0284c7; color:#fff; font-weight:600;" title="Save staged changes directly to disk via Standalone Studio">
+        <span>💾 Save to Disk</span>
+        <span class="badge-count" id="pending-count-save" style="display:none;">0</span>
+      </button>
       <button class="studio-btn" id="btn-export-patch" title="Review and export staged modifications">
-        <span>💾 Export Patch</span>
+        <span id="export-btn-label">📋 Export Patch</span>
         <span class="badge-count" id="pending-count" style="display:none;">0</span>
       </button>
     </div>
+    <div id="toast" style="display:none; padding:8px 12px; border-radius:6px; font-size:12px; margin-top:4px;"></div>
 
     <div id="legend">
       <div class="legend-item"><div class="dot" style="background:var(--workspace-color)"></div>Workspace</div>
@@ -580,7 +585,11 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd()) {
 
       updatePendingBadge();
       updateSimulation();
-      alert(\`Node '\${selectedNode.slug}' updated! Click Export Patch to apply.\`);
+      if (isHttpServer) {
+        showToast(\`Node '\${selectedNode.slug}' staged! Click 'Save to Disk' to persist.\`);
+      } else {
+        alert(\`Node '\${selectedNode.slug}' updated! Click Export Patch to apply.\`);
+      }
     };
 
     // Connect mode toggle
@@ -594,14 +603,79 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd()) {
       }
     };
 
+    // HTTP Server Direct Persistence
+    const isHttpServer = window.location.protocol.startsWith('http');
+    const saveDiskBtn = document.getElementById('btn-save-disk');
+    if (isHttpServer && saveDiskBtn) {
+      saveDiskBtn.style.display = 'flex';
+      const exportLabel = document.getElementById('export-btn-label');
+      if (exportLabel) exportLabel.textContent = 'Patch JSON';
+    }
+
+    function showToast(msg, isError = false) {
+      const toast = document.getElementById('toast');
+      if (!toast) return;
+      toast.style.display = 'block';
+      toast.style.background = isError ? 'rgba(239, 68, 68, 0.2)' : 'rgba(16, 185, 129, 0.2)';
+      toast.style.color = isError ? '#f87171' : '#34d399';
+      toast.style.border = isError ? '1px solid #ef4444' : '1px solid #10b981';
+      toast.textContent = msg;
+      setTimeout(() => { toast.style.display = 'none'; }, 4500);
+    }
+
+    if (saveDiskBtn) {
+      saveDiskBtn.onclick = async () => {
+        const total = stagedChanges.modifiedNodes.size + stagedChanges.addedLinks.length + stagedChanges.removedLinks.length;
+        if (total === 0) {
+          showToast('No pending modifications to save.');
+          return;
+        }
+
+        const staged = {
+          modified_nodes: Array.from(stagedChanges.modifiedNodes.values()),
+          added_links: stagedChanges.addedLinks,
+          removed_links: stagedChanges.removedLinks
+        };
+
+        saveDiskBtn.disabled = true;
+        saveDiskBtn.innerHTML = '<span>⏳ Saving...</span>';
+
+        try {
+          const res = await fetch('/api/patch', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(staged)
+          });
+          const data = await res.json();
+          if (data.ok) {
+            stagedChanges.modifiedNodes.clear();
+            stagedChanges.addedLinks = [];
+            stagedChanges.removedLinks = [];
+            updatePendingBadge();
+            showToast(\`✅ Saved \${data.nodesUpdated || 0} node(s) and \${data.linksAdded || 0} link(s) directly to disk!\`);
+          } else {
+            showToast('Failed to save: ' + (data.errors ? data.errors.join('; ') : 'Unknown error'), true);
+          }
+        } catch (err) {
+          showToast('Network error saving to disk: ' + err.message, true);
+        } finally {
+          saveDiskBtn.disabled = false;
+          saveDiskBtn.innerHTML = '<span>💾 Save to Disk</span><span class="badge-count" id="pending-count-save" style="display:none;">0</span>';
+          updatePendingBadge();
+        }
+      };
+    }
+
     function updatePendingBadge() {
       const total = stagedChanges.modifiedNodes.size + stagedChanges.addedLinks.length + stagedChanges.removedLinks.length;
       const badge = document.getElementById('pending-count');
+      const badgeSave = document.getElementById('pending-count-save');
       if (total > 0) {
-        badge.style.display = 'inline-block';
-        badge.textContent = total;
+        if (badge) { badge.style.display = 'inline-block'; badge.textContent = total; }
+        if (badgeSave) { badgeSave.style.display = 'inline-block'; badgeSave.textContent = total; }
       } else {
-        badge.style.display = 'none';
+        if (badge) badge.style.display = 'none';
+        if (badgeSave) badgeSave.style.display = 'none';
       }
     }
 

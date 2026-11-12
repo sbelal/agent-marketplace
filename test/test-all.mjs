@@ -35,6 +35,8 @@ import {
   applyMemoryPatch
 } from '../plugins/knowledge-capture/mcp-server/memory-service.js';
 
+import { startStudioServer } from '../plugins/knowledge-capture/bin/studio.js';
+
 import {
   syncSqliteIndex,
   searchMemoriesHybrid,
@@ -728,6 +730,76 @@ Test only.
   const updatedSearch = await searchMemoriesHybrid(ws1Root, 'security ingress rollback', { format: 'compact' });
   assert.ok(updatedSearch.some(m => m.slug === 'k8s-delete-guard'), 'Updated memory must be discoverable with new domain/trigger');
   console.log('  ✔ Passed: Memory Studio patch successfully persisted to markdown frontmatter and synced to SQLite.\n');
+
+  // ==========================================
+  // TEST 22: Standalone Memory Studio CLI & Direct Browser Persistence Server
+  // ==========================================
+  console.log('Test 22: Standalone Memory Studio CLI & Direct Browser Persistence Server...');
+  const studioServer = await startStudioServer({
+    port: 54321,
+    host: '127.0.0.1',
+    workspaceRoot: ws1Root,
+    autoOpen: false,
+    strictPort: true
+  });
+
+  try {
+    assert.equal(studioServer.port, 54321, 'Studio server must bind to requested port');
+
+    // 22.1 Test GET / (HTML canvas)
+    const indexRes = await fetch(`${studioServer.url}/`);
+    assert.equal(indexRes.status, 200, 'GET / must return 200 OK');
+    const indexHtml = await indexRes.text();
+    assert.ok(indexHtml.includes('Memory Studio'), 'HTML response must include Memory Studio UI');
+    assert.ok(indexHtml.includes('btn-save-disk'), 'HTML response must include direct browser save button');
+
+    // 22.2 Test GET /api/graph
+    const graphRes = await fetch(`${studioServer.url}/api/graph`);
+    assert.equal(graphRes.status, 200, 'GET /api/graph must return 200 OK');
+    const graphJson = await graphRes.json();
+    assert.ok(Array.isArray(graphJson.nodes), 'Graph response must contain nodes array');
+    assert.ok(Array.isArray(graphJson.links), 'Graph response must contain links array');
+
+    // 22.3 Test POST /api/patch (direct browser save)
+    const directPatchPayload = {
+      modified_nodes: [
+        {
+          slug: 'k8s-delete-guard',
+          domain: 'devops',
+          type: 'tool-gotcha',
+          description: 'WHEN deleting ingress or cluster pods THEN check active traffic routes',
+          verified: '2026-03-20'
+        }
+      ],
+      added_links: [],
+      removed_links: []
+    };
+
+    const patchRes = await fetch(`${studioServer.url}/api/patch`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(directPatchPayload)
+    });
+    assert.equal(patchRes.status, 200, 'POST /api/patch must return 200 OK');
+    const patchJson = await patchRes.json();
+    assert.equal(patchJson.ok, true, 'Patch response must indicate success');
+    assert.equal(patchJson.nodesUpdated, 1, 'Patch response must report 1 node updated');
+
+    // Verify on disk
+    const savedFile = fs.readFileSync(path.join(ws1Root, '.agents', 'rules', 'memory', 'k8s-delete-guard.md'), 'utf8');
+    const parsedSaved = parseYamlFrontmatter(savedFile);
+    assert.equal(parsedSaved.frontmatter.domain, 'devops', 'Direct browser save must update markdown frontmatter domain');
+    assert.equal(parsedSaved.frontmatter.verified, '2026-03-20', 'Direct browser save must update verified date');
+
+    // 22.4 Test GET /api/health
+    const healthRes = await fetch(`${studioServer.url}/api/health`);
+    assert.equal(healthRes.status, 200, 'GET /api/health must return 200 OK');
+    const healthJson = await healthRes.json();
+    assert.equal(healthJson.status, 'running', 'Health endpoint must report running status');
+  } finally {
+    await studioServer.close();
+  }
+  console.log('  ✔ Passed: Standalone Memory Studio CLI server provides direct browser-to-disk persistence via /api/patch.\n');
 
   console.log('============================================================');
   console.log('🎉 ALL TESTS PASSED SUCCESSFULLY!');

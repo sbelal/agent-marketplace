@@ -111,8 +111,8 @@ At the start of complex tasks, consult memory with minimal token overhead using 
   Scans project ADRs (`docs/adr/`), CI workflows (`.github/workflows/`), linters (`.golangci.yml`, `ruff.toml`, `.eslintrc`), and Dockerfiles to auto-discover and propose initial Workspace memory rules on day one.
 * **Session-End Auto-Elicitation (`/kc-elicit`):**
   Audits uncommitted working tree diffs, modified dependencies, and test fixtures at session close (via `SessionEnd` / `Stop` sentinel hook `bin/session-end.js`) and proposes structured memory drafts before context loss.
-* **Interactive Visual Memory Studio (`/kc-graph`):**
-  Generates an interactive D3.js canvas artifact (`knowledge-graph.html`) featuring force physics, visual Connect Mode, inline node metadata editor, and Staged Patch exporter.
+* **Interactive Visual Memory Studio (`/kc-studio` & `/kc-graph`):**
+  Launches the standalone Memory Studio CLI server (`node ./bin/studio.js`) or generates the interactive D3.js canvas artifact. Features force physics, visual Connect Mode, inline node metadata editor, and direct 1-click browser-to-disk auto-save persistence via `/api/patch`.
 * **Zero-Turn Proactive Recall Probe (`proactive_memory_probe`):**
   Pre-flight check evaluating user queries and task context against memory triggers in < 5ms to surface immediate advisory guidance cards.
 * **Historical Tacit Knowledge Archeology (`/kc-archeology`):**

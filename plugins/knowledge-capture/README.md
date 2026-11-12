@@ -135,6 +135,7 @@ These skills appear directly in the user's slash command palette:
 | **`/kc-bootstrap`** | None | Scans project ADRs, CI workflows, linters, Dockerfiles, and contribution guides to auto-discover and bootstrap Workspace memory rules. |
 | **`/kc-elicit`** | None | Audits uncommitted workspace diffs to auto-synthesize and propose session-end memories before closing. |
 | **`/kc-drift`** | `[domain]` | Runs the Semantic Contradiction & Codebase Drift Detection Engine across memories to discover conflicting directives and outdated rules. |
+| **`/kc-studio`** | `[port]` | Launches the interactive standalone Knowledge Capture Studio in your local browser with direct 1-click browser-to-disk auto-save persistence (`POST /api/patch`). |
 | **`/kc-graph`** | None | Generates the interactive Bidirectional Memory Studio HTML canvas with D3 force physics, Connect Mode (edge drawing), and Quick Edit Drawer. |
 | **`/kc-status`** | None | Prints detailed health, active domain breakdown, stale entry counts (`verified` > 180 days), multi-team repository status, and uncommitted modifications across layers. |
 | **`/kc-pull`** | `[team\|private\|all\|<slug>]` | Fast-forwards the local private store or configured team memory repositories from their remote upstreams. |
@@ -150,6 +151,12 @@ These skills appear directly in the user's slash command palette:
 
 For automation, headless CI runs, or terminal workflows:
 
+- **`node ./bin/studio.js`**: Standalone interactive Memory Studio web server with direct browser auto-save:
+  - `--port, -p <number>`: Port to bind (default: `4242`, auto-increments if port is busy).
+  - `--host, -h <string>`: Host to bind (default: `127.0.0.1`).
+  - `--workspace, -w <path>`: Workspace directory root (default: current working directory).
+  - `--no-open`: Skip automatic browser launch (useful for remote sessions or headless automation).
+  - `--strict-port`: Fail immediately instead of scanning next available port.
 - **`node ./bin/setup.js`**: Setup & initialization utility:
   - `--private-url <url>`: Configure personal private memory repository URL.
   - `--team-repo-url <url>`: Configure team shared repository URL (auto-derives slug as `<org_id>-<repo_slug>` if omitted).
@@ -165,21 +172,21 @@ For automation, headless CI runs, or terminal workflows:
 
 ---
 
-## 🎨 Interactive Memory Studio Architecture (How the UI is Loaded)
+## 🎨 Interactive Memory Studio Architecture (Standalone CLI & Direct Browser Saving)
 
-The **Bidirectional Memory Studio** (`/kc-graph`) is engineered with a **100% self-contained client-side web architecture**:
-- **Zero Local Server Daemon:** The MCP server does **NOT** run an HTTP or WebSocket server. MCP operates strictly over standard stdio JSON-RPC 2.0.
-- **Standalone Artifact Generation:** The MCP tool `generate_knowledge_graph_html` (or skill `/kc-graph`) outputs a self-contained HTML file containing embedded SVG layout styles, inlined graph data JSON, and client-side JavaScript bundle using D3.js.
-- **Direct Browser / Webview Execution:** The generated file (`knowledge-graph.html`) is written to the agent artifact directory (`<appDataDir>/brain/<conversation-id>/knowledge-graph.html`) and bookmarked as a user-facing deliverable. The IDE preview pane or web browser opens the file directly via `file://`.
-- **In-Browser Physics & Interactions:** Draggable node physics, live search filtering, domain cluster pills, the Connect Mode edge drawer, and the Quick Edit inspector drawer run **entirely inside the browser's JavaScript engine alone**. Staged edge additions and metadata updates are exported from the browser as structured JSON patches.
+Knowledge Capture offers a **zero-friction, standalone visual studio experience** via `node ./bin/studio.js` (or `/kc-studio`):
 
-### 💾 Persistence Bridge (How Edits Made in the Studio are Persisted)
+### ⚡ Zero-Friction Direct Browser Persistence (Standalone CLI Mode)
+When running `node ./bin/studio.js`:
+- **Native Zero-Dependency Server:** Spawns a lightweight local HTTP server powered by Node.js built-in `node:http`. The MCP server remains a pure, lean `stdio` process without background daemons.
+- **Direct 1-Click Save:** When you edit node properties in the Quick Edit Drawer (domain, type, trigger description, verified date) or draw connections in Connect Mode, the UI activates the **"💾 Save to Disk"** button.
+- **Real-Time Endpoint (`POST /api/patch`):** Clicking "Save to Disk" fires a JSON patch request directly to the local server. The server invokes `applyMemoryPatch()` to atomically mutate markdown files on disk (`atomicWriteFileSync`) and triggers an immediate SQLite FTS5 re-index (`syncSqliteIndex()`) with instant visual toast feedback.
+- **Real-Time Graph Endpoint (`GET /api/graph`):** Exposes live graph datasets for developer tools and extensions.
 
-When the developer interacts with the visual canvas in their browser or preview pane:
-1. **Client-Side Staging:** Modifying node properties in the Quick Edit drawer (domain, type, trigger description, verified date) or drawing links between nodes in Connect Mode records changes in the in-memory client state (`stagedChanges`).
-2. **Export Patch:** Clicking **"Export Patch"** opens a modal with a structured JSON patch payload summarizing all modifications (`modified_nodes`, `added_links`, `removed_links`).
-3. **Application via MCP:** The patch is persisted to the file system using the **`apply_memory_patch`** MCP tool (or simply pasted in chat for the AI assistant to invoke).
-4. **Atomic Disk & SQLite Update:** The server locates the target `.md` files on disk, updates YAML frontmatters atomically using POSIX temp-and-rename (`atomicWriteFileSync`), re-wires `related` / `overrides` arrays, and triggers an immediate SQLite re-synchronization (`syncSqliteIndex`).
+### 🌐 Standalone Canvas Artifact (Offline / Webview Mode)
+When running `/kc-graph` or calling `generate_knowledge_graph_html`:
+- Outputs a self-contained `.html` artifact that runs 100% client-side in the browser or IDE preview pane via `file://`.
+- In offline file mode, changes can be exported via the **"Patch JSON"** review modal and applied via the `apply_memory_patch` MCP tool.
 
 ### Autonomous Agent-Only Skills (`user-invocable: false`)
 These skills are hidden from the user's slash command palette and run autonomously during agent execution:
