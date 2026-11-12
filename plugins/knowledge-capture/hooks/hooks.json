@@ -15,17 +15,6 @@
         ]
       }
     ],
-    "Stop": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/bin/session-end.js\""
-          }
-        ]
-      }
-    ],
     "SessionEnd": [
       {
         "matcher": "",

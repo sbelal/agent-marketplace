@@ -32,8 +32,9 @@ If changes were found, present the structured proposals:
 
 **Developer Interaction:**
 Ask the developer:
-> *"Active changes were detected in this session. Would you like to capture any of these proposed memories into Workspace (`.agents/rules/memory/`) or Private (`~/.gemini/knowledge-capture/memories/`) storage?"*
+> *"Active changes were detected in this session. Would you like to capture any of these proposed memories into Workspace (`.agents/rules/memory/`) or Private (`~/.gemini/knowledge-capture/private/`) storage?"*
 > Wait for confirmation before creating entries. Never commit or write files without explicit approval.
+
 
 ### 3. Persist Approved Memories via MCP Tool
 Upon developer confirmation:

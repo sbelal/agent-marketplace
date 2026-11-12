@@ -13,7 +13,12 @@ import {
   mineGitHistoryMemories,
   ingestTeamAdr,
   bootstrapRepoMemories,
-  autoElicitSessionKnowledge
+  autoElicitSessionKnowledge,
+  getTeamRepositories,
+  addTeamRepository,
+  setTeamRepositoryActive,
+  removeTeamRepository,
+  syncTeamRepositories
 } from './memory-service.js';
 
 import {
@@ -58,6 +63,11 @@ const TOOLS = [
           type: 'string',
           description:
             'Optional keyword filter matched case-insensitively against slug, domain, type, overrides, related, or trigger description.'
+        },
+        format: {
+          type: 'string',
+          enum: ['standard', 'compact'],
+          description: "Summary format. 'standard' (default) returns markdown tables, 'compact' returns low-token index cards (~15 tokens/rule) for hierarchical recall."
         }
       }
     }
@@ -81,6 +91,11 @@ const TOOLS = [
           type: 'string',
           enum: ['hybrid', 'multi_vector', 'lexical'],
           description: "Search retrieval strategy ('hybrid' via RRF, 'multi_vector' semantic only, or 'lexical' BM25 only). Defaults to 'hybrid'."
+        },
+        format: {
+          type: 'string',
+          enum: ['compact', 'full'],
+          description: "Recall format. 'compact' (default) returns indexed metadata and trigger to conserve tokens; 'full' includes full markdown guideline body."
         }
       },
       required: ['query']
@@ -458,6 +473,38 @@ const TOOLS = [
       },
       required: ['slug', 'feedbackType']
     }
+  },
+  {
+    name: 'manage_team_repositories',
+    description:
+      'Manages multi-team knowledge repositories configured by unique slugs. Actions: "list" (show configured repositories with sync status and active state), "add" (register a new team repo with slug and git URL), "activate" (activate a team repo by slug), "deactivate" (deactivate a team repo by slug), "remove" (remove a team repo configuration and optionally clean local clone), and "sync" (git pull latest updates for active team repos).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: ['list', 'add', 'activate', 'deactivate', 'remove', 'sync'],
+          description: 'Action to execute on team repositories.'
+        },
+        slug: {
+          type: 'string',
+          description: 'Unique slug identifier for the team repository (required for add, activate, deactivate, remove).'
+        },
+        url: {
+          type: 'string',
+          description: 'Remote Git URL for the team repository (required for add).'
+        },
+        name: {
+          type: 'string',
+          description: 'Human-readable name or description for the team repository.'
+        },
+        cleanDisk: {
+          type: 'boolean',
+          description: 'When action is "remove", whether to also delete the local clone directory (defaults to false).'
+        }
+      },
+      required: ['action']
+    }
   }
 ];
 
@@ -527,14 +574,16 @@ function handleRequest(message) {
           case 'get_memory_summary':
             resultData = getMemorySummary(workspaceRoot, args.layer || 'all', {
               domain: args.domain,
-              query: args.query
+              query: args.query,
+              format: args.format || 'standard'
             });
             break;
 
           case 'search_memories':
             resultData = await searchMemoriesHybrid(workspaceRoot, args.query, {
               limit: args.limit || 5,
-              mode: args.mode || 'hybrid'
+              mode: args.mode || 'hybrid',
+              format: args.format || 'compact'
             });
             // Record telemetry for top match
             if (resultData && resultData.length > 0) {
@@ -633,6 +682,31 @@ function handleRequest(message) {
               threshold: args.threshold
             });
             break;
+
+          case 'manage_team_repositories': {
+            const { action, slug, url, name, cleanDisk } = args;
+            if (action === 'list') {
+              resultData = getTeamRepositories(workspaceRoot);
+            } else if (action === 'add') {
+              resultData = addTeamRepository(slug, url, name, workspaceRoot);
+              await syncSqliteIndex(workspaceRoot);
+            } else if (action === 'activate') {
+              resultData = setTeamRepositoryActive(slug, true, workspaceRoot);
+              await syncSqliteIndex(workspaceRoot);
+            } else if (action === 'deactivate') {
+              resultData = setTeamRepositoryActive(slug, false, workspaceRoot);
+              await syncSqliteIndex(workspaceRoot);
+            } else if (action === 'remove') {
+              resultData = removeTeamRepository(slug, cleanDisk === true, workspaceRoot);
+              await syncSqliteIndex(workspaceRoot);
+            } else if (action === 'sync') {
+              resultData = syncTeamRepositories(workspaceRoot);
+              await syncSqliteIndex(workspaceRoot);
+            } else {
+              throw new Error(`Unknown action for manage_team_repositories: ${action}`);
+            }
+            break;
+          }
 
           default:
             sendJsonRpc({
