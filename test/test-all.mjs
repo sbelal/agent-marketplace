@@ -226,6 +226,12 @@ description: Lower tier private rule that should be shadowed
 
   const zeroPriorRes = evaluateProbability(hypotheses, 0.0);
   assert.equal(zeroPriorRes.prior_probability, 0.01, '0.0 prior should be safely clamped to 0.01');
+
+  const zeroHypoPriorRes = evaluateProbability([
+    { label: 'Hypo 1', weight: 1.0, prior: 0.0 },
+    { label: 'Hypo 2', weight: 1.0 }
+  ]);
+  assert.ok(zeroHypoPriorRes.evaluations, 'Hypothesis-level prior 0.0 must evaluate cleanly');
   console.log('  ✔ Passed: Bayesian updating actively incorporates prior probability.\n');
 
   // ==========================================
@@ -1115,6 +1121,7 @@ Always execute tests with timeout guards.
   const sampleEntry = layerProvider.findMemoryFile('k8s-delete-guard');
   assert.ok(sampleEntry, 'Layer provider should find sample entry across layers');
   assert.equal(layerProvider.resolveTeamRepoDir('non-existent-team'), null, 'Resolving invalid team slug must return null');
+  assert.ok(layerProvider.resolveTeamRepoDir('default'), 'Resolving default team slug should return team dir');
 
   let promoErr = null;
   try {
@@ -1176,6 +1183,11 @@ Always execute tests with timeout guards.
   });
   assert.equal(arrayTranscriptDebug.elicitation_needed, true, 'Array transcript with error message must trigger elicitation');
   assert.ok(arrayTranscriptDebug.suggested_candidates.some(c => c.elicited_from === 'zero_code_debugging'));
+
+  const benignCmdElicitation = autoElicitSessionKnowledge(ws1Root, {
+    recentCommands: ['git status', 'ls -la', 'npm list']
+  });
+  assert.equal(benignCmdElicitation.suggested_candidates.some(c => c.elicited_from === 'zero_code_debugging'), false, 'Benign commands must not trigger zero-code debugging candidate');
   console.log('  ✔ Passed: Trajectory-based zero-code debugging and user working preferences elicited accurately.\n');
 
   // ==========================================

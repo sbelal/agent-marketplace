@@ -89,11 +89,15 @@ export class LayerProvider {
     if (this.paths.activeTeamDirs && this.paths.activeTeamDirs.length > 0) {
       if (teamSlug) {
         const match = this.paths.activeTeamDirs.find(r => r.slug.toLowerCase() === teamSlug.toLowerCase());
-        return match ? match.dir : null;
+        if (match) return match.dir;
+        if (teamSlug.toLowerCase() === 'default' && fs.existsSync(this.paths.teamDir)) {
+          return this.paths.teamDir;
+        }
+        return null;
       }
       return this.paths.activeTeamDirs[0].dir;
     }
-    return teamSlug ? null : this.paths.teamDir;
+    return (!teamSlug || teamSlug.toLowerCase() === 'default') ? this.paths.teamDir : null;
   }
 
   /**

@@ -236,10 +236,23 @@ export function autoElicitSessionKnowledge(workspaceRoot = process.cwd(), option
   }
 
   // 3. Trajectory-Based Zero-Code Debugging Capture
-  const errorTexts = [
-    ...toTextArray(options.errorLogs),
-    ...toTextArray(options.recentCommands)
-  ];
+  const rawErrorLogs = toTextArray(options.errorLogs);
+  const errorTexts = [...rawErrorLogs];
+
+  // Only extract failed commands from recentCommands to prevent false positives on benign commands
+  const rawCommands = Array.isArray(options.recentCommands) ? options.recentCommands : (options.recentCommands ? [options.recentCommands] : []);
+  for (const cmd of rawCommands) {
+    if (!cmd) continue;
+    if (typeof cmd === 'object') {
+      if (cmd.exitCode && cmd.exitCode !== 0) {
+        errorTexts.push(`${cmd.command || 'command'} failed with exit code ${cmd.exitCode}: ${cmd.stderr || cmd.error || ''}`);
+      } else if (cmd.error) {
+        errorTexts.push(`${cmd.command || 'command'}: ${cmd.error}`);
+      }
+    } else if (typeof cmd === 'string' && /(?:failed with exit code [1-9]|command failed|fatal:|error:|exception:)/i.test(cmd)) {
+      errorTexts.push(cmd);
+    }
+  }
 
   if (Array.isArray(options.transcript)) {
     for (const item of options.transcript) {
@@ -261,11 +274,16 @@ export function autoElicitSessionKnowledge(workspaceRoot = process.cwd(), option
   let debugSignals = 0;
   for (const errText of errorTexts) {
     if (!errText || typeof errText !== 'string') continue;
-    const errorMatch = errText.match(/(?:Error:\s*|Exception:\s*|TypeError:\s*|AssertionError:\s*|^)([a-zA-Z0-9_\-\.\/]+(?:[:\s][^\n,]+)?)/i);
+    const isFromExplicitErrorLog = rawErrorLogs.includes(errText);
+    const errorMatch = errText.match(/(?:(?:Error|Exception|TypeError|AssertionError|Fatal|Crash):\s*|failed with exit code [1-9]\d*|ENOENT|ECONNREFUSED\b)[^\n,]+/i)
+      || (isFromExplicitErrorLog && errText.match(/^[a-zA-Z0-9_\-\.\/]+(?:[:\s][^\n,]+)?/i));
+
     if (errorMatch) {
       debugSignals++;
-      const errSnippet = errorMatch[0].trim().slice(0, 60);
-      const errSlugPart = errSnippet.replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase().replace(/--+/g, '-').slice(0, 30);
+      const rawSnippet = errorMatch[0].trim();
+      const errSnippet = rawSnippet.slice(0, 60);
+      const cleanPart = errSnippet.replace(/^(?:Error|Exception|TypeError|AssertionError|Fatal|Crash):\s*/i, '');
+      const errSlugPart = cleanPart.replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase().replace(/--+/g, '-').slice(0, 30);
       const slug = `debug-gotcha-${errSlugPart || 'runtime-issue'}`;
       if (!result.suggested_candidates.some(c => c.slug === slug)) {
         result.suggested_candidates.push({

@@ -601,6 +601,8 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd(), option
               const s = typeof l.source === 'object' ? l.source : idMap.get(l.source);
               const t = typeof l.target === 'object' ? l.target : idMap.get(l.target);
               if (!s || !t) return;
+              l.source = s;
+              l.target = t;
               let dx = t.x - s.x;
               let dy = t.y - s.y;
               let dist = Math.sqrt(dx * dx + dy * dy) || 1;
@@ -764,7 +766,11 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd(), option
     let labelElements = g.append("g").attr("class", "labels").selectAll("text");
 
     function updateSimulation() {
-      linkElements = linkElements.data(activeLinks, d => \`\${d.source.id || d.source}-\${d.target.id || d.target}-\${d.type}\`);
+      linkElements = linkElements.data(activeLinks, d => {
+        const s = typeof d.source === 'object' ? (d.source.id || d.source.slug || '') : d.source;
+        const t = typeof d.target === 'object' ? (d.target.id || d.target.slug || '') : d.target;
+        return s + "-" + t + "-" + d.type;
+      });
       linkElements.exit().remove();
       const linkEnter = linkElements.enter().append("line")
         .attr("class", d => d.staged ? "link link-staged" : (d.type === "overrides" ? "link link-overrides" : "link link-related"));
@@ -807,11 +813,12 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd(), option
     }
 
     simulation.on("tick", () => {
+      const nodeMap = new Map(activeNodes.map(n => [n.id, n]));
       linkElements
-        .attr("x1", d => d.source.x)
-        .attr("y1", d => d.source.y)
-        .attr("x2", d => d.target.x)
-        .attr("y2", d => d.target.y);
+        .attr("x1", d => (typeof d.source === 'object' && d.source.x !== undefined) ? d.source.x : (nodeMap.get(d.source)?.x || 0))
+        .attr("y1", d => (typeof d.source === 'object' && d.source.y !== undefined) ? d.source.y : (nodeMap.get(d.source)?.y || 0))
+        .attr("x2", d => (typeof d.target === 'object' && d.target.x !== undefined) ? d.target.x : (nodeMap.get(d.target)?.x || 0))
+        .attr("y2", d => (typeof d.target === 'object' && d.target.y !== undefined) ? d.target.y : (nodeMap.get(d.target)?.y || 0));
 
       nodeElements
         .attr("cx", d => d.x)
@@ -870,19 +877,27 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd(), option
       const linksDiv = document.getElementById('ins-links');
       linksDiv.innerHTML = '';
       
-      const outgoing = activeLinks.filter(l => (l.source.id || l.source) === node.id);
-      const incoming = activeLinks.filter(l => (l.target.id || l.target) === node.id);
+      const outgoing = activeLinks.filter(l => {
+        const s = typeof l.source === 'object' ? (l.source.id || l.source.slug) : l.source;
+        return s === node.id || s === node.slug;
+      });
+      const incoming = activeLinks.filter(l => {
+        const t = typeof l.target === 'object' ? (l.target.id || l.target.slug) : l.target;
+        return t === node.id || t === node.slug;
+      });
 
       if (outgoing.length) {
         linksDiv.innerHTML += '<div style="color:var(--accent);">Outgoing:</div>';
         outgoing.forEach(l => {
-          linksDiv.innerHTML += \`<div style="padding-left:8px;">↳ \${l.target.id || l.target} <span style="color:var(--text-muted)">(\${l.type})</span></div>\`;
+          const tId = typeof l.target === 'object' ? (l.target.slug || l.target.id) : l.target;
+          linksDiv.innerHTML += '<div style="padding-left:8px;">↳ ' + tId + ' <span style="color:var(--text-muted)">(' + l.type + ')</span></div>';
         });
       }
       if (incoming.length) {
         linksDiv.innerHTML += '<div style="color:#22c55e; margin-top:4px;">Incoming (Backlinks):</div>';
         incoming.forEach(l => {
-          linksDiv.innerHTML += \`<div style="padding-left:8px;">↰ \${l.source.id || l.source}</div>\`;
+          const sId = typeof l.source === 'object' ? (l.source.slug || l.source.id) : l.source;
+          linksDiv.innerHTML += '<div style="padding-left:8px;">↰ ' + sId + '</div>';
         });
       }
       if (!outgoing.length && !incoming.length) {
