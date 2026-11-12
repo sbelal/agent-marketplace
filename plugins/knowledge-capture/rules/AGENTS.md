@@ -14,9 +14,10 @@ Knowledge is organized across three tiers with strict resolution precedence:
 2. **Layer 2: Local Global Private (`~/.gemini/knowledge-capture/private/*.md`) [Middle Precedence]**
    * Machine-local developer preferences, personal learnings, and environment quirks.
    * Version controlled via Git when configured. Overrides Team memories via `overrides: <team-slug>`.
-3. **Layer 3: Team Global (`~/.gemini/knowledge-capture/team/*.md`) [Baseline Precedence]**
+3. **Layer 3: Team Global (`~/.gemini/knowledge-capture/team/<slug>/*.md`) [Baseline Precedence]**
    * Shared organizational standards, verified platform facts, and architectural patterns.
-   * Synchronized with shared team Git repository. Read-only locally; contributed via promotion branches and Pull Requests.
+   * Supports multiple team repositories partitioned by unique slug (e.g., `core`, `platform`, `infra`).
+   * Managed via `manage_team_repositories` tool and `setup.js` flags; repositories can be dynamically added, activated, deactivated, or removed. Read-only locally; contributed via promotion branches and Pull Requests.
 
 ---
 
@@ -93,10 +94,12 @@ Execute at task conclusion (including zero-code architectural or debugging inves
 
 ## 4. MCP Memory Retrieval Protocol (`kc-recall`)
 
-At the start of complex tasks, consult memory with minimal token overhead:
-* **`get_memory_summary(layer?, domain?, query?)`**: Scans guidelines, shadows overridden entries (`Workspace > Private > Team`), and outputs grouped markdown tables.
+At the start of complex tasks, consult memory with minimal token overhead using Command-Query Separation (CQS):
+* **`search_memories(query, limit?, mode?, format?)`**: High-performance multi-vector hybrid semantic retrieval combining local SQLite FTS5 BM25 with multi-facet dense embeddings (trigger intent, content rule, entity) fused via Reciprocal Rank Fusion (RRF). Pure read query — triggers zero disk writes unless files have changed. Supports `format: 'compact'` (default: ~15 tokens/card) and `format: 'full'` (expands full markdown body).
+* **`get_memory_summary(layer?, domain?, query?, format?)`**: Scans guidelines, shadows overridden entries (`Workspace > Private > Team`), and outputs grouped markdown tables or compact index cards (`format: 'compact'`).
 * **`get_memory_content(layer?, slug?, slugs?)`**: Retrieves full markdown content, frontmatter, and resolved 1-hop related memory graph footer.
-* **`get_layer_statistics()`**: Returns layer counts, active domains, stale entry counts (>180d), and Git synchronization health.
+* **`get_layer_statistics()`**: Returns layer counts, active domains, stale entry counts (>180d), multi-team repository status, and Git synchronization health.
+* **`manage_team_repositories(action, slug?, url?, name?, cleanDisk?)`**: Command for multi-team memory repositories (`list`, `add`, `activate`, `deactivate`, `remove`, `sync`). Scopes repositories under `team/<slug>/` and triggers SQLite cache sync on mutation.
 
 ---
 
@@ -108,8 +111,8 @@ At the start of complex tasks, consult memory with minimal token overhead:
   Scans project ADRs (`docs/adr/`), CI workflows (`.github/workflows/`), linters (`.golangci.yml`, `ruff.toml`, `.eslintrc`), and Dockerfiles to auto-discover and propose initial Workspace memory rules on day one.
 * **Session-End Auto-Elicitation (`/kc-elicit`):**
   Audits uncommitted working tree diffs, modified dependencies, and test fixtures at session close (via `SessionEnd` / `Stop` sentinel hook `bin/session-end.js`) and proposes structured memory drafts before context loss.
-* **Interactive Visual Memory Studio (`/kc-graph`):**
-  Generates an interactive D3.js canvas artifact (`knowledge-graph.html`) featuring force physics, visual Connect Mode, inline node metadata editor, and Staged Patch exporter.
+* **Interactive Visual Memory Studio (`/kc-studio` & `/kc-graph`):**
+  Launches the standalone Memory Studio CLI server (`node ./bin/studio.js`) or generates the interactive D3.js canvas artifact. Features force physics, visual Connect Mode, inline node metadata editor, and direct 1-click browser-to-disk auto-save persistence via `/api/patch`.
 * **Zero-Turn Proactive Recall Probe (`proactive_memory_probe`):**
   Pre-flight check evaluating user queries and task context against memory triggers in < 5ms to surface immediate advisory guidance cards.
 * **Historical Tacit Knowledge Archeology (`/kc-archeology`):**

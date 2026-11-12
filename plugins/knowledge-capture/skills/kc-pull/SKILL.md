@@ -1,6 +1,6 @@
 ---
 name: kc-pull
-description: Fast-forward the local team or private memory clone from its configured Git remote upstream. Triggered by /kc-pull [team|private|all].
+description: Fast-forward the local team or private memory clone from its configured Git remote upstream. Triggered by /kc-pull [team|private|all|<team-slug>].
 user-invocable: true
 ---
 
@@ -12,15 +12,15 @@ Fast-forward the local memory repositories with the latest changes from their up
 
 ## Workflow
 
-1. Identify the target store from the command arguments (`team`, `private`, or `all`). Default to `team`.
+1. Identify the target store from the command arguments (`team`, `private`, `all`, or a specific `<team-slug>`). Default to `team`.
 
-2. Call the MCP tool **`sync_memory_layer({ layer: target })`** directly (or execute `node "<plugin-root>/bin/pull.js" <target>` from terminal).
+2. Call the MCP tool **`sync_memory_layer({ layer: target })`** or **`manage_team_repositories({ action: 'sync', slug: target })`** directly (or execute `node "<plugin-root>/bin/pull.js" <target>` from terminal). When multiple team repositories are configured, syncing pulls all active team repositories scoped under `~/.gemini/knowledge-capture/team/<slug>/` and triggers SQLite index synchronization.
 
 3. Report the outcome cleanly:
    - If changes were pulled, confirm that memory is now up to date.
    - If the pull fails due to uncommitted local changes, guide the user to stash, commit, or resolve them before pulling.
-   - If the team clone is currently on a promotion branch (`promote/*`), remind the user to check out `main` before pulling:
+   - If a team clone is currently on a promotion branch (`promote/*`), remind the user to check out `main` before pulling:
      ```bash
-     git -C ~/.gemini/knowledge-capture/team checkout main
+     git -C ~/.gemini/knowledge-capture/team/<slug> checkout main
      node "<plugin-root>/bin/pull.js" team
      ```

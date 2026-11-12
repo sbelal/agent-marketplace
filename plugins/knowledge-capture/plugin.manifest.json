@@ -22,14 +22,10 @@
       },
       {
         "type": "command",
-        "command": "node \"${CLAUDE_PLUGIN_ROOT}/bin/claude-rules.js\""
-      }
-    ],
-    "Stop": [
-      {
-        "type": "command",
-        "command": "node \"${CLAUDE_PLUGIN_ROOT}/bin/session-end.js\"",
-        "timeout": 10
+        "command": "node \"${CLAUDE_PLUGIN_ROOT}/bin/claude-rules.js\"",
+        "platforms": [
+          "claude-code"
+        ]
       }
     ],
     "SessionEnd": [

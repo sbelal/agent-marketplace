@@ -78,11 +78,14 @@ function syncManifests() {
         [`${manifest.name || pluginId}-session`]: {}
       };
       for (const [event, hookList] of Object.entries(manifest.hooks)) {
-        agHooks[`${manifest.name || pluginId}-session`][event] = hookList.map(h => ({
-          type: h.type || 'command',
-          command: h.command,
-          ...(h.timeout ? { timeout: h.timeout } : {})
-        }));
+        const agFiltered = hookList.filter(h => !h.platforms || h.platforms.includes('antigravity'));
+        if (agFiltered.length > 0) {
+          agHooks[`${manifest.name || pluginId}-session`][event] = agFiltered.map(h => ({
+            type: h.type || 'command',
+            command: h.command,
+            ...(h.timeout ? { timeout: h.timeout } : {})
+          }));
+        }
       }
       driftCount += syncFile(path.join(pluginDir, 'hooks.json'), JSON.stringify(agHooks, null, 2) + '\n');
 
@@ -91,15 +94,18 @@ function syncManifests() {
         hooks: {}
       };
       for (const [event, hookList] of Object.entries(manifest.hooks)) {
-        ccHooks.hooks[event] = [
-          {
-            matcher: '',
-            hooks: hookList.map(h => ({
-              type: h.type || 'command',
-              command: h.command
-            }))
-          }
-        ];
+        const ccFiltered = hookList.filter(h => !h.platforms || h.platforms.includes('claude-code'));
+        if (ccFiltered.length > 0) {
+          ccHooks.hooks[event] = [
+            {
+              matcher: '',
+              hooks: ccFiltered.map(h => ({
+                type: h.type || 'command',
+                command: h.command
+              }))
+            }
+          ];
+        }
       }
       driftCount += syncFile(path.join(pluginDir, 'hooks', 'hooks.json'), JSON.stringify(ccHooks, null, 2) + '\n');
     }

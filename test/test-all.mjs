@@ -24,8 +24,18 @@ import {
   autoElicitSessionKnowledge,
   atomicWriteFileSync,
   getMemoryContent,
-  prepareTeamPromotion
+  prepareTeamPromotion,
+  getTeamRepositories,
+  addTeamRepository,
+  setTeamRepositoryActive,
+  removeTeamRepository,
+  syncTeamRepositories,
+  getMemorySummary,
+  deriveTeamRepoSlug,
+  applyMemoryPatch
 } from '../plugins/knowledge-capture/mcp-server/memory-service.js';
+
+import { startStudioServer } from '../plugins/knowledge-capture/bin/studio.js';
 
 import {
   syncSqliteIndex,
@@ -44,7 +54,8 @@ import {
   getMemoryGraphNeighbors,
   generateEmbedding,
   getActiveEmbeddingConfig,
-  resetOnnxState
+  resetOnnxState,
+  isIndexDirty
 } from '../plugins/knowledge-capture/mcp-server/sqlite-index.js';
 
 import {
@@ -274,6 +285,18 @@ description: Lower tier private rule that should be shadowed
   const queryVec = generateDenseEmbedding('pod oom killed crashloop', 128);
   const facetScore = computeMultiVectorSimilarity(queryVec, multiVec);
   assert.ok(facetScore > 0.25, 'Composite multi-vector score should capture intent and content facets');
+
+  // Write testEntry to ws1 to make it discoverable for docker hybrid retrieval
+  fs.writeFileSync(path.join(ws1Root, '.agents', 'rules', 'memory', `${testEntry.slug}.md`), `---
+name: ${testEntry.slug}
+domain: ${testEntry.domain}
+type: ${testEntry.type}
+description: ${testEntry.trigger}
+related: [${testEntry.related.join(', ')}]
+---
+${testEntry.body}
+`, 'utf8');
+  await syncSqliteIndex(ws1Root);
 
   // Hybrid search execution with RRF
   const hybridMatches = await searchMemoriesHybrid(ws1Root, 'docker', { mode: 'hybrid' });
@@ -519,6 +542,264 @@ description: Pod scheduling and governance
   // Reset environment
   delete process.env.KC_EMBEDDING_ENGINE;
   console.log('  ✔ Passed: Local ONNX transformer, adaptive dimensions (384/128-d), and heuristic fallback verified.\n');
+
+  // ==========================================
+  // TEST 18: Multi-Team Repositories by Slug
+  // ==========================================
+  console.log('Test 18: Multi-Team Repositories by Slug & Dynamic Activation...');
+  
+  // 18.0 Verify Auto-Derivation of slug from URL (<org_id>-<repo_slug> or <account_id>-<repo_slug>)
+  assert.equal(deriveTeamRepoSlug('git@github.com:acme-corp/platform-rules.git'), 'acme-corp-platform-rules');
+  assert.equal(deriveTeamRepoSlug('https://github.com/my-org/backend-memory.git'), 'my-org-backend-memory');
+  assert.equal(deriveTeamRepoSlug('https://github.com/sbelal/agent-marketplace'), 'sbelal-agent-marketplace');
+
+  // 18.1 Add new team repository with slug 'platform-eng'
+  const addRes = addTeamRepository('platform-eng', 'https://github.com/org/platform-memory.git', 'Platform Engineering', ws1Root);
+  assert.equal(addRes.ok, true, 'addTeamRepository must return ok: true');
+  assert.equal(addRes.slug, 'platform-eng');
+  assert.ok(fs.existsSync(addRes.dir), 'Team repository directory must be scaffolded');
+
+  // Verify list includes platform-eng
+  let reposList = getTeamRepositories(ws1Root);
+  const foundRepo = reposList.find(r => r.slug === 'platform-eng');
+  assert.ok(foundRepo, 'Team repo platform-eng must be listed in getTeamRepositories');
+  assert.equal(foundRepo.active, true, 'Newly added repo must be active by default');
+
+  // 18.2 Write a memory entry under platform-eng directory
+  const teamMemPath = path.join(addRes.dir, 'platform-ci-standard.md');
+  const teamMemContent = `---
+name: platform-ci-standard
+type: convention
+domain: ci-cd
+description: When configuring GitHub Actions CI runners for platform services
+verified: 2026-03-01
+---
+# Platform CI Standard
+## Why
+Standardizes runner tags across platform engineering repos.
+## How to apply
+Always specify runs-on: [self-hosted, linux, x64].
+`;
+  fs.writeFileSync(teamMemPath, teamMemContent, 'utf8');
+
+  // Sync index and verify team memory is discoverable with slug
+  await syncSqliteIndex(ws1Root);
+  let teamSearchResult = await searchMemoriesHybrid(ws1Root, 'GitHub Actions CI runners', { format: 'compact' });
+  const foundTeamMem = teamSearchResult.find(m => m.slug === 'platform-ci-standard');
+  assert.ok(foundTeamMem, 'Team memory under platform-eng must be discoverable in hybrid search');
+  assert.equal(foundTeamMem.layer, 'team');
+
+  // 18.3 Deactivate platform-eng
+  const deactRes = setTeamRepositoryActive('platform-eng', false, ws1Root);
+  assert.equal(deactRes.ok, true);
+  await syncSqliteIndex(ws1Root);
+
+  teamSearchResult = await searchMemoriesHybrid(ws1Root, 'GitHub Actions CI runners', { format: 'compact' });
+  const deactTeamMem = teamSearchResult.find(m => m.slug === 'platform-ci-standard');
+  assert.equal(deactTeamMem, undefined, 'Deactivated team repository memories must be excluded from search');
+
+  // 18.4 Re-activate and verify restoration
+  setTeamRepositoryActive('platform-eng', true, ws1Root);
+  await syncSqliteIndex(ws1Root);
+  teamSearchResult = await searchMemoriesHybrid(ws1Root, 'GitHub Actions CI runners', { format: 'compact' });
+  assert.ok(teamSearchResult.find(m => m.slug === 'platform-ci-standard'), 'Re-activated team repository must restore searchability');
+
+  // 18.5 Remove team repository
+  const remRes = removeTeamRepository('platform-eng', true, ws1Root);
+  assert.equal(remRes.ok, true);
+  await syncSqliteIndex(ws1Root);
+  reposList = getTeamRepositories(ws1Root);
+  assert.equal(reposList.find(r => r.slug === 'platform-eng'), undefined, 'Removed repo must not be in list');
+  console.log('  ✔ Passed: Multi-team repository addition, scoping, activation toggling, and removal verified.\n');
+
+  // ==========================================
+  // TEST 19: Command-Query Separation (CQS) in Hybrid Search
+  // ==========================================
+  console.log('Test 19: Command-Query Separation (CQS) in Hybrid Search...');
+  
+  // Index is clean after previous syncSqliteIndex
+  assert.equal(isIndexDirty(ws1Root), false, 'Index must be clean after synchronization');
+
+  // Performing a search query must remain a pure query (zero state mutation, index remains clean)
+  const queryResult = await searchMemoriesHybrid(ws1Root, 'docker');
+  assert.ok(Array.isArray(queryResult), 'Search query must return result array');
+  assert.equal(isIndexDirty(ws1Root), false, 'Read-only search query must not mutate index or dirty state');
+
+  // Create a new memory file on disk in workspace
+  const cqsEntryPath = path.join(ws1Root, '.agents', 'rules', 'memory', 'cqs-test-gotcha.md');
+  fs.writeFileSync(cqsEntryPath, `---
+name: cqs-test-gotcha
+type: tool-gotcha
+domain: general
+description: When testing command-query separation behavior
+verified: 2026-03-01
+---
+# CQS Test Gotcha
+## Why
+Verifies that index detects modified files.
+## How to apply
+Test only.
+`, 'utf8');
+
+  // isIndexDirty should now detect the modification without requiring a query
+  assert.equal(isIndexDirty(ws1Root), true, 'isIndexDirty must detect when files on disk have changed');
+
+  // Running explicit sync command resets dirty state
+  await syncSqliteIndex(ws1Root);
+  assert.equal(isIndexDirty(ws1Root), false, 'syncSqliteIndex command resets dirty state');
+
+  // Cleanup
+  fs.unlinkSync(cqsEntryPath);
+  await syncSqliteIndex(ws1Root);
+  console.log('  ✔ Passed: CQS compliance verified - search is a pure read query and sync is an explicit command.\n');
+
+  // ==========================================
+  // TEST 20: Token-Budgeted Hierarchical Recall
+  // ==========================================
+  console.log('Test 20: Token-Budgeted Hierarchical Recall (Compact Index vs Full Body)...');
+
+  // 20.1 Compact summary vs standard tabular summary
+  const compactSummary = getMemorySummary(ws1Root, 'all', { format: 'compact' });
+  assert.ok(typeof compactSummary === 'string', 'Compact summary must be a string');
+  assert.ok(compactSummary.includes('Memory Summary (Compact Index)'), 'Compact summary must output index card header');
+  assert.ok(compactSummary.includes('k8s-delete-guard'), 'Compact summary must list entries');
+  assert.ok(!compactSummary.includes('| Slug | Layer | Type |'), 'Compact summary must omit wide markdown tables');
+
+  const standardSummary = getMemorySummary(ws1Root, 'all', { format: 'standard' });
+  assert.ok(standardSummary.includes('| Slug | Layer | Type |'), 'Standard summary must contain tabular format');
+
+  // 20.2 Compact search vs full body search
+  const compactSearch = await searchMemoriesHybrid(ws1Root, 'docker', { format: 'compact' });
+  assert.ok(compactSearch.length > 0, 'Compact search must return results');
+  assert.equal(compactSearch[0].content, undefined, 'Compact search results must omit full content body to save token budget');
+  assert.ok(compactSearch[0].slug, 'Compact search results must contain slug');
+  assert.ok(compactSearch[0].description, 'Compact search results must contain trigger description');
+
+  const fullSearch = await searchMemoriesHybrid(ws1Root, 'docker', { format: 'full' });
+  assert.ok(fullSearch.length > 0, 'Full search must return results');
+  assert.ok(typeof fullSearch[0].content === 'string' && fullSearch[0].content.length > 0, 'Full search results must expand markdown content body');
+  console.log('  ✔ Passed: Token-budgeted hierarchical recall provides compact index cards and full body expansion on demand.\n');
+
+  // ==========================================
+  // TEST 21: Bidirectional Memory Studio Patch Application & Persistence
+  // ==========================================
+  console.log('Test 21: Bidirectional Memory Studio Patch Application & Persistence...');
+
+  const patchPayload = {
+    modified_nodes: [
+      {
+        slug: 'k8s-delete-guard',
+        domain: 'security',
+        type: 'convention',
+        description: 'WHEN deleting production namespace or ingress THEN verify manual confirmation and rollback plan',
+        verified: '2026-03-15'
+      }
+    ],
+    added_links: [
+      {
+        source: 'k8s-delete-guard',
+        target: 'k8s-crashloop-backoff',
+        type: 'related'
+      }
+    ],
+    removed_links: [
+      {
+        source: 'k8s-delete-guard',
+        target: 'k8s-pod-governance',
+        type: 'related'
+      }
+    ]
+  };
+
+  const patchResult = applyMemoryPatch(ws1Root, patchPayload);
+  assert.equal(patchResult.ok, true, 'applyMemoryPatch must succeed');
+  assert.equal(patchResult.nodesUpdated, 1, 'Should update 1 node');
+  assert.equal(patchResult.linksAdded, 1, 'Should add 1 link');
+  assert.equal(patchResult.linksRemoved, 1, 'Should remove 1 link');
+
+  // Verify on-disk file content
+  const updatedFile = fs.readFileSync(path.join(ws1Root, '.agents', 'rules', 'memory', 'k8s-delete-guard.md'), 'utf8');
+  const parsedUpdated = parseYamlFrontmatter(updatedFile);
+  assert.equal(parsedUpdated.frontmatter.domain, 'security', 'Frontmatter domain should be updated to security');
+  assert.equal(parsedUpdated.frontmatter.verified, '2026-03-15', 'Frontmatter verified date should be updated');
+  assert.ok(parsedUpdated.frontmatter.related.includes('k8s-crashloop-backoff'), 'New related link must be present');
+  assert.ok(!parsedUpdated.frontmatter.related.includes('k8s-pod-governance'), 'Removed related link must not be present');
+
+  // Sync SQLite and verify query reflection
+  await syncSqliteIndex(ws1Root);
+  const updatedSearch = await searchMemoriesHybrid(ws1Root, 'security ingress rollback', { format: 'compact' });
+  assert.ok(updatedSearch.some(m => m.slug === 'k8s-delete-guard'), 'Updated memory must be discoverable with new domain/trigger');
+  console.log('  ✔ Passed: Memory Studio patch successfully persisted to markdown frontmatter and synced to SQLite.\n');
+
+  // ==========================================
+  // TEST 22: Standalone Memory Studio CLI & Direct Browser Persistence Server
+  // ==========================================
+  console.log('Test 22: Standalone Memory Studio CLI & Direct Browser Persistence Server...');
+  const studioServer = await startStudioServer({
+    port: 54321,
+    host: '127.0.0.1',
+    workspaceRoot: ws1Root,
+    autoOpen: false,
+    strictPort: true
+  });
+
+  try {
+    assert.equal(studioServer.port, 54321, 'Studio server must bind to requested port');
+
+    // 22.1 Test GET / (HTML canvas)
+    const indexRes = await fetch(`${studioServer.url}/`);
+    assert.equal(indexRes.status, 200, 'GET / must return 200 OK');
+    const indexHtml = await indexRes.text();
+    assert.ok(indexHtml.includes('Memory Studio'), 'HTML response must include Memory Studio UI');
+    assert.ok(indexHtml.includes('btn-save-disk'), 'HTML response must include direct browser save button');
+
+    // 22.2 Test GET /api/graph
+    const graphRes = await fetch(`${studioServer.url}/api/graph`);
+    assert.equal(graphRes.status, 200, 'GET /api/graph must return 200 OK');
+    const graphJson = await graphRes.json();
+    assert.ok(Array.isArray(graphJson.nodes), 'Graph response must contain nodes array');
+    assert.ok(Array.isArray(graphJson.links), 'Graph response must contain links array');
+
+    // 22.3 Test POST /api/patch (direct browser save)
+    const directPatchPayload = {
+      modified_nodes: [
+        {
+          slug: 'k8s-delete-guard',
+          domain: 'devops',
+          type: 'tool-gotcha',
+          description: 'WHEN deleting ingress or cluster pods THEN check active traffic routes',
+          verified: '2026-03-20'
+        }
+      ],
+      added_links: [],
+      removed_links: []
+    };
+
+    const patchRes = await fetch(`${studioServer.url}/api/patch`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(directPatchPayload)
+    });
+    assert.equal(patchRes.status, 200, 'POST /api/patch must return 200 OK');
+    const patchJson = await patchRes.json();
+    assert.equal(patchJson.ok, true, 'Patch response must indicate success');
+    assert.equal(patchJson.nodesUpdated, 1, 'Patch response must report 1 node updated');
+
+    // Verify on disk
+    const savedFile = fs.readFileSync(path.join(ws1Root, '.agents', 'rules', 'memory', 'k8s-delete-guard.md'), 'utf8');
+    const parsedSaved = parseYamlFrontmatter(savedFile);
+    assert.equal(parsedSaved.frontmatter.domain, 'devops', 'Direct browser save must update markdown frontmatter domain');
+    assert.equal(parsedSaved.frontmatter.verified, '2026-03-20', 'Direct browser save must update verified date');
+
+    // 22.4 Test GET /api/health
+    const healthRes = await fetch(`${studioServer.url}/api/health`);
+    assert.equal(healthRes.status, 200, 'GET /api/health must return 200 OK');
+    const healthJson = await healthRes.json();
+    assert.equal(healthJson.status, 'running', 'Health endpoint must report running status');
+  } finally {
+    await studioServer.close();
+  }
+  console.log('  ✔ Passed: Standalone Memory Studio CLI server provides direct browser-to-disk persistence via /api/patch.\n');
 
   console.log('============================================================');
   console.log('🎉 ALL TESTS PASSED SUCCESSFULLY!');

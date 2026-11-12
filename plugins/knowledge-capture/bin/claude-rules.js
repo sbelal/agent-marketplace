@@ -24,6 +24,14 @@ const CLAUDE_HOOK_OUTPUT_LIMIT = 10000;
 const __filename = fileURLToPath(import.meta.url);
 const pluginRoot = path.dirname(path.dirname(__filename));
 
+const isClaudeCode = Boolean(process.env.CLAUDE_PLUGIN_ROOT);
+
+if (!isClaudeCode) {
+  // Antigravity discovers rules/AGENTS.md natively; return empty injectSteps to comply with Antigravity hook schema
+  process.stdout.write(JSON.stringify({ injectSteps: [] }) + '\n');
+  process.exit(0);
+}
+
 try {
   const rulesPath = path.join(pluginRoot, 'rules', 'AGENTS.md');
   const rules = fs.readFileSync(rulesPath, 'utf8').trim();
@@ -37,3 +45,4 @@ try {
   // Never block session startup
 }
 process.exit(0);
+

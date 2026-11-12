@@ -20,6 +20,27 @@ const GIT_EXEC_ENV = {
  * 2. Interactive step-by-step TUI wizard when run without flags in an interactive terminal.
  */
 
+/**
+ * Auto-derives a unique team repository slug in the format <org_id>-<repo_slug> or <account_id>-<repo_slug>.
+ */
+export function deriveTeamRepoSlug(url) {
+  if (!url || typeof url !== 'string') return 'team-repo';
+  const clean = url.trim().replace(/\.git$/i, '').replace(/\/+$/, '');
+  const scpMatch = clean.match(/[:/]([^/:]+)\/([^/:]+)$/);
+  if (scpMatch) {
+    const org = scpMatch[1].replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
+    const repo = scpMatch[2].replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
+    return `${org}-${repo}`.replace(/--+/g, '-').replace(/^-|-$/g, '');
+  }
+  const parts = clean.split(/[/:\\\\]/).filter(Boolean);
+  if (parts.length >= 2) {
+    const org = parts[parts.length - 2].replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
+    const repo = parts[parts.length - 1].replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
+    return `${org}-${repo}`.replace(/--+/g, '-').replace(/^-|-$/g, '');
+  }
+  return clean.replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase() || 'team-repo';
+}
+
 export function setupEnvironment(options = {}) {
   const home = os.homedir();
   const baseDir = path.join(home, '.gemini', 'knowledge-capture');
@@ -42,13 +63,17 @@ export function setupEnvironment(options = {}) {
   let settings = {
     privateRepoUrl: '',
     teamRepoUrl: '',
-    embeddingEngine: 'onnx'
+    embeddingEngine: 'onnx',
+    teamRepos: []
   };
 
   if (fs.existsSync(settingsPath)) {
     try {
       const existing = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
       settings = { ...settings, ...existing };
+      if (!Array.isArray(settings.teamRepos)) {
+        settings.teamRepos = [];
+      }
     } catch {
       // Use defaults if corrupted
     }
@@ -62,6 +87,45 @@ export function setupEnvironment(options = {}) {
   }
   if (options.embeddingEngine !== undefined) {
     settings.embeddingEngine = options.embeddingEngine.toLowerCase().trim() === 'heuristic' ? 'heuristic' : 'onnx';
+  }
+
+  // Multi-Team Repositories by Slug (Explicit or Auto-Derived from URL)
+  const teamUrl = (options.teamRepoUrl || options.teamUrl || '').trim();
+  if (teamUrl) {
+    const slug = (options.teamRepoSlug ? options.teamRepoSlug.trim() : deriveTeamRepoSlug(teamUrl));
+    const existingIdx = settings.teamRepos.findIndex(r => r.slug === slug);
+    if (existingIdx >= 0) {
+      settings.teamRepos[existingIdx].url = teamUrl;
+      settings.teamRepos[existingIdx].active = true;
+      if (options.teamRepoName) settings.teamRepos[existingIdx].name = options.teamRepoName;
+    } else {
+      settings.teamRepos.push({
+        slug,
+        url: teamUrl,
+        active: true,
+        name: options.teamRepoName || slug
+      });
+    }
+    if (!settings.teamRepoUrl || slug === 'default') {
+      settings.teamRepoUrl = teamUrl;
+    }
+  }
+
+  if (options.activateTeamSlug) {
+    const slug = options.activateTeamSlug.trim();
+    const r = settings.teamRepos.find(item => item.slug === slug);
+    if (r) r.active = true;
+  }
+
+  if (options.deactivateTeamSlug) {
+    const slug = options.deactivateTeamSlug.trim();
+    const r = settings.teamRepos.find(item => item.slug === slug);
+    if (r) r.active = false;
+  }
+
+  if (options.removeTeamSlug) {
+    const slug = options.removeTeamSlug.trim();
+    settings.teamRepos = settings.teamRepos.filter(item => item.slug !== slug);
   }
 
   fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf8');
@@ -147,8 +211,14 @@ export function setupEnvironment(options = {}) {
     ensureRepoInitialized(privateDir, settings.privateRepoUrl);
   }
 
-  // Initialize Team Git repository if configured
-  if (settings.teamRepoUrl) {
+  // Initialize Team Git repositories if configured
+  if (Array.isArray(settings.teamRepos) && settings.teamRepos.length > 0) {
+    for (const repo of settings.teamRepos) {
+      if (repo && repo.slug && repo.url && repo.active !== false) {
+        ensureRepoInitialized(path.join(teamDir, repo.slug), repo.url);
+      }
+    }
+  } else if (settings.teamRepoUrl) {
     ensureRepoInitialized(teamDir, settings.teamRepoUrl);
   }
 
@@ -351,6 +421,21 @@ for (let i = 0; i < args.length; i++) {
     hasFlags = true;
   } else if (args[i] === '--no-install') {
     options.installDependencies = false;
+    hasFlags = true;
+  } else if (args[i] === '--team-repo-slug' && args[i + 1]) {
+    options.teamRepoSlug = args[++i];
+    hasFlags = true;
+  } else if (args[i] === '--team-repo-url' && args[i + 1]) {
+    options.teamRepoUrl = args[++i];
+    hasFlags = true;
+  } else if (args[i] === '--activate-team' && args[i + 1]) {
+    options.activateTeamSlug = args[++i];
+    hasFlags = true;
+  } else if (args[i] === '--deactivate-team' && args[i + 1]) {
+    options.deactivateTeamSlug = args[++i];
+    hasFlags = true;
+  } else if (args[i] === '--remove-team' && args[i + 1]) {
+    options.removeTeamSlug = args[++i];
     hasFlags = true;
   }
 }

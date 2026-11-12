@@ -15,12 +15,13 @@ Retrieve past engineering guidelines and team conventions relevant to the active
 
 ### 1. Scan Memory Index (`search_memories` or `get_memory_summary`)
 Call the MCP tool **`search_memories`** for natural-language semantic matching:
-- Pass `query: "<natural language description of task or error>"` to perform fast hybrid FTS5 + cosine similarity matching across memory titles, triggers, and bodies with confidence scores.
-- Alternatively, call **`get_memory_summary`** with `domain` or `query` filters to scan full tables grouped by `### Domain: <domain>` with precedence shadowing (`Workspace > Private > Team`).
+- Pass `query: "<natural language description of task or error>"` to perform fast hybrid FTS5 + multi-vector semantic matching fused via Reciprocal Rank Fusion (RRF).
+- **Two-Tier Hierarchical Recall (`format: 'compact'` vs `'full'`):** Default searches return compact index cards (`slug`, `layer`, `domain`, `type`, `description`, `confidence`, `related`) consuming ~15 tokens per result. When immediate inline full guideline bodies are needed, pass `format: 'full'`.
+- Alternatively, call **`get_memory_summary`** (with optional `format: 'compact'` or `'standard'`) to scan category tables grouped by `### Domain: <domain>` with precedence shadowing (`Workspace > Private > Team`).
 
 ### 2. Match Active Context & Traverse 1-Hop Graph (`get_memory_content`)
-Evaluate whether any memory `slug` or `Trigger / Description` directly relates to the current task or problem:
-- Invoke `get_memory_content` (with a single `slug` or batch `slugs: [...]`) to retrieve the full guideline body.
+Evaluate whether any candidate memory `slug` or `Trigger / Description` directly relates to the current task or problem:
+- Invoke `get_memory_content` (with a single `slug` or batch `slugs: [...]`) to retrieve the full guideline body and actionable instructions.
 - Inspect the `### Related Memories Available (1-Hop Graph)` footer appended at the bottom of the returned content. If a 1-hop linked memory is directly relevant to the task, fetch it via `get_memory_content` as well.
 - Do not load guidelines that are unrelated to the current task.
 
