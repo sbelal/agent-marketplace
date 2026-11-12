@@ -10,12 +10,12 @@ let activeStudioInstance = null;
 
 /**
  * Universal Visual Memory Studio Launcher.
- * 
+ *
  * Provides native dual-platform dispatch:
  * - Google Antigravity: Generates self-contained Generative UI HTML artifact and returns <agent-embed> inline widget.
  * - Anthropic Claude Code: Launches background HTTP persistence server (127.0.0.1:4242), automatically opens browser,
  *   and provides clickable CLI fallbacks with direct browser-to-disk persistence (/api/patch).
- * 
+ *
  * @param {string} [workspaceRoot=process.cwd()] Project root directory
  * @param {Object} [options={}] Options { mode: 'auto'|'in_chat'|'browser', compact: boolean, autoOpen: boolean, port: number }
  * @returns {Promise<Object>} Execution status and launch metadata
@@ -40,26 +40,16 @@ export async function renderVisualMemoryStudio(workspaceRoot = process.cwd(), op
     } else if (process.env.GEMINI_HOME) {
       artifactDir = path.join(process.env.GEMINI_HOME, 'artifacts');
     } else {
-      artifactDir = path.join(paths.workspaceDir, '..');
+      artifactDir = path.join(paths.baseDir, 'artifacts');
     }
   }
 
   const htmlFileName = options.fileName || 'memory-studio.html';
   const htmlPath = path.join(artifactDir, htmlFileName);
 
-  const htmlContent = generateKnowledgeGraphHtml(workspaceRoot, {
-    compact: options.compact ?? (mode === 'in_chat'),
-    serverUrl: activeStudioInstance?.url || `http://localhost:${options.port || 4242}`
-  });
-
-  try {
-    fs.mkdirSync(artifactDir, { recursive: true });
-    fs.writeFileSync(htmlPath, htmlContent, 'utf8');
-  } catch {}
-
-  // 1. Claude Code Fallback: Local HTTP persistence daemon + automatic browser open
+  // Start or reuse Studio HTTP server BEFORE rendering HTML in browser mode so the resolved port & token are embedded
+  let serverInfo = activeStudioInstance;
   if (mode === 'browser' || (isClaudeCode && mode !== 'in_chat')) {
-    let serverInfo = activeStudioInstance;
     if (!serverInfo) {
       try {
         serverInfo = await startStudioServer({
@@ -69,12 +59,27 @@ export async function renderVisualMemoryStudio(workspaceRoot = process.cwd(), op
         });
         activeStudioInstance = serverInfo;
       } catch {
-        serverInfo = { url: `http://localhost:${options.port || 4242}` };
+        serverInfo = { url: `http://127.0.0.1:${options.port || 4242}`, studioToken: '' };
       }
     } else if (options.autoOpen !== false) {
       openBrowser(serverInfo.url);
     }
+  }
 
+  const resolvedServerUrl = serverInfo?.url || `http://127.0.0.1:${options.port || 4242}`;
+  const htmlContent = generateKnowledgeGraphHtml(workspaceRoot, {
+    compact: options.compact ?? (mode === 'in_chat'),
+    serverUrl: resolvedServerUrl,
+    studioToken: serverInfo?.studioToken || ''
+  });
+
+  try {
+    fs.mkdirSync(artifactDir, { recursive: true });
+    fs.writeFileSync(htmlPath, htmlContent, 'utf8');
+  } catch {}
+
+  // 1. Claude Code Fallback: Local HTTP persistence daemon + automatic browser open
+  if (mode === 'browser' || (isClaudeCode && mode !== 'in_chat')) {
     return {
       status: 'ready',
       platform: 'claude_code',

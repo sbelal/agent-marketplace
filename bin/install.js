@@ -10,7 +10,7 @@
 const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
-const { execSync, execFileSync } = require('child_process');
+const { execFileSync } = require('child_process');
 
 const {
   normalizePath,
@@ -53,7 +53,7 @@ const REMOTE_REPO_URL = 'https://github.com/sbelal/agent-marketplace.git';
  */
 function isNpxExecution(rootDir) {
   const norm = normalizePath(rootDir).toLowerCase();
-  return norm.includes('_npx') || norm.includes('npm-cache') || norm.includes('temp') || norm.includes('tmp');
+  return norm.includes('/_npx/') || norm.includes('/npm-cache/') || norm.endsWith('/_npx');
 }
 
 /**
@@ -617,17 +617,32 @@ Options:
   const scopeArg = (getArg('--scope') || 'workspace').toLowerCase();
   const scope = (scopeArg === 'global' || scopeArg === 'g') ? 'global' : 'workspace';
 
-  const enableArg = getArg('--enable');
-  if (enableArg) {
-    setPluginEnabled(enableArg, true, HOME_DIR);
-    console.log(`\x1b[32m✔ Enabled plugin '${enableArg}' in Antigravity configuration.\x1b[0m`);
+  const validateToggleTarget = (flagName, rawVal) => {
+    if (!rawVal || !/^[a-zA-Z0-9_-]+$/.test(rawVal)) {
+      console.error(`\x1b[31mError: Invalid or missing plugin ID for ${flagName}.\x1b[0m`);
+      process.exit(1);
+    }
+    const available = getAvailablePlugins(REPO_ROOT);
+    const matched = available.find(p => p.id.toLowerCase() === rawVal.toLowerCase());
+    if (!matched) {
+      const validIds = available.map(p => p.id).join(', ') || '(none)';
+      console.error(`\x1b[31mError: Unknown plugin '${rawVal}'. Available plugins: ${validIds}\x1b[0m`);
+      process.exit(1);
+    }
+    return matched.id;
+  };
+
+  if (hasFlag('--enable')) {
+    const enableId = validateToggleTarget('--enable', getArg('--enable'));
+    setPluginEnabled(enableId, true, HOME_DIR);
+    console.log(`\x1b[32m✔ Enabled plugin '${enableId}' in Antigravity configuration.\x1b[0m`);
     process.exit(0);
   }
 
-  const disableArg = getArg('--disable');
-  if (disableArg) {
-    setPluginEnabled(disableArg, false, HOME_DIR);
-    console.log(`\x1b[32m✔ Disabled plugin '${disableArg}' in Antigravity configuration.\x1b[0m`);
+  if (hasFlag('--disable')) {
+    const disableId = validateToggleTarget('--disable', getArg('--disable'));
+    setPluginEnabled(disableId, false, HOME_DIR);
+    console.log(`\x1b[32m✔ Disabled plugin '${disableId}' in Antigravity configuration.\x1b[0m`);
     process.exit(0);
   }
 
@@ -749,9 +764,16 @@ Options:
 // ENTRY POINT
 // ==========================================
 
-const cliArgs = process.argv.slice(2);
-if (cliArgs.length > 0) {
-  runCliDispatcher(cliArgs);
-} else {
-  runInteractiveWizard();
+if (require.main === module) {
+  const cliArgs = process.argv.slice(2);
+  if (cliArgs.length > 0) {
+    runCliDispatcher(cliArgs);
+  } else {
+    runInteractiveWizard();
+  }
 }
+
+module.exports = {
+  isNpxExecution,
+  resolveSourceRegistrationPath
+};

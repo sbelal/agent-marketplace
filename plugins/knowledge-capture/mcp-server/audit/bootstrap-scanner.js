@@ -121,6 +121,7 @@ export function bootstrapRepoMemories(workspaceRoot = process.cwd()) {
 
   // 2. Scan CI/CD Workflows
   const githubWorkflowsDir = path.join(workspaceRoot, '.github', 'workflows');
+  const gitlabCiPath = path.join(workspaceRoot, '.gitlab-ci.yml');
   if (fs.existsSync(githubWorkflowsDir)) {
     try {
       const wfFiles = fs.readdirSync(githubWorkflowsDir).filter(f => f.endsWith('.yml') || f.endsWith('.yaml'));
@@ -137,6 +138,17 @@ export function bootstrapRepoMemories(workspaceRoot = process.cwd()) {
         });
       }
     } catch {}
+  } else if (fs.existsSync(gitlabCiPath)) {
+    addCandidate({
+      slug: 'ci-pipeline-conventions',
+      title: 'GitLab CI/CD Pipeline Validation & Testing Standards',
+      domain: 'ci-cd',
+      type: 'convention',
+      description: 'When running tests, opening merge requests, or modifying automated GitLab CI pipelines',
+      why: 'Repository enforces automated CI checks defined in .gitlab-ci.yml.',
+      howToApply: 'Ensure all pipeline stages, tests, and lint jobs pass before merging.',
+      sourceFile: '.gitlab-ci.yml'
+    });
   }
 
   // 3. Scan Linters & Formatters
@@ -164,16 +176,18 @@ export function bootstrapRepoMemories(workspaceRoot = process.cwd()) {
   }
 
   // 4. Scan Container & Infrastructure
-  if (fs.existsSync(path.join(workspaceRoot, 'Dockerfile'))) {
+  const containerFiles = ['Dockerfile', 'docker-compose.yml', 'docker-compose.yaml', 'compose.yml', 'compose.yaml'];
+  const foundContainer = containerFiles.find(cf => fs.existsSync(path.join(workspaceRoot, cf)));
+  if (foundContainer) {
     addCandidate({
       slug: 'docker-container-build-governance',
       title: 'Docker Container Build & Packaging Guidelines',
       domain: 'devops',
       type: 'platform-fact',
-      description: 'When creating, building, or modifying container images and Dockerfiles',
-      why: 'Repository standardizes container execution via Dockerfile.',
+      description: 'When creating, building, or modifying container images, Dockerfiles, or Compose services',
+      why: `Repository standardizes container execution via ${foundContainer}.`,
       howToApply: 'Use multi-stage builds, pin minimal base images, and do not run processes as root.',
-      sourceFile: 'Dockerfile'
+      sourceFile: foundContainer
     });
   }
 

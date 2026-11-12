@@ -1,16 +1,22 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { resolveStoragePaths, getStorageDir, getSettings, deriveTeamRepoSlug, GIT_EXEC_ENV } from './storage-paths.js';
 import { findMarkdownFiles } from '../retrieval/shadow-resolver.js';
 import { parseYamlFrontmatter, serializeYamlFrontmatter } from './yaml-parser.js';
-import { atomicWriteFileSync } from './memory-store.js';
+import { atomicWriteFileSync, cleanDanglingReferences } from './memory-store.js';
 
 export { deriveTeamRepoSlug };
 
 function saveSettings(settings, storageDir = getStorageDir()) {
   const p = path.join(storageDir, 'settings.json');
   fs.writeFileSync(p, JSON.stringify(settings, null, 2), 'utf8');
+}
+
+function validateSafeGitUrl(url) {
+  if (url && url.trim().startsWith('-')) {
+    throw new Error('Invalid repository URL: must not start with "-".');
+  }
 }
 
 /**
@@ -40,16 +46,19 @@ export function getTeamRepositories(workspaceRoot = process.cwd()) {
     let uncommittedCount = 0;
     if (isGit) {
       try {
-        const status = execSync('git status --porcelain', {
+        const status = execFileSync('git', ['status', '--porcelain', '-z'], {
           cwd: repoDir,
           encoding: 'utf8',
           timeout: 2000,
           env: GIT_EXEC_ENV,
           stdio: ['ignore', 'pipe', 'ignore']
-        }).trim();
+        });
         if (status) {
-          isClean = false;
-          uncommittedCount = status.split('\n').filter(Boolean).length;
+          const entries = status.split('\0').filter(Boolean);
+          if (entries.length > 0) {
+            isClean = false;
+            uncommittedCount = entries.length;
+          }
         }
       } catch {}
     }
@@ -111,6 +120,9 @@ export function addTeamRepository(arg1 = process.cwd(), arg2 = {}, arg3 = null, 
     throw new Error('Team repository slug is required or must be derivable from Git URL (<org_id>-<repo_slug>).');
   }
 
+  const url = (options.url || '').trim();
+  validateSafeGitUrl(url);
+
   const paths = resolveStoragePaths(workspaceRoot);
   const settings = getSettings(paths.baseDir);
   const teamBaseDir = paths.teamDir;
@@ -120,7 +132,6 @@ export function addTeamRepository(arg1 = process.cwd(), arg2 = {}, arg3 = null, 
     fs.mkdirSync(targetDir, { recursive: true });
   }
 
-  const url = (options.url || '').trim();
   const name = options.name || rawSlug;
   const active = options.active !== false;
 
@@ -129,7 +140,7 @@ export function addTeamRepository(arg1 = process.cwd(), arg2 = {}, arg3 = null, 
     const gitDir = path.join(targetDir, '.git');
     if (!fs.existsSync(gitDir)) {
       try {
-        execSync(`git clone "${url}" .`, {
+        execFileSync('git', ['clone', '--', url, '.'], {
           cwd: targetDir,
           timeout: 15000,
           env: GIT_EXEC_ENV,
@@ -138,13 +149,13 @@ export function addTeamRepository(arg1 = process.cwd(), arg2 = {}, arg3 = null, 
       } catch {
         // Fallback: init empty repo with remote
         try {
-          execSync('git init', { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
-          execSync(`git remote add origin "${url}"`, { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
+          execFileSync('git', ['init'], { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
+          execFileSync('git', ['remote', 'add', 'origin', url], { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
         } catch {}
       }
     } else {
       try {
-        execSync(`git remote set-url origin "${url}"`, { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
+        execFileSync('git', ['remote', 'set-url', 'origin', url], { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
       } catch {}
     }
   }
@@ -297,7 +308,7 @@ export function syncTeamRepositories(arg1 = process.cwd(), arg2 = {}) {
     if (!repo.active || !repo.isGit || !repo.url) continue;
 
     try {
-      execSync('git pull --ff-only', {
+      execFileSync('git', ['pull', '--ff-only'], {
         cwd: repo.path,
         timeout: 8000,
         env: GIT_EXEC_ENV,
@@ -489,13 +500,18 @@ export function resolveTeamConflict(workspaceRoot = process.cwd(), options = {})
 
   if (resolution === 'adopt_team') {
     fs.unlinkSync(privateFile);
+    let cleanedReferences = 0;
+    if (resolvedPrivateSlug.toLowerCase() !== cleanSlug.toLowerCase()) {
+      cleanedReferences = cleanDanglingReferences(workspaceRoot, resolvedPrivateSlug);
+    }
     return {
       ok: true,
       success: true,
       slug: cleanSlug,
       resolvedPrivateSlug,
       action: 'adopted_team_standard',
-      removedPrivateFile: privateFile
+      removedPrivateFile: privateFile,
+      cleanedReferences
     };
   }
 

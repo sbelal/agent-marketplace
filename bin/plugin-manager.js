@@ -8,7 +8,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { execSync } = require('child_process');
+const { execFileSync } = require('child_process');
 const {
   getPluginsConfig,
   findSourceEntry,
@@ -18,6 +18,13 @@ const {
 } = require('./source-manager');
 
 const DEFAULT_EXCLUDES = ['.git', 'node_modules', '.DS_Store', 'Thumbs.db'];
+const VALID_PLUGIN_ID_RE = /^[a-zA-Z0-9_-]+$/;
+
+function assertValidPluginId(pluginId) {
+  if (!pluginId || typeof pluginId !== 'string' || !VALID_PLUGIN_ID_RE.test(pluginId)) {
+    throw new Error(`Invalid plugin ID '${pluginId}'. Must match ${VALID_PLUGIN_ID_RE}.`);
+  }
+}
 
 // ==========================================
 // PURE QUERIES (Resolution & Calculation)
@@ -115,6 +122,7 @@ function calculateConfigWithRemovedPlugin(currentConfig, pluginId) {
  * @returns {string} Absolute install destination path
  */
 function resolvePluginInstallPath(pluginId, scope, workspaceDir = process.cwd(), homeDir = (process.env.USERPROFILE || process.env.HOME || '')) {
+  assertValidPluginId(pluginId);
   if (scope === 'workspace') {
     return path.join(workspaceDir, '.agents', 'plugins', pluginId);
   }
@@ -509,18 +517,47 @@ function checkMarketplaceUpdates(repoRoot, workspaceDir = process.cwd(), homeDir
 
   const checkGitDir = (dir) => {
     if (!fs.existsSync(path.join(dir, '.git'))) return 0;
+    const gitEnv = { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_SSH_COMMAND: 'ssh -o BatchMode=yes -o ConnectTimeout=3' };
     try {
-      execSync('git fetch --dry-run origin', {
+      execFileSync('git', ['fetch', '--dry-run', 'origin'], {
         cwd: dir,
         timeout: 2500,
-        env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_SSH_COMMAND: 'ssh -o BatchMode=yes -o ConnectTimeout=3' },
+        env: gitEnv,
         stdio: ['ignore', 'pipe', 'ignore']
       });
-      const behind = execSync('git rev-list HEAD..origin/main --count', {
+      let upstreamRef = null;
+      try {
+        const symRef = execFileSync('git', ['symbolic-ref', 'refs/remotes/origin/HEAD'], {
+          cwd: dir,
+          timeout: 1500,
+          encoding: 'utf8',
+          env: gitEnv,
+          stdio: ['ignore', 'pipe', 'ignore']
+        }).trim();
+        if (symRef.startsWith('refs/remotes/')) {
+          upstreamRef = symRef.slice('refs/remotes/'.length);
+        }
+      } catch {}
+      if (!upstreamRef) {
+        for (const candidate of ['origin/main', 'origin/master']) {
+          try {
+            execFileSync('git', ['rev-parse', '--verify', '--quiet', candidate], {
+              cwd: dir,
+              timeout: 1500,
+              env: gitEnv,
+              stdio: 'ignore'
+            });
+            upstreamRef = candidate;
+            break;
+          } catch {}
+        }
+      }
+      if (!upstreamRef) return 0;
+      const behind = execFileSync('git', ['rev-list', `HEAD..${upstreamRef}`, '--count'], {
         cwd: dir,
         timeout: 1500,
         encoding: 'utf8',
-        env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+        env: gitEnv,
         stdio: ['ignore', 'pipe', 'ignore']
       }).trim();
       return parseInt(behind, 10) || 0;
@@ -630,6 +667,7 @@ function writeUserConfig(configPath, config) {
  * @returns {boolean}
  */
 function setPluginEnabled(pluginId, enabled = true, homeDir = (process.env.USERPROFILE || process.env.HOME || '')) {
+  assertValidPluginId(pluginId);
   const configPath = resolveUserConfigPath(homeDir);
   if (!configPath) return false;
 
@@ -639,7 +677,7 @@ function setPluginEnabled(pluginId, enabled = true, homeDir = (process.env.USERP
 
   try {
     const subcmd = enabled ? 'enable' : 'disable';
-    execSync(`agy plugin ${subcmd} "${pluginId}"`, { stdio: 'ignore' });
+    execFileSync('agy', ['plugin', subcmd, pluginId], { stdio: 'ignore' });
   } catch (err) {
     // Suppress CLI failure, config.json is already updated
   }
@@ -655,6 +693,7 @@ function setPluginEnabled(pluginId, enabled = true, homeDir = (process.env.USERP
  * @returns {boolean}
  */
 function removePluginFromConfig(pluginId, homeDir = (process.env.USERPROFILE || process.env.HOME || '')) {
+  assertValidPluginId(pluginId);
   const configPath = resolveUserConfigPath(homeDir);
   if (!configPath) return false;
 
@@ -663,7 +702,7 @@ function removePluginFromConfig(pluginId, homeDir = (process.env.USERPROFILE || 
   writeUserConfig(configPath, updated);
 
   try {
-    execSync(`agy plugin disable "${pluginId}"`, { stdio: 'ignore' });
+    execFileSync('agy', ['plugin', 'disable', pluginId], { stdio: 'ignore' });
   } catch (err) {
     // Suppress CLI failure
   }

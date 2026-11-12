@@ -1,15 +1,34 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { execSync, execFileSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { resolveStoragePaths, GIT_EXEC_ENV } from './storage-paths.js';
 import { createLayerProvider } from './layer-provider.js';
 import { parseYamlFrontmatter, serializeYamlFrontmatter, parseInlineArrayOrList } from './yaml-parser.js';
 import { findMarkdownFiles, scanLayerEntries } from '../retrieval/shadow-resolver.js';
 import { getMemorySpanningTree } from '../graph/graph-service.js';
 import { emitTelemetryEvent } from '../db/telemetry.js';
+import { getActiveEmbeddingConfig } from '../embeddings/onnx-provider.js';
 
 const STALE_THRESHOLD_DAYS = 180;
+
+export function parsePorcelainZ(raw) {
+  if (!raw) return [];
+  const tokens = raw.split('\0');
+  const entries = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i];
+    if (!token) continue;
+    const status = token.slice(0, 2);
+    const file = token.slice(3);
+    entries.push({ status, file, raw: `${status.trim()} ${file}`.trim() });
+    // Renames/copies emit an extra NUL-terminated original path
+    if (status[0] === 'R' || status[0] === 'C') {
+      i++;
+    }
+  }
+  return entries;
+}
 
 /**
  * Atomic file persistence using temporary write and atomic filesystem rename.
@@ -62,7 +81,7 @@ export function queryGitRepoStatus(repoDir) {
     };
   }
   try {
-    const branch = execSync('git rev-parse --abbrev-ref HEAD', {
+    const branch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
       cwd: repoDir,
       encoding: 'utf8',
       timeout: 2000,
@@ -72,22 +91,23 @@ export function queryGitRepoStatus(repoDir) {
 
     const isPromoteBranch = branch.startsWith('promote/');
 
-    const porcelain = execSync('git status --porcelain', {
+    const porcelain = execFileSync('git', ['status', '--porcelain', '-z'], {
       cwd: repoDir,
       encoding: 'utf8',
       timeout: 2000,
       env: GIT_EXEC_ENV,
       stdio: ['ignore', 'pipe', 'ignore']
-    }).trim();
+    });
 
-    const isClean = porcelain === '';
-    const uncommittedList = isClean ? [] : porcelain.split('\n').map(l => l.trim()).filter(Boolean);
-    const uncommittedCount = uncommittedList.length;
+    const parsedEntries = parsePorcelainZ(porcelain);
+    const isClean = parsedEntries.length === 0;
+    const uncommittedList = parsedEntries.map(e => e.raw);
+    const uncommittedCount = parsedEntries.length;
 
     let upstreamAhead = 0;
     let upstreamBehind = 0;
     try {
-      const counts = execSync('git rev-list --left-right --count HEAD...@{u}', {
+      const counts = execFileSync('git', ['rev-list', '--left-right', '--count', 'HEAD...@{u}'], {
         cwd: repoDir,
         encoding: 'utf8',
         timeout: 2000,
@@ -322,7 +342,8 @@ export function getLayerStatistics(workspaceRoot) {
       teamGit,
       privateRepoConfigured: Boolean(paths.settings?.privateRepoUrl),
       teamRepoConfigured: Boolean(paths.settings?.teamRepoUrl || (paths.activeTeamDirs && paths.activeTeamDirs.length > 0))
-    }
+    },
+    embedding: getActiveEmbeddingConfig()
   };
 }
 
@@ -755,18 +776,38 @@ export function syncMemoryLayer(workspaceRoot, params = {}) {
       return { success: false, status: 'not-a-git-repo' };
     }
     try {
-      const dirty = execSync('git status --porcelain', { cwd: dir, encoding: 'utf8', timeout: 3000, env: GIT_EXEC_ENV }).trim();
-      if (dirty) {
-        return { success: false, status: 'dirty-working-copy', dirtyDetails: dirty.split('\n') };
+      const dirty = execFileSync('git', ['status', '--porcelain', '-z'], {
+        cwd: dir,
+        encoding: 'utf8',
+        timeout: 3000,
+        env: GIT_EXEC_ENV
+      });
+      const dirtyEntries = parsePorcelainZ(dirty);
+      if (dirtyEntries.length > 0) {
+        return { success: false, status: 'dirty-working-copy', dirtyDetails: dirtyEntries.map(e => e.raw) };
       }
-      const branch = execSync('git rev-parse --abbrev-ref HEAD', { cwd: dir, encoding: 'utf8', timeout: 3000, env: GIT_EXEC_ENV }).trim();
+      const branch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
+        cwd: dir,
+        encoding: 'utf8',
+        timeout: 3000,
+        env: GIT_EXEC_ENV
+      }).trim();
       if (branch.startsWith('promote/')) {
         return { success: false, status: 'on-promote-branch', branch };
       }
       try {
-        execSync(`git branch --set-upstream-to=origin/${branch} "${branch}"`, { cwd: dir, stdio: 'ignore' });
+        execFileSync('git', ['branch', `--set-upstream-to=origin/${branch}`, branch], {
+          cwd: dir,
+          env: GIT_EXEC_ENV,
+          stdio: 'ignore'
+        });
       } catch {}
-      const pullOut = execSync('git pull --ff-only', { cwd: dir, encoding: 'utf8', timeout: 5000, env: GIT_EXEC_ENV }).trim();
+      const pullOut = execFileSync('git', ['pull', '--ff-only'], {
+        cwd: dir,
+        encoding: 'utf8',
+        timeout: 5000,
+        env: GIT_EXEC_ENV
+      }).trim();
       return { success: true, status: 'synchronized', branch, output: pullOut };
     } catch (err) {
       return { success: false, status: 'error', error: err.message };
@@ -801,6 +842,42 @@ export function syncMemoryLayer(workspaceRoot, params = {}) {
   }
 
   return results;
+}
+
+function detectTeamDefaultBranch(targetTeamDir) {
+  try {
+    const symRef = execFileSync('git', ['symbolic-ref', 'refs/remotes/origin/HEAD'], {
+      cwd: targetTeamDir,
+      env: GIT_EXEC_ENV,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore']
+    }).trim();
+    if (symRef.startsWith('refs/remotes/origin/')) {
+      return symRef.slice('refs/remotes/origin/'.length);
+    }
+  } catch {}
+
+  for (const candidate of ['main', 'master']) {
+    try {
+      execFileSync('git', ['show-ref', '--verify', '--quiet', `refs/heads/${candidate}`], {
+        cwd: targetTeamDir,
+        env: GIT_EXEC_ENV,
+        stdio: 'ignore'
+      });
+      return candidate;
+    } catch {}
+  }
+
+  try {
+    return execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
+      cwd: targetTeamDir,
+      env: GIT_EXEC_ENV,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore']
+    }).trim() || 'main';
+  } catch {
+    return 'main';
+  }
 }
 
 export function prepareTeamPromotion(workspaceRoot, params = {}) {
@@ -839,18 +916,43 @@ export function prepareTeamPromotion(workspaceRoot, params = {}) {
     throw new Error('Team memory clone is not initialized with Git. Run /kc-init first.');
   }
 
-  let defaultBranch = 'main';
+  const dirtyRaw = execFileSync('git', ['status', '--porcelain', '-z'], {
+    cwd: targetTeamDir,
+    env: GIT_EXEC_ENV,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+  const dirtyEntries = parsePorcelainZ(dirtyRaw);
+  if (dirtyEntries.length > 0) {
+    throw new Error(
+      `Team repository '${targetTeamSlug}' has ${dirtyEntries.length} uncommitted change(s). Commit or stash them before promoting.`
+    );
+  }
+
+  const defaultBranch = detectTeamDefaultBranch(targetTeamDir);
+  execFileSync('git', ['checkout', defaultBranch], {
+    cwd: targetTeamDir,
+    env: GIT_EXEC_ENV,
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+
+  let hasOrigin = false;
   try {
-    const branchList = execFileSync('git', ['branch', '-a'], { cwd: targetTeamDir, env: GIT_EXEC_ENV, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
-    if (branchList.includes('master') && !branchList.includes('main')) {
-      defaultBranch = 'master';
-    }
+    execFileSync('git', ['remote', 'get-url', 'origin'], {
+      cwd: targetTeamDir,
+      env: GIT_EXEC_ENV,
+      stdio: 'ignore'
+    });
+    hasOrigin = true;
   } catch {}
 
-  try {
-    execFileSync('git', ['checkout', defaultBranch], { cwd: targetTeamDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
-    execFileSync('git', ['pull', '--ff-only'], { cwd: targetTeamDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
-  } catch {}
+  if (hasOrigin) {
+    execFileSync('git', ['pull', '--ff-only'], {
+      cwd: targetTeamDir,
+      env: GIT_EXEC_ENV,
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+  }
 
   const dateStr = new Date().toISOString().slice(0, 10);
   const branchName = `promote/${dateStr}-${cleanSlug}`;

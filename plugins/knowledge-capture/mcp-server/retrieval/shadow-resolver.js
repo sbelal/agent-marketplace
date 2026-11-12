@@ -84,7 +84,7 @@ export function scanLayerEntries(workspaceRoot, targetLayer = 'all') {
       try {
         const content = fs.readFileSync(file, 'utf8');
         const parsed = parseYamlFrontmatter(content);
-        const slug = (parsed.frontmatter.slug || base).replace(/\.md$/i, '');
+        const slug = (parsed.frontmatter.slug || parsed.frontmatter.name || base).replace(/\.md$/i, '');
         const type = parsed.frontmatter.type || 'general';
         const domain = parsed.frontmatter.domain || 'general';
         const overridesRaw = parsed.frontmatter.overrides || '';

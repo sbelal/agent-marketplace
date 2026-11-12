@@ -29,6 +29,8 @@ export function writeTelemetryJson(data) {
  */
 export function recordTelemetryEvent(slug, eventType = 'recall', details = {}) {
   if (!slug) return;
+  const canonSlug = String(slug).trim().toLowerCase();
+  if (!canonSlug) return;
   const db = getDatabase();
   const nowIso = new Date().toISOString();
 
@@ -37,12 +39,12 @@ export function recordTelemetryEvent(slug, eventType = 'recall', details = {}) {
       db.prepare(`
         INSERT OR IGNORE INTO telemetry (slug, recalled_count, applied_count, test_pass_count, test_fail_count, efficacy_score)
         VALUES (?, 0, 0, 0, 0, 1.0)
-      `).run(slug);
+      `).run(canonSlug);
 
       if (eventType === 'apply') {
         db.prepare(`
           UPDATE telemetry SET applied_count = applied_count + 1, last_applied = ? WHERE slug = ?
-        `).run(nowIso, slug);
+        `).run(nowIso, canonSlug);
       } else if (eventType === 'test_pass') {
         db.prepare(`
           UPDATE telemetry 
@@ -50,7 +52,7 @@ export function recordTelemetryEvent(slug, eventType = 'recall', details = {}) {
               efficacy_score = MIN(1.0, efficacy_score + 0.05),
               last_feedback = ?
           WHERE slug = ?
-        `).run(details.message || 'test_passed', slug);
+        `).run(details.message || 'test_passed', canonSlug);
       } else if (eventType === 'test_fail') {
         db.prepare(`
           UPDATE telemetry 
@@ -58,11 +60,11 @@ export function recordTelemetryEvent(slug, eventType = 'recall', details = {}) {
               efficacy_score = MAX(0.1, efficacy_score - 0.20),
               last_feedback = ?
           WHERE slug = ?
-        `).run(details.message || 'test_failed', slug);
+        `).run(details.message || 'test_failed', canonSlug);
       } else {
         db.prepare(`
           UPDATE telemetry SET recalled_count = recalled_count + 1, last_recalled = ? WHERE slug = ?
-        `).run(nowIso, slug);
+        `).run(nowIso, canonSlug);
       }
       return;
     } catch {}
@@ -70,8 +72,8 @@ export function recordTelemetryEvent(slug, eventType = 'recall', details = {}) {
 
   // Fallback to telemetry.json
   const data = readTelemetryJson();
-  if (!data[slug]) {
-    data[slug] = {
+  if (!data[canonSlug]) {
+    data[canonSlug] = {
       recalled_count: 0,
       applied_count: 0,
       test_pass_count: 0,
@@ -83,19 +85,19 @@ export function recordTelemetryEvent(slug, eventType = 'recall', details = {}) {
     };
   }
   if (eventType === 'apply') {
-    data[slug].applied_count = (data[slug].applied_count || 0) + 1;
-    data[slug].last_applied = nowIso;
+    data[canonSlug].applied_count = (data[canonSlug].applied_count || 0) + 1;
+    data[canonSlug].last_applied = nowIso;
   } else if (eventType === 'test_pass') {
-    data[slug].test_pass_count = (data[slug].test_pass_count || 0) + 1;
-    data[slug].efficacy_score = Math.min(1.0, (data[slug].efficacy_score || 1.0) + 0.05);
-    data[slug].last_feedback = details.message || 'test_passed';
+    data[canonSlug].test_pass_count = (data[canonSlug].test_pass_count || 0) + 1;
+    data[canonSlug].efficacy_score = Math.min(1.0, (data[canonSlug].efficacy_score || 1.0) + 0.05);
+    data[canonSlug].last_feedback = details.message || 'test_passed';
   } else if (eventType === 'test_fail') {
-    data[slug].test_fail_count = (data[slug].test_fail_count || 0) + 1;
-    data[slug].efficacy_score = Math.max(0.1, (data[slug].efficacy_score || 1.0) - 0.20);
-    data[slug].last_feedback = details.message || 'test_failed';
+    data[canonSlug].test_fail_count = (data[canonSlug].test_fail_count || 0) + 1;
+    data[canonSlug].efficacy_score = Math.max(0.1, (data[canonSlug].efficacy_score || 1.0) - 0.20);
+    data[canonSlug].last_feedback = details.message || 'test_failed';
   } else {
-    data[slug].recalled_count = (data[slug].recalled_count || 0) + 1;
-    data[slug].last_recalled = nowIso;
+    data[canonSlug].recalled_count = (data[canonSlug].recalled_count || 0) + 1;
+    data[canonSlug].last_recalled = nowIso;
   }
   writeTelemetryJson(data);
 }
@@ -106,9 +108,11 @@ export function recordTelemetryEvent(slug, eventType = 'recall', details = {}) {
  */
 export function emitTelemetryEvent(slug, eventType = 'recall', details = {}) {
   if (!slug) return;
+  const canonSlug = String(slug).trim().toLowerCase();
+  if (!canonSlug) return;
   setImmediate(() => {
     try {
-      recordTelemetryEvent(slug, eventType, details);
+      recordTelemetryEvent(canonSlug, eventType, details);
     } catch {}
   });
 }
@@ -117,16 +121,17 @@ export function emitTelemetryEvent(slug, eventType = 'recall', details = {}) {
  * Public command: Explicitly records memory efficacy feedback (test_pass, test_fail, applied).
  */
 export function recordMemoryEfficacy(slug, feedbackType, details = {}) {
-  recordTelemetryEvent(slug, feedbackType, details);
+  const canonSlug = String(slug || '').trim().toLowerCase();
+  recordTelemetryEvent(canonSlug, feedbackType, details);
   const db = getDatabase();
   if (db) {
     try {
-      const row = db.prepare('SELECT * FROM telemetry WHERE slug = ?').get(slug);
+      const row = db.prepare('SELECT * FROM telemetry WHERE LOWER(slug) = ?').get(canonSlug);
       if (row) return row;
     } catch {}
   }
   const data = readTelemetryJson();
-  return data[slug] || { slug, efficacy_score: 1.0 };
+  return data[canonSlug] || { slug: canonSlug, efficacy_score: 1.0 };
 }
 
 /**

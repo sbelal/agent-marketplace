@@ -81,8 +81,7 @@ async function main() {
   report += `>\n`;
   report += `> Before closing this session or compacting context, consider capturing critical decisions:\n`;
   report += `> - Run \`/kc-elicit\` to review automated memory candidate proposals based on your diffs.\n`;
-  report += `> - Run \`/kc-capture workspace\` for architectural conventions or dependency decisions.\n`;
-  report += `> - Run \`/kc-capture private\` for tricky bug fixes, workarounds, or gotchas.\n`;
+  report += `> - Ask the agent to capture workspace conventions (\`save_memory_entry\` to \`workspace\`) or personal gotchas/workarounds (\`private\`).\n`;
 
   if (audit.suggested_candidates.length > 0) {
     report += `>\n> **Suggested Session Memories:**\n`;

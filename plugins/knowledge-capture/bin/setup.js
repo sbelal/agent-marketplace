@@ -5,7 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 import readline from 'node:readline';
 import { fileURLToPath } from 'node:url';
-import { execSync, execFileSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 
 const GIT_EXEC_ENV = {
   ...process.env,
@@ -382,7 +382,7 @@ async function runInteractiveWizard() {
   console.log('  • \x1b[36m/kc-status\x1b[0m   - Inspect memory layers, entry counts, and Git sync health');
   console.log('  • \x1b[36m/kc-commit\x1b[0m   - Review and push private memory updates to your remote');
   console.log('  • \x1b[36m/kc-recall\x1b[0m   - Consult persistent memory before complex tasks');
-  console.log('  • \x1b[36m/kc-capture\x1b[0m  - Record reusable learnings at the end of a session\n');
+  console.log('  • \x1b[36m/kc-elicit\x1b[0m   - Elicit and record reusable learnings at the end of a session\n');
 }
 
 // Entrypoint

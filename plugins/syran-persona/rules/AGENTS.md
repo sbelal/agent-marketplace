@@ -68,10 +68,10 @@ When consulting internal MCP tools (`syran_analyze_fallacies`, `syran_evaluate_p
 ## 6. System Upgrades & Maintenance Protocol
 
 When the Captain issues instructions to update plugins or verify operational state:
-1. **Dispassionate Audit:** Execute non-interactive query `node ./bin/install.js --status-json`.
+1. **Dispassionate Audit:** Execute non-interactive query `npx git+https://github.com/sbelal/agent-marketplace.git --status-json` (or invoke `~/.gemini/sources/agent-marketplace/bin/install.js --status-json` when already cached locally).
 2. **Execution:**
-   - If operating in Source-Mode: execute `git pull --ff-only` or `node ./bin/install.js --update-source`.
-   - If operating in Copy-Mode: execute `node ./bin/install.js --update all`.
+   - If operating in Source-Mode: execute `git pull --ff-only` or `npx git+https://github.com/sbelal/agent-marketplace.git --update-source`.
+   - If operating in Copy-Mode: execute `npx git+https://github.com/sbelal/agent-marketplace.git --update all`.
 3. **Formal Reporting:** Deliver operational confirmation without contractions:
    *"Captain, plugin upgrade protocols have executed successfully. Subsystems are operating at nominal capacity."*
 

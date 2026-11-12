@@ -1,62 +1,13 @@
 import fs from 'node:fs';
-import path from 'node:path';
 import { scanLayerEntries } from '../retrieval/shadow-resolver.js';
 import { parseYamlFrontmatter } from '../core/yaml-parser.js';
-import { generateMultiVector } from '../embeddings/multi-vector.js';
+import { generateMultiVector, generateMultiVectorAsync } from '../embeddings/multi-vector.js';
 import { computeDenseCosineSimilarity } from '../embeddings/heuristic-provider.js';
+import { getActiveEmbeddingConfig } from '../embeddings/onnx-provider.js';
+import { loadCachedVectorsMap } from '../db/indexer.js';
 
-/**
- * Memory Dreaming & Autonomous Semantic Synthesis Engine (/kc-dream).
- * 
- * Performs offline semantic synthesis across memory stores:
- * 1. Clusters memories by intent and semantic similarity.
- * 2. Detects fragmented facets of common systems (e.g. separate narrow rules on scaling).
- * 3. Synthesizes a unified consolidated master candidate proposal.
- */
-export function dreamMemoryConsolidation(workspaceRoot = process.cwd(), options = {}) {
+function clusterItemsForConsolidation(workspaceRoot, items, options = {}) {
   const threshold = typeof options.threshold === 'number' ? options.threshold : 0.65;
-  const targetDomain = options.domain ? options.domain.toLowerCase() : null;
-
-  const { activeEntries } = scanLayerEntries(workspaceRoot, 'all');
-  let candidates = activeEntries;
-  if (targetDomain) {
-    candidates = activeEntries.filter(e => (e.domain || '').toLowerCase() === targetDomain);
-  }
-
-  const items = [];
-  for (const entry of candidates) {
-    let body = '';
-    let fm = {};
-    try {
-      const raw = fs.readFileSync(entry.file, 'utf8');
-      const parsed = parseYamlFrontmatter(raw);
-      body = parsed.body || '';
-      fm = parsed.frontmatter || {};
-    } catch {}
-
-    const multiVec = generateMultiVector({
-      trigger: entry.trigger,
-      body,
-      slug: entry.slug,
-      domain: entry.domain,
-      type: entry.type,
-      related: entry.related
-    });
-
-    items.push({
-      slug: entry.slug,
-      layer: entry.layerKey,
-      domain: entry.domain || 'general',
-      type: entry.type || 'convention',
-      trigger: entry.trigger,
-      body,
-      related: entry.related || [],
-      overrides: entry.overrides || null,
-      multiVec
-    });
-  }
-
-  // Cluster related memories
   const clusters = [];
   const assigned = new Set();
 
@@ -79,7 +30,6 @@ export function dreamMemoryConsolidation(workspaceRoot = process.cwd(), options 
       );
 
       const sameDomain = items[i].domain === items[j].domain;
-      // High semantic similarity or same domain with moderate similarity
       if (triggerSim >= threshold || (sameDomain && (triggerSim >= 0.50 || contentSim >= 0.55))) {
         clusterMembers.push(items[j]);
         assigned.add(items[j].slug);
@@ -133,4 +83,104 @@ export function dreamMemoryConsolidation(workspaceRoot = process.cwd(), options 
     consolidationPotential: clusters.length > 0 ? 'HIGH' : 'OPTIMAL',
     clusters
   };
+}
+
+function loadDreamCandidates(workspaceRoot, options = {}) {
+  const targetDomain = options.domain ? options.domain.toLowerCase() : null;
+  const { activeEntries } = scanLayerEntries(workspaceRoot, 'all');
+  const candidates = targetDomain
+    ? activeEntries.filter(e => (e.domain || '').toLowerCase() === targetDomain)
+    : activeEntries;
+  const cachedVectors = loadCachedVectorsMap(workspaceRoot);
+  return { candidates, cachedVectors };
+}
+
+/**
+ * Synchronous Memory Dreaming & Autonomous Semantic Synthesis Engine (/kc-dream).
+ */
+export function dreamMemoryConsolidation(workspaceRoot = process.cwd(), options = {}) {
+  const { candidates, cachedVectors } = loadDreamCandidates(workspaceRoot, options);
+  const items = [];
+
+  for (const entry of candidates) {
+    let body = '';
+    try {
+      const raw = fs.readFileSync(entry.file, 'utf8');
+      const parsed = parseYamlFrontmatter(raw);
+      body = parsed.body || '';
+    } catch {}
+
+    const cacheKey = `${entry.layerKey}:${entry.teamSlug || ''}:${entry.file}`;
+    const multiVec = cachedVectors.get(cacheKey) || generateMultiVector({
+      trigger: entry.trigger,
+      body,
+      slug: entry.slug,
+      domain: entry.domain,
+      type: entry.type,
+      related: entry.related
+    });
+
+    items.push({
+      slug: entry.slug,
+      layer: entry.layerKey,
+      domain: entry.domain || 'general',
+      type: entry.type || 'convention',
+      trigger: entry.trigger,
+      body,
+      related: entry.related || [],
+      overrides: entry.overrides || null,
+      multiVec
+    });
+  }
+
+  return clusterItemsForConsolidation(workspaceRoot, items, options);
+}
+
+/**
+ * Async Memory Dreaming & Autonomous Semantic Synthesis Engine (/kc-dream).
+ * Uses active ONNX / Heuristic embedding provider for uncached entries.
+ */
+export async function dreamMemoryConsolidationAsync(workspaceRoot = process.cwd(), options = {}) {
+  const { candidates, cachedVectors } = loadDreamCandidates(workspaceRoot, options);
+  const activeConfig = getActiveEmbeddingConfig();
+  const items = [];
+
+  for (const entry of candidates) {
+    let body = '';
+    try {
+      const raw = fs.readFileSync(entry.file, 'utf8');
+      const parsed = parseYamlFrontmatter(raw);
+      body = parsed.body || '';
+    } catch {}
+
+    const cacheKey = `${entry.layerKey}:${entry.teamSlug || ''}:${entry.file}`;
+    let multiVec = cachedVectors.get(cacheKey);
+    if (!multiVec) {
+      const vecInput = {
+        trigger: entry.trigger,
+        body,
+        slug: entry.slug,
+        domain: entry.domain,
+        type: entry.type,
+        related: entry.related
+      };
+      multiVec = activeConfig.engine === 'onnx'
+        ? await generateMultiVectorAsync(vecInput)
+        : generateMultiVector(vecInput);
+    }
+
+    items.push({
+      slug: entry.slug,
+      layer: entry.layerKey,
+      domain: entry.domain || 'general',
+      type: entry.type || 'convention',
+      trigger: entry.trigger,
+      body,
+      related: entry.related || [],
+      overrides: entry.overrides || null,
+      multiVec
+    });
+  }
+
+  return clusterItemsForConsolidation(workspaceRoot, items, options);
 }

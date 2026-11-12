@@ -72,7 +72,8 @@ const TOOLS = [
             properties: {
               label: { type: 'string', description: 'Name or description of hypothesis' },
               weight: { type: 'number', description: 'Empirical weight or frequency' },
-              risk: { type: 'number', description: 'Risk factor score between 0.0 and 1.0' }
+              risk: { type: 'number', description: 'Risk factor score between 0.0 and 1.0' },
+              prior: { type: 'number', description: 'Optional hypothesis-level prior probability between 0.0 and 1.0' }
             },
             required: ['label']
           }
@@ -131,6 +132,8 @@ const TOOLS = [
   }
 ];
 
+const SUPPORTED_PROTOCOL_VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05'];
+
 function sendJsonRpc(response) {
   const json = JSON.stringify(response);
   process.stdout.write(json + '\n');
@@ -143,18 +146,22 @@ function handleRequest(message) {
 
   const { id, method, params } = message;
 
-  // Suppress notifications without id
-  if (id === undefined || id === null) {
+  // Suppress notifications without id or notifications/* methods
+  if (id === undefined || id === null || (typeof method === 'string' && method.startsWith('notifications/'))) {
     return;
   }
 
   switch (method) {
-    case 'initialize':
+    case 'initialize': {
+      const requestedVersion = params?.protocolVersion;
+      const protocolVersion = SUPPORTED_PROTOCOL_VERSIONS.includes(requestedVersion)
+        ? requestedVersion
+        : '2024-11-05';
       sendJsonRpc({
         jsonrpc: '2.0',
         id,
         result: {
-          protocolVersion: '2024-11-05',
+          protocolVersion,
           capabilities: {
             tools: {}
           },
@@ -165,6 +172,7 @@ function handleRequest(message) {
         }
       });
       break;
+    }
 
     case 'ping':
       sendJsonRpc({
@@ -290,7 +298,14 @@ rl.on('line', (line) => {
     const parsed = JSON.parse(trimmed);
     handleRequest(parsed);
   } catch {
-    // Ignore invalid JSON lines
+    sendJsonRpc({
+      jsonrpc: '2.0',
+      id: null,
+      error: {
+        code: -32700,
+        message: 'Parse error: Invalid JSON'
+      }
+    });
   }
 });
 

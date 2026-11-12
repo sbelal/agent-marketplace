@@ -62,7 +62,7 @@ export function getSettings(storageDir = getStorageDir()) {
     return {
       privateRepoUrl: '',
       teamRepoUrl: '',
-      embeddingEngine: 'onnx',
+      embeddingEngine: '',
       teamRepos: []
     };
   }
@@ -72,7 +72,7 @@ export function getSettings(storageDir = getStorageDir()) {
     const settings = {
       privateRepoUrl: parsed.privateRepoUrl || '',
       teamRepoUrl: parsed.teamRepoUrl || '',
-      embeddingEngine: parsed.embeddingEngine || 'onnx',
+      embeddingEngine: parsed.embeddingEngine || '',
       teamRepos: Array.isArray(parsed.teamRepos) ? parsed.teamRepos : []
     };
     // Backward compatibility: If teamRepoUrl exists and teamRepos is empty, wrap it
@@ -89,7 +89,7 @@ export function getSettings(storageDir = getStorageDir()) {
     return {
       privateRepoUrl: '',
       teamRepoUrl: '',
-      embeddingEngine: 'onnx',
+      embeddingEngine: '',
       teamRepos: []
     };
   }

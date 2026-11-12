@@ -70,9 +70,11 @@ export {
 } from './graph/studio-launcher.js';
 
 export {
-  detectContradictionsAndDrift
+  detectContradictionsAndDrift,
+  detectContradictionsAndDriftAsync
 } from './audit/drift-detector.js';
 
 export {
-  dreamMemoryConsolidation
+  dreamMemoryConsolidation,
+  dreamMemoryConsolidationAsync
 } from './audit/dream-synthesizer.js';

@@ -2,26 +2,57 @@
 
 /**
  * Knowledge Capture - Standalone Memory Studio CLI
- * 
+ *
  * Launches a standalone, zero-dependency HTTP server (node:http) serving the interactive
  * Memory Studio UI with direct browser-to-disk persistence via /api/patch.
- * 
+ *
  * Usage:
  *   node ./bin/studio.js [--port 4242] [--host 127.0.0.1] [--workspace <path>] [--no-open]
  */
 
 import http from 'node:http';
+import crypto from 'node:crypto';
 import path from 'node:path';
-import fs from 'node:fs';
-import { exec } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 import {
   generateKnowledgeGraphHtml,
-  getKnowledgeGraphData
+  getKnowledgeGraphData,
+  syncSqliteIndex
 } from '../mcp-server/sqlite-index.js';
 import { applyMemoryPatch } from '../mcp-server/memory-service.js';
-import { syncSqliteIndex } from '../mcp-server/sqlite-index.js';
+
+const MAX_PATCH_BODY_BYTES = 1024 * 1024; // 1 MB limit
+const LOOPBACK_ORIGIN_RE = /^https?:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/i;
+
+function isLoopbackOrigin(origin) {
+  return typeof origin === 'string' && LOOPBACK_ORIGIN_RE.test(origin);
+}
+
+function isAuthorizedRequest(req, studioToken) {
+  const secFetchSite = req.headers['sec-fetch-site'];
+  if (secFetchSite === 'cross-site') {
+    return false;
+  }
+
+  const tokenHeader = req.headers['x-studio-token'];
+  if (tokenHeader !== undefined) {
+    if (typeof tokenHeader !== 'string' || !studioToken || tokenHeader !== studioToken) {
+      return false;
+    }
+  }
+
+  const origin = req.headers.origin;
+  if (origin !== undefined) {
+    if (origin === 'null') {
+      return typeof tokenHeader === 'string' && Boolean(studioToken) && tokenHeader === studioToken;
+    }
+    return isLoopbackOrigin(origin);
+  }
+
+  return true;
+}
 
 function parseCliArgs(args) {
   const options = {
@@ -63,31 +94,38 @@ Options:
   return options;
 }
 
-export function openBrowser(url) {
+export function openBrowser(rawUrl) {
   if (process.env.CI || process.env.NODE_ENV === 'test') return;
-  const platform = process.platform;
-  let cmd = null;
-  if (platform === 'darwin') {
-    cmd = `open "${url}"`;
-  } else if (platform === 'win32') {
-    cmd = `start "" "${url}"`;
-  } else if (platform === 'linux') {
-    if (process.env.DISPLAY || process.env.WAYLAND_DISPLAY) {
-      cmd = `xdg-open "${url}"`;
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(rawUrl);
+    if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
+      return;
     }
+  } catch {
+    return;
   }
 
-  if (cmd) {
-    exec(cmd, { stdio: 'ignore' }, () => {});
+  const safeHref = parsedUrl.href;
+  const platform = process.platform;
+  if (platform === 'darwin') {
+    execFile('open', [safeHref], { stdio: 'ignore' }, () => {});
+  } else if (platform === 'win32') {
+    execFile('cmd.exe', ['/c', 'start', '', safeHref], { stdio: 'ignore' }, () => {});
+  } else if (platform === 'linux') {
+    if (process.env.DISPLAY || process.env.WAYLAND_DISPLAY) {
+      execFile('xdg-open', [safeHref], { stdio: 'ignore' }, () => {});
+    }
   }
 }
 
 export function startStudioServer(options = {}) {
   const host = options.host || '127.0.0.1';
-  let initialPort = options.port || 4242;
+  const initialPort = options.port || 4242;
   const workspaceRoot = options.workspaceRoot || options.workspace || process.cwd();
   const autoOpen = options.autoOpen ?? true;
   const strictPort = options.strictPort ?? false;
+  const studioToken = crypto.randomBytes(24).toString('hex');
 
   return new Promise((resolve, reject) => {
     let portAttempt = initialPort;
@@ -95,12 +133,21 @@ export function startStudioServer(options = {}) {
 
     function tryListen() {
       const server = http.createServer(async (req, res) => {
-        // Handle CORS
-        res.setHeader('Access-Control-Allow-Origin', '*');
+        const origin = req.headers.origin;
+        const hasValidToken = typeof req.headers['x-studio-token'] === 'string' && req.headers['x-studio-token'] === studioToken;
+        if (origin && (isLoopbackOrigin(origin) || hasValidToken)) {
+          res.setHeader('Access-Control-Allow-Origin', origin);
+          res.setHeader('Vary', 'Origin');
+        }
         res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-        res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+        res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Studio-Token');
 
         if (req.method === 'OPTIONS') {
+          if (origin && !isLoopbackOrigin(origin) && !hasValidToken) {
+            res.writeHead(403, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Forbidden origin' }));
+            return;
+          }
           res.writeHead(204);
           res.end();
           return;
@@ -111,7 +158,10 @@ export function startStudioServer(options = {}) {
 
         try {
           if (req.method === 'GET' && (pathname === '/' || pathname === '/index.html')) {
-            const html = generateKnowledgeGraphHtml(workspaceRoot);
+            const html = generateKnowledgeGraphHtml(workspaceRoot, {
+              serverUrl: `http://${host}:${portAttempt}`,
+              studioToken
+            });
             res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
             res.end(html);
             return;
@@ -137,10 +187,32 @@ export function startStudioServer(options = {}) {
           }
 
           if (req.method === 'POST' && pathname === '/api/patch') {
-            let body = '';
-            req.on('data', chunk => { body += chunk; });
+            if (!isAuthorizedRequest(req, studioToken)) {
+              res.writeHead(403, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ ok: false, success: false, errors: ['Forbidden: cross-site or unauthorized origin'] }));
+              return;
+            }
+
+            const chunks = [];
+            let totalBytes = 0;
+            let abortedTooLarge = false;
+
+            req.on('data', chunk => {
+              totalBytes += chunk.length;
+              if (totalBytes > MAX_PATCH_BODY_BYTES) {
+                abortedTooLarge = true;
+                res.writeHead(413, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ ok: false, success: false, errors: ['Payload too large (max 1MB)'] }));
+                req.destroy();
+                return;
+              }
+              chunks.push(chunk);
+            });
+
             req.on('end', async () => {
+              if (abortedTooLarge) return;
               try {
+                const body = Buffer.concat(chunks).toString('utf8');
                 const patchData = JSON.parse(body || '{}');
                 const patchResult = applyMemoryPatch(workspaceRoot, patchData);
                 await syncSqliteIndex(workspaceRoot);
@@ -182,6 +254,7 @@ export function startStudioServer(options = {}) {
           port: portAttempt,
           host,
           url: boundUrl,
+          studioToken,
           close: () => new Promise(r => server.close(r))
         });
       });
@@ -198,7 +271,7 @@ const isDirectCli = process.argv[1] && (
 
 if (isDirectCli) {
   const cliOptions = parseCliArgs(process.argv.slice(2));
-  startStudioServer(cliOptions).then(({ url, port, host }) => {
+  startStudioServer(cliOptions).then(({ url }) => {
     console.log(`
 🧠 Knowledge Capture Studio
 ----------------------------------------

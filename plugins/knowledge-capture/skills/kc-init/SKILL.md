@@ -111,5 +111,5 @@ Display an onboarding summary:
 - **Next Steps:**
   - `SessionStart` hook will automatically audit uncommitted changes and pull remote updates.
   - Run `/kc-status` anytime to view memory health across layers.
-  - Use `/kc-capture` at the end of complex tasks to record new learnings.
+  - Use `/kc-elicit` at the end of complex tasks to review and record new learnings.
 ```

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import readline from 'node:readline';
+import { fileURLToPath } from 'node:url';
 import {
   getMemorySummary,
   getLayerStatistics,
@@ -30,13 +31,13 @@ import {
   getKnowledgeGraphData,
   recordTelemetryEvent,
   generateKnowledgeGraphHtml,
-  detectContradictionsAndDrift,
+  detectContradictionsAndDriftAsync,
   proactiveMemoryProbe,
   recordMemoryEfficacy,
   getMemoryGraphNeighbors,
   getMemorySpanningTree,
   renderVisualMemoryStudio,
-  dreamMemoryConsolidation,
+  dreamMemoryConsolidationAsync,
   correlateTestExecutionEfficacy
 } from './sqlite-index.js';
 
@@ -58,8 +59,7 @@ const TOOLS = [
       properties: {
         layer: {
           type: 'string',
-          enum: ['all', 'workspace', 'private', 'team'],
-          description: "Optional filter for memory layer. Defaults to 'all'."
+          description: "Optional filter for memory layer ('all', 'workspace', 'private', 'team', or a specific team repository slug). Defaults to 'all'."
         },
         domain: {
           type: 'string',
@@ -126,9 +126,8 @@ const TOOLS = [
       properties: {
         layer: {
           type: 'string',
-          enum: ['all', 'workspace', 'private', 'team'],
           description:
-            "The memory layer containing the target file, or 'all' to resolve highest-precedence layer automatically."
+            "The memory layer ('all', 'workspace', 'private', 'team', or a specific team repository slug) containing the target file, or 'all' to resolve highest-precedence layer automatically."
         },
         slug: {
           type: 'string',
@@ -392,6 +391,10 @@ const TOOLS = [
           type: 'string',
           description: 'Slug in Private memory to promote to Team layer.'
         },
+        teamSlug: {
+          type: 'string',
+          description: 'Optional target team repository slug (e.g., "core-platform"). Defaults to the first active team repository.'
+        },
         content: {
           type: 'string',
           description: 'Optional LLM-sanitized markdown body or full markdown content (with PII scrubbed, first-person narrative generalized, and workstation paths converted to generic paths).'
@@ -419,6 +422,10 @@ const TOOLS = [
           type: 'string',
           enum: ['workspace', 'private', 'team'],
           description: "Target layer to ingest the ADR into ('workspace', 'private', or 'team'). Defaults to 'workspace'."
+        },
+        teamSlug: {
+          type: 'string',
+          description: 'Optional target team repository slug when targetLayer is "team".'
         }
       },
       required: ['adrPath']
@@ -550,7 +557,7 @@ const TOOLS = [
   {
     name: 'manage_team_repositories',
     description:
-      'Manages multi-team knowledge repositories configured by unique slugs. Actions: "list" (show configured repositories with sync status and active state), "add" (register a new team repo with slug and git URL), "activate" (activate a team repo by slug), "deactivate" (deactivate a team repo by slug), "remove" (remove a team repo configuration and optionally clean local clone), and "sync" (git pull latest updates for active team repos).',
+      'Manages multi-team knowledge repositories configured by unique slugs. Actions: "list" (show configured repositories with sync status and active state), "add" (register a new team repo with slug and git URL), "activate" (activate a team repo by slug), "deactivate" (deactivate a team repo by slug), "remove" (remove a team repo configuration and optionally clean local clone), and "sync" (git pull latest updates for active team repos, or a single repo when slug is provided).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -561,7 +568,7 @@ const TOOLS = [
         },
         slug: {
           type: 'string',
-          description: 'Unique slug identifier for the team repository (required for add, activate, deactivate, remove).'
+          description: 'Unique slug identifier for the team repository (required for add, activate, deactivate, remove; optional filter for sync).'
         },
         url: {
           type: 'string',
@@ -618,6 +625,14 @@ const TOOLS = [
         slug: {
           type: 'string',
           description: 'Unique slug of the conflicting memory entry.'
+        },
+        privateSlug: {
+          type: 'string',
+          description: 'Optional private memory slug when overriding a differently named team slug.'
+        },
+        privatePath: {
+          type: 'string',
+          description: 'Optional direct file path to the private memory entry.'
         },
         resolution: {
           type: 'string',
@@ -695,9 +710,78 @@ const TOOLS = [
   }
 ];
 
+const SUPPORTED_PROTOCOL_VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05'];
+
+let clientCapabilities = {};
+let cachedClientWorkspaceRoots = [];
+let rootsQueryInFlight = null;
+let hasQueriedRoots = false;
+let nextServerRequestId = 1;
+const pendingClientResponses = new Map();
+
 function sendJsonRpc(response) {
   const json = JSON.stringify(response);
   process.stdout.write(json + '\n');
+}
+
+function sendClientRequest(method, params = {}, timeoutMs = 500) {
+  return new Promise((resolve, reject) => {
+    const reqId = `kc-srv-${nextServerRequestId++}`;
+    const timer = setTimeout(() => {
+      pendingClientResponses.delete(reqId);
+      reject(new Error(`Timeout waiting for client response to ${method}`));
+    }, timeoutMs);
+    pendingClientResponses.set(reqId, {
+      resolve: (res) => {
+        clearTimeout(timer);
+        resolve(res);
+      },
+      reject: (err) => {
+        clearTimeout(timer);
+        reject(err);
+      }
+    });
+    sendJsonRpc({ jsonrpc: '2.0', id: reqId, method, params });
+  });
+}
+
+async function refreshClientRoots(timeoutMs = 500) {
+  if (rootsQueryInFlight) return rootsQueryInFlight;
+  rootsQueryInFlight = (async () => {
+    try {
+      const result = await sendClientRequest('roots/list', {}, timeoutMs);
+      const roots = Array.isArray(result?.roots) ? result.roots : [];
+      const parsedPaths = [];
+      for (const r of roots) {
+        if (!r || typeof r.uri !== 'string') continue;
+        if (r.uri.startsWith('file://')) {
+          try {
+            parsedPaths.push(fileURLToPath(r.uri));
+          } catch {}
+        }
+      }
+      cachedClientWorkspaceRoots = parsedPaths;
+      hasQueriedRoots = true;
+    } catch {
+      hasQueriedRoots = true;
+    } finally {
+      rootsQueryInFlight = null;
+    }
+    return cachedClientWorkspaceRoots;
+  })();
+  return rootsQueryInFlight;
+}
+
+async function resolveWorkspaceRoot(args = {}) {
+  if (args.workspaceRoot) return args.workspaceRoot;
+  if (process.env.WORKSPACE_ROOT) return process.env.WORKSPACE_ROOT;
+  if (process.env.WORKSPACE_DIR) return process.env.WORKSPACE_DIR;
+  if (cachedClientWorkspaceRoots.length > 0) return cachedClientWorkspaceRoots[0];
+  if (clientCapabilities?.roots && !hasQueriedRoots) {
+    const roots = await refreshClientRoots(400);
+    if (roots.length > 0) return roots[0];
+  }
+  return process.cwd();
 }
 
 async function handleRequest(message) {
@@ -707,18 +791,44 @@ async function handleRequest(message) {
 
   const { id, method, params } = message;
 
-  // Suppress notifications without id
-  if (id === undefined || id === null) {
+  // Handle JSON-RPC responses from client (e.g., roots/list)
+  if (!method && id !== undefined && id !== null && ('result' in message || 'error' in message)) {
+    const pending = pendingClientResponses.get(id);
+    if (pending) {
+      pendingClientResponses.delete(id);
+      if ('error' in message && message.error) {
+        pending.reject(new Error(message.error.message || 'Client returned error'));
+      } else {
+        pending.resolve(message.result);
+      }
+    }
+    return;
+  }
+
+  // Handle notifications without responding
+  if (id === undefined || id === null || (typeof method === 'string' && method.startsWith('notifications/'))) {
+    if (method === 'notifications/roots/list_changed') {
+      hasQueriedRoots = false;
+      cachedClientWorkspaceRoots = [];
+      refreshClientRoots().catch(() => {});
+    } else if (method === 'notifications/initialized' && clientCapabilities?.roots) {
+      refreshClientRoots().catch(() => {});
+    }
     return;
   }
 
   switch (method) {
-    case 'initialize':
+    case 'initialize': {
+      clientCapabilities = (params && typeof params.capabilities === 'object' && params.capabilities) ? params.capabilities : {};
+      const requestedVersion = params?.protocolVersion;
+      const protocolVersion = SUPPORTED_PROTOCOL_VERSIONS.includes(requestedVersion)
+        ? requestedVersion
+        : '2024-11-05';
       sendJsonRpc({
         jsonrpc: '2.0',
         id,
         result: {
-          protocolVersion: '2024-11-05',
+          protocolVersion,
           capabilities: {
             tools: {}
           },
@@ -729,6 +839,7 @@ async function handleRequest(message) {
         }
       });
       break;
+    }
 
     case 'ping':
       sendJsonRpc({
@@ -751,7 +862,7 @@ async function handleRequest(message) {
     case 'tools/call': {
       const toolName = params?.name;
       const args = params?.arguments || {};
-      const workspaceRoot = args.workspaceRoot || process.env.WORKSPACE_ROOT || process.cwd();
+      const workspaceRoot = await resolveWorkspaceRoot(args);
 
       try {
         let resultData = null;
@@ -858,7 +969,10 @@ async function handleRequest(message) {
             break;
 
           case 'ingest_team_adr':
-            resultData = ingestTeamAdr(workspaceRoot, args.adrPath, { targetLayer: args.targetLayer || 'workspace' });
+            resultData = ingestTeamAdr(workspaceRoot, args.adrPath, {
+              targetLayer: args.targetLayer || 'workspace',
+              teamSlug: args.teamSlug
+            });
             await syncSqliteIndex(workspaceRoot);
             break;
 
@@ -871,7 +985,7 @@ async function handleRequest(message) {
             break;
 
           case 'detect_contradictions_and_drift':
-            resultData = detectContradictionsAndDrift(workspaceRoot, {
+            resultData = await detectContradictionsAndDriftAsync(workspaceRoot, {
               domain: args.domain,
               threshold: args.threshold
             });
@@ -894,7 +1008,7 @@ async function handleRequest(message) {
               resultData = removeTeamRepository(slug, cleanDisk === true, workspaceRoot);
               await syncSqliteIndex(workspaceRoot);
             } else if (action === 'sync') {
-              resultData = syncTeamRepositories(workspaceRoot);
+              resultData = syncTeamRepositories(workspaceRoot, { slug });
               await syncSqliteIndex(workspaceRoot);
             } else {
               throw new Error(`Unknown action for manage_team_repositories: ${action}`);
@@ -917,7 +1031,7 @@ async function handleRequest(message) {
             break;
 
           case 'dream_memory_consolidation':
-            resultData = dreamMemoryConsolidation(workspaceRoot, args);
+            resultData = await dreamMemoryConsolidationAsync(workspaceRoot, args);
             break;
 
           case 'correlate_test_efficacy':
@@ -987,15 +1101,24 @@ const rl = readline.createInterface({
   terminal: false
 });
 
-rl.on('line', async (line) => {
+rl.on('line', (line) => {
   const trimmed = line.trim();
   if (!trimmed) return;
+  let parsed;
   try {
-    const parsed = JSON.parse(trimmed);
-    await handleRequest(parsed);
+    parsed = JSON.parse(trimmed);
   } catch {
-    // Ignore invalid JSON lines
+    sendJsonRpc({
+      jsonrpc: '2.0',
+      id: null,
+      error: {
+        code: -32700,
+        message: 'Parse error: Invalid JSON'
+      }
+    });
+    return;
   }
+  handleRequest(parsed).catch(() => {});
 });
 
 process.on('SIGINT', () => process.exit(0));

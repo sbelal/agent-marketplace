@@ -1310,6 +1310,491 @@ Always execute tests with timeout guards.
 
   console.log('  ✔ Passed: Session-Start hook schema, stats integrity, and case-insensitive resolution verified.\n');
 
+  // ==========================================
+  // TEST 33: SQLite Schema v2 Multi-Team & Subdir Collision Safety + Float32 Binary BLOBs
+  // ==========================================
+  console.log('Test 33: SQLite Schema v2 Collision Safety, Dirty Check, & Binary BLOB Vectors...');
+  const v2Ws = path.join(tempRoot, 'v2-collision-ws');
+  const v2Sub1 = path.join(v2Ws, '.agents', 'rules', 'memory', 'sub1');
+  const v2Sub2 = path.join(v2Ws, '.agents', 'rules', 'memory', 'sub2');
+  fs.mkdirSync(v2Sub1, { recursive: true });
+  fs.mkdirSync(v2Sub2, { recursive: true });
+
+  fs.writeFileSync(path.join(v2Sub1, 'guide.md'), `---
+name: sub1-guide
+domain: backend
+type: convention
+description: Subdirectory one backend guide
+---
+# Subdir 1 Guide
+Rule for sub1.
+`, 'utf8');
+  fs.writeFileSync(path.join(v2Sub2, 'guide.md'), `---
+name: sub2-guide
+domain: frontend
+type: convention
+description: Subdirectory two frontend guide
+---
+# Subdir 2 Guide
+Rule for sub2.
+`, 'utf8');
+
+  const teamRepoA = addTeamRepository('team-alpha', 'https://github.com/org/team-alpha.git', 'Team Alpha', v2Ws);
+  const teamRepoB = addTeamRepository('team-beta', 'https://github.com/org/team-beta.git', 'Team Beta', v2Ws);
+  fs.writeFileSync(path.join(teamRepoA.dir, 'shared-name.md'), `---
+name: alpha-standard
+domain: devops
+type: convention
+description: Alpha team Kubernetes standard
+---
+# Alpha Standard
+`, 'utf8');
+  fs.writeFileSync(path.join(teamRepoB.dir, 'shared-name.md'), `---
+name: beta-standard
+domain: security
+type: convention
+description: Beta team security standard
+---
+# Beta Standard
+`, 'utf8');
+
+  await syncSqliteIndex(v2Ws);
+  assert.equal(isIndexDirty(v2Ws), false, 'Freshly synced v2 index must not be dirty');
+
+  const v2Db = getDatabase();
+  const schemaVer = v2Db.prepare("SELECT val FROM meta WHERE key = 'schema_version'").get();
+  assert.equal(schemaVer?.val, '2', 'SQLite schema_version must be 2');
+
+  const v2WsId = normalizeWorkspaceId(v2Ws);
+  const v2Rows = v2Db.prepare("SELECT layer, team_slug, path, slug, trigger_vector FROM memories WHERE workspace_id = ? OR workspace_id = 'global'").all(v2WsId);
+  assert.ok(v2Rows.some(r => r.slug === 'sub1-guide'), 'sub1/guide.md must be preserved');
+  assert.ok(v2Rows.some(r => r.slug === 'sub2-guide'), 'sub2/guide.md must not overwrite sub1/guide.md');
+  assert.ok(v2Rows.some(r => r.layer === 'team' && r.team_slug === 'team-alpha' && r.slug === 'alpha-standard'), 'team-alpha entry must be indexed');
+  assert.ok(v2Rows.some(r => r.layer === 'team' && r.team_slug === 'team-beta' && r.slug === 'beta-standard'), 'team-beta entry must not collide with team-alpha');
+
+  const sampleVecRow = v2Rows.find(r => r.trigger_vector);
+  assert.ok(Buffer.isBuffer(sampleVecRow.trigger_vector) || sampleVecRow.trigger_vector instanceof Uint8Array, 'Vectors must be persisted as compact Float32 binary BLOBs');
+
+  removeTeamRepository('team-alpha', true, v2Ws);
+  removeTeamRepository('team-beta', true, v2Ws);
+  console.log('  ✔ Passed: Schema v2 eliminates team/subdir PK collisions and stores compact Float32 BLOBs.\n');
+
+  // ==========================================
+  // TEST 34: Drift Detector False-Positive Elimination & Structured Evidence
+  // ==========================================
+  console.log('Test 34: Drift Detector Negation/Migration Parsing & Evidence Extraction...');
+  const driftFixWs = path.join(tempRoot, 'drift-fix-ws');
+  const driftFixMem = path.join(driftFixWs, '.agents', 'rules', 'memory');
+  const nestedSrcDir = path.join(driftFixWs, 'src', 'nested');
+  fs.mkdirSync(driftFixMem, { recursive: true });
+  fs.mkdirSync(nestedSrcDir, { recursive: true });
+  fs.writeFileSync(path.join(nestedSrcDir, 'custom-config.ts'), 'export default {};\n', 'utf8');
+  fs.writeFileSync(path.join(driftFixWs, 'package.json'), JSON.stringify({
+    name: 'drift-fix-test',
+    engines: { node: '>=22.0.0' }
+  }), 'utf8');
+
+  // Two non-contradictory rules: one mentions migration from Node 18 to Node 22 and negates npm / legacy files
+  fs.writeFileSync(path.join(driftFixMem, 'pnpm-rule-1.md'), `---
+name: pnpm-rule-1
+domain: javascript
+type: convention
+description: When installing packages or upgrading runtime
+verified: 2026-04-01
+---
+# Package Policy
+Always use pnpm; do not use npm for installs.
+Upgraded from Node 18 to Node 22. Refer to custom-config.ts for settings. Do not create .legacy.json.
+`, 'utf8');
+  fs.writeFileSync(path.join(driftFixMem, 'pnpm-rule-2.md'), `---
+name: pnpm-rule-2
+domain: javascript
+type: convention
+description: When installing dependencies in CI workflows
+verified: 2026-04-01
+---
+# CI Package Policy
+Use pnpm install --frozen-lockfile for reproducible builds.
+`, 'utf8');
+
+  const cleanDriftRes = detectContradictionsAndDrift(driftFixWs);
+  assert.equal(cleanDriftRes.contradictions.length, 0, 'Negated npm alongside affirmative pnpm must NOT produce false toolchain contradiction');
+  assert.equal(cleanDriftRes.drifts.some(d => d.type === 'runtime_engine_drift'), false, 'Migration phrase "from Node 18 to Node 22" must NOT trigger runtime engine drift');
+  assert.equal(cleanDriftRes.drifts.some(d => d.type === 'referenced_file_missing'), false, 'Nested existing file and negated missing file must NOT trigger missing-file drift');
+  assert.ok(Array.isArray(cleanDriftRes.ambiguous_pairs), 'ambiguous_pairs array must be included for borderline semantic pairs');
+  console.log('  ✔ Passed: Drift detector eliminates negation/migration/nested-file false positives.\n');
+
+  // ==========================================
+  // TEST 35: Memory Studio CSRF Protection, Body Limit, UI Escape & Browser Links
+  // ==========================================
+  console.log('Test 35: Memory Studio CSRF Guard, Body Size Limit, HTML Escape & Delink UI...');
+  const xssDesc = 'Guard </script><script>alert(1)</script> injection';
+  const studioSecurityWs = path.join(tempRoot, 'studio-sec-ws');
+  const studioSecMem = path.join(studioSecurityWs, '.agents', 'rules', 'memory');
+  fs.mkdirSync(studioSecMem, { recursive: true });
+  fs.writeFileSync(path.join(studioSecMem, 'xss-guard.md'), `---
+name: xss-guard
+domain: security
+type: convention
+description: ${xssDesc}
+verified: 2026-04-01
+---
+# XSS Guard
+`, 'utf8');
+
+  const secHtml = generateKnowledgeGraphHtml(studioSecurityWs, { studioToken: 'tok-secret-123' });
+  assert.ok(!secHtml.includes('</script><script>alert(1)'), 'Embedded JSON must escape </script> tags safely');
+  assert.ok(secHtml.includes('btn-delink-node'), 'Studio HTML must include Clear Links (#btn-delink-node) button');
+  assert.ok(secHtml.includes('value="overrides"'), 'Studio HTML connect type selector must support overrides links');
+  assert.ok(secHtml.includes('X-Studio-Token'), 'Studio HTML must attach X-Studio-Token header when configured');
+
+  const { default: http } = await import('node:http');
+  const sendRawPost = (targetUrl, headers, bodyStr) => new Promise((resolve, reject) => {
+    const u = new URL(targetUrl);
+    const req = http.request({
+      hostname: u.hostname,
+      port: u.port,
+      path: u.pathname,
+      method: 'POST',
+      headers: {
+        'Content-Length': Buffer.byteLength(bodyStr),
+        ...headers
+      }
+    }, (res) => {
+      res.resume();
+      res.on('end', () => resolve({ status: res.statusCode }));
+    });
+    req.on('error', reject);
+    req.write(bodyStr);
+    req.end();
+  });
+
+  const secServer = await startStudioServer({
+    port: 54322,
+    host: '127.0.0.1',
+    workspaceRoot: studioSecurityWs,
+    autoOpen: false,
+    strictPort: true
+  });
+  try {
+    // Evil cross-origin POST must be rejected with 403
+    const evilOriginRes = await sendRawPost(`${secServer.url}/api/patch`, {
+      'Content-Type': 'application/json',
+      'Origin': 'https://evil.example.com',
+      'X-Studio-Token': secServer.studioToken
+    }, JSON.stringify({ modified_nodes: [] }));
+    assert.equal(evilOriginRes.status, 403, 'Cross-origin POST /api/patch must be rejected with 403');
+
+    // Sec-Fetch-Site: cross-site must be rejected with 403
+    const crossSiteRes = await sendRawPost(`${secServer.url}/api/patch`, {
+      'Content-Type': 'application/json',
+      'Sec-Fetch-Site': 'cross-site',
+      'X-Studio-Token': secServer.studioToken
+    }, JSON.stringify({ modified_nodes: [] }));
+    assert.equal(crossSiteRes.status, 403, 'Sec-Fetch-Site: cross-site POST must be rejected with 403');
+
+    // Invalid X-Studio-Token must be rejected with 403
+    const badTokRes = await fetch(`${secServer.url}/api/patch`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Studio-Token': 'wrong-token'
+      },
+      body: JSON.stringify({ modified_nodes: [] })
+    });
+    assert.equal(badTokRes.status, 403, 'Mismatched X-Studio-Token must be rejected with 403');
+
+    // Oversized body (> 1 MB) must be rejected with 413
+    const hugeBodyRes = await fetch(`${secServer.url}/api/patch`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Studio-Token': secServer.studioToken
+      },
+      body: JSON.stringify({ modified_nodes: [{ slug: 'x', padding: 'a'.repeat(1024 * 1024 + 100) }] })
+    });
+    assert.equal(hugeBodyRes.status, 413, 'Payload > 1MB must be rejected with 413');
+  } finally {
+    await secServer.close();
+  }
+  console.log('  ✔ Passed: Memory Studio enforces CSRF origin/token checks, 1MB body limit, and safe HTML escaping.\n');
+
+  // ==========================================
+  // TEST 36: YAML Block Scalars (| vs >) & Safe Quoting Round-Trip
+  // ==========================================
+  console.log('Test 36: YAML Block Scalars & Safe Scalar Serialization...');
+  const blockYaml = `---
+name: yaml-block-test
+description: |
+  Line one
+  Line two
+summary: >
+  Folded line one
+  folded line two
+
+  Second paragraph
+---
+# Body
+`;
+  const parsedBlock = parseYamlFrontmatter(blockYaml);
+  assert.equal(parsedBlock.frontmatter.description, 'Line one\nLine two', 'Literal | block scalar must preserve newlines');
+  assert.equal(parsedBlock.frontmatter.summary, 'Folded line one folded line two\nSecond paragraph', 'Folded > block scalar must fold single newlines and preserve paragraph break');
+
+  const trickDesc = 'Use key: value # with hash and [brackets]';
+  const serializedYaml = serializeYamlFrontmatter({
+    name: 'yaml-roundtrip',
+    domain: 'general',
+    description: trickDesc,
+    related: ['ref-one', 'item: two']
+  }, '# Body\n');
+  const reparsedTrick = parseYamlFrontmatter(serializedYaml);
+  assert.equal(reparsedTrick.frontmatter.description, trickDesc, 'Special YAML characters (: and #) must round-trip cleanly');
+  assert.deepEqual(reparsedTrick.frontmatter.related, ['ref-one', 'item: two'], 'Special characters inside array items must round-trip cleanly');
+  console.log('  ✔ Passed: YAML parser distinguishes | vs > block scalars and safely quotes special characters.\n');
+
+  // ==========================================
+  // TEST 37: Team Promotion Dirty-Repo Guard, Master Branch Support & Filename Spaces
+  // ==========================================
+  console.log('Test 37: prepareTeamPromotion Dirty Guard, Non-Main Branch & parsePorcelainZ...');
+  const { parsePorcelainZ } = await import('../plugins/knowledge-capture/mcp-server/core/memory-store.js');
+  const porcelainSample = 'M  file with spaces.md\0R  new name.md\0old name.md\0?? untracked item.md\0';
+  const porcelainEntries = parsePorcelainZ(porcelainSample);
+  assert.equal(porcelainEntries.length, 3, 'parsePorcelainZ must parse NUL-delimited statuses including renames');
+  assert.equal(porcelainEntries[0].file, 'file with spaces.md', 'Must preserve filenames with spaces intact');
+  assert.equal(porcelainEntries[1].file, 'new name.md');
+  assert.equal(porcelainEntries[2].file, 'untracked item.md');
+
+  // Team promotion on a repo whose default branch is 'master' and reject dirty working tree
+  const masterTeamWs = path.join(tempRoot, 'master-team-ws');
+  fs.mkdirSync(path.join(masterTeamWs, '.agents', 'rules', 'memory'), { recursive: true });
+  const masterTeamRepo = addTeamRepository('master-org', 'https://github.com/org/master-org.git', 'Master Org', masterTeamWs);
+  execFileSync('git', ['init', '-b', 'master'], { cwd: masterTeamRepo.dir, stdio: 'ignore' });
+  execFileSync('git', ['config', 'user.name', 'Test Agent'], { cwd: masterTeamRepo.dir, stdio: 'ignore' });
+  execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: masterTeamRepo.dir, stdio: 'ignore' });
+  fs.writeFileSync(path.join(masterTeamRepo.dir, 'README.md'), '# Master Team Repo\n', 'utf8');
+  execFileSync('git', ['add', '.'], { cwd: masterTeamRepo.dir, stdio: 'ignore' });
+  execFileSync('git', ['commit', '-m', 'Init master'], { cwd: masterTeamRepo.dir, stdio: 'ignore' });
+  // Ensure there is no remote named origin blocking local commit, or remove fake origin remote if set
+  try { execFileSync('git', ['remote', 'remove', 'origin'], { cwd: masterTeamRepo.dir, stdio: 'ignore' }); } catch {}
+
+  fs.writeFileSync(path.join(masterTeamRepo.dir, 'dirty-uncommitted.md'), 'temp', 'utf8');
+  assert.throws(
+    () => prepareTeamPromotion(masterTeamWs, { slug: 'master-rule', content: '# Master Rule\n', teamSlug: 'master-org' }),
+    /uncommitted change/,
+    'prepareTeamPromotion must reject dirty team repositories'
+  );
+  fs.unlinkSync(path.join(masterTeamRepo.dir, 'dirty-uncommitted.md'));
+
+  const masterPromo = prepareTeamPromotion(masterTeamWs, {
+    slug: 'master-rule',
+    content: '# Master Rule\nWorks on master branch.',
+    teamSlug: 'master-org'
+  });
+  assert.equal(masterPromo.success, true, 'prepareTeamPromotion must succeed on non-main master branch');
+  assert.ok(masterPromo.prCommand.includes('--base master'), 'PR command must target detected default branch (master)');
+  removeTeamRepository('master-org', true, masterTeamWs);
+  console.log('  ✔ Passed: parsePorcelainZ, dirty-repo guard, and non-main default branch promotion verified.\n');
+
+  // ==========================================
+  // TEST 38: Session-End Transcript JSONL Reader & Signal Evidence
+  // ==========================================
+  console.log('Test 38: Session-End JSONL transcript_path Reader & Signal Evidence...');
+  const transcriptFile = path.join(tempRoot, 'claude-transcript.jsonl');
+  fs.writeFileSync(transcriptFile, [
+    JSON.stringify({ type: 'user', message: { role: 'user', content: 'In the future, keep explanations short and concise with conclusions first.' } }),
+    JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: 'Understood.' } })
+  ].join('\n') + '\n', 'utf8');
+
+  const jsonlAudit = autoElicitSessionKnowledge(ws1Root, { transcript_path: transcriptFile });
+  assert.equal(jsonlAudit.elicitation_needed, true, 'Must elicit knowledge from Claude Code transcript_path JSONL');
+  assert.ok(jsonlAudit.signal_evidence && Array.isArray(jsonlAudit.signal_evidence.user_preference_excerpts), 'Audit must attach structured signal_evidence');
+  assert.ok(jsonlAudit.signal_evidence.user_preference_excerpts.length >= 1, 'signal_evidence.user_preference_excerpts must capture triggered transcript preference signals');
+  console.log('  ✔ Passed: JSONL transcript reader and signal_evidence verified.\n');
+
+  // ==========================================
+  // TEST 39: Calibrated Pure-Semantic Confidence & Knowledge-Capture MCP Server Protocol (roots/list & -32700)
+  // ==========================================
+  console.log('Test 39: MCP Server Protocol (-32700 Parse Error, Notifications, roots/list Resolution)...');
+  const { spawn } = await import('node:child_process');
+  const kcMcpPath = path.resolve('plugins/knowledge-capture/mcp-server/index.js');
+  const rootsWs = path.join(tempRoot, 'mcp-roots-ws');
+  const rootsMemDir = path.join(rootsWs, '.agents', 'rules', 'memory');
+  fs.mkdirSync(rootsMemDir, { recursive: true });
+  fs.writeFileSync(path.join(rootsMemDir, 'mcp-roots-canary.md'), `---
+name: mcp-roots-canary
+domain: platform
+type: platform-fact
+description: Canary rule discovered solely via MCP roots/list
+verified: 2026-04-01
+---
+# MCP Roots Canary
+Discovered from MCP client roots/list URI.
+`, 'utf8');
+
+  await new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [kcMcpPath], {
+      cwd: tempRoot, // Intentionally NOT rootsWs
+      env: { ...process.env, WORKSPACE_ROOT: '', WORKSPACE_DIR: '' },
+      stdio: ['pipe', 'pipe', 'pipe']
+    });
+
+    const responses = [];
+    let buffer = '';
+    let settled = false;
+    const timeout = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        child.kill();
+        reject(new Error('Timed out waiting for knowledge-capture MCP server test responses'));
+      }
+    }, 5000);
+
+    child.stdout.on('data', (chunk) => {
+      buffer += chunk.toString('utf8');
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+      for (const l of lines) {
+        if (!l.trim()) continue;
+        const msg = JSON.parse(l);
+        responses.push(msg);
+
+        // If server sends roots/list request, reply immediately with file:// URI for rootsWs
+        if (msg.method === 'roots/list' && msg.id !== undefined) {
+          child.stdin.write(JSON.stringify({
+            jsonrpc: '2.0',
+            id: msg.id,
+            result: {
+              roots: [{ uri: `file://${rootsWs}`, name: 'rootsWs' }]
+            }
+          }) + '\n');
+        }
+
+        // Once we receive initialize, parse-error (-32700), and tools/call result (id: 2)
+        if (msg.id === 2) {
+          settled = true;
+          clearTimeout(timeout);
+          child.kill();
+          try {
+            const initResp = responses.find(r => r.id === 1);
+            assert.equal(initResp.result.protocolVersion, '2025-03-26', 'Server must negotiate supported protocolVersion');
+
+            const parseErrResp = responses.find(r => r.error && r.error.code === -32700);
+            assert.ok(parseErrResp, 'Invalid JSON line must return JSON-RPC -32700 Parse Error');
+
+            // Ensure no response was emitted for notifications/initialized
+            assert.equal(responses.some(r => r.id === undefined && !r.method), false, 'Notifications must never receive JSON-RPC responses');
+
+            const summaryText = msg.result.content[0].text;
+            assert.ok(summaryText.includes('mcp-roots-canary'), 'Tool call without workspaceRoot must resolve workspace via MCP roots/list');
+            resolve();
+          } catch (e) {
+            reject(e);
+          }
+        }
+      }
+    });
+
+    child.on('error', (err) => {
+      if (!settled) {
+        settled = true;
+        clearTimeout(timeout);
+        reject(err);
+      }
+    });
+
+    // 1. Initialize with roots capability
+    child.stdin.write(JSON.stringify({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: { protocolVersion: '2025-03-26', capabilities: { roots: { listChanged: true } } }
+    }) + '\n');
+
+    // 2. Notification (must NOT emit response, triggers roots/list)
+    child.stdin.write(JSON.stringify({
+      jsonrpc: '2.0',
+      method: 'notifications/initialized'
+    }) + '\n');
+
+    // 3. Invalid JSON (must emit -32700)
+    child.stdin.write('{not valid json\n');
+
+    // 4. Call get_memory_summary WITHOUT workspaceRoot after slight delay for roots handshake
+    setTimeout(() => {
+      if (!settled) {
+        child.stdin.write(JSON.stringify({
+          jsonrpc: '2.0',
+          id: 2,
+          method: 'tools/call',
+          params: { name: 'get_memory_summary', arguments: {} }
+        }) + '\n');
+      }
+    }, 150);
+  });
+  console.log('  ✔ Passed: MCP server handles -32700 parse errors, notification suppression, and client roots/list.\n');
+
+  // ==========================================
+  // TEST 40: bin/install.js & bin/plugin-manager.js Fixes
+  // ==========================================
+  console.log('Test 40: Installer isNpxExecution /tmp Safety & Plugin ID Validation...');
+  const { createRequire } = await import('node:module');
+  const requireCjs = createRequire(import.meta.url);
+  const { isNpxExecution } = requireCjs('../bin/install.js');
+  const { resolvePluginInstallPath } = requireCjs('../bin/plugin-manager.js');
+
+  assert.equal(isNpxExecution('/tmp/agent-marketplace'), false, '/tmp clone must NOT be misclassified as npx execution');
+  assert.equal(isNpxExecution('/home/user/templates/agent-marketplace'), false, 'Path containing "temp" must NOT be misclassified as npx execution');
+  assert.equal(isNpxExecution('/home/user/.npm/_npx/12345/node_modules/antigravity-plugins'), true, 'Actual _npx cache path must return true');
+  assert.throws(
+    () => resolvePluginInstallPath('../evil-plugin', 'workspace', tempRoot),
+    /Invalid plugin ID/,
+    'Path-traversal pluginId must be rejected by assertValidPluginId'
+  );
+
+  let badEnableErr = null;
+  try {
+    execFileSync(process.execPath, [path.resolve('bin/install.js'), '--enable', 'non-existent-plugin-xyz'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+  } catch (err) {
+    badEnableErr = err;
+  }
+  assert.ok(badEnableErr && badEnableErr.status === 1, '--enable with unknown plugin ID must exit with code 1');
+  console.log('  ✔ Passed: Installer avoids /tmp false-positives and enforces strict plugin ID validation.\n');
+
+  // ==========================================
+  // TEST 41: Syran Persona Trade-Off Missing Scores, Weight 0 & Logic Evidence
+  // ==========================================
+  console.log('Test 41: Syran Missing-Score Minimize Guard, Zero Weight & Consult Evidence...');
+  const missingEval = evaluateArchitecturalTradeoffs(
+    [
+      { name: 'Measured Option', scores: { latency: 10, reliability: 9 } },
+      { name: 'Incomplete Option', scores: { reliability: 9 } } // latency intentionally omitted!
+    ],
+    [
+      { name: 'latency', weight: 3.0, direction: 'minimize' },
+      { name: 'reliability', weight: 1.0, direction: 'maximize' }
+    ]
+  );
+  assert.equal(missingEval.optimalCandidate, 'Measured Option', 'Missing minimize metric must NOT beat measured option by defaulting to 0');
+  assert.ok(missingEval.incompleteDataWarnings.length >= 1, 'Must emit incompleteDataWarnings for missing metrics');
+  assert.equal(contractionPattern.test(missingEval.officerCounsel), false, 'Syran counsel with warnings must still avoid all contractions');
+
+  const zeroWeightProb = evaluateProbability([
+    { label: 'Excluded Course', weight: 0, risk: 0.0 },
+    { label: 'Active Course', weight: 1.0, risk: 0.2 }
+  ]);
+  const excludedEntry = zeroWeightProb.evaluations.find(e => e.label === 'Excluded Course');
+  assert.equal(excludedEntry.posterior_probability, 0, 'weight: 0 must produce 0 posterior probability rather than falling back to 1.0');
+
+  const consultRes = consultLogic('We already spent 3 weeks on this cache so we must keep it.');
+  assert.equal(consultRes.logical_validity, 'COMPROMISED');
+  assert.ok(Array.isArray(consultRes.evidence) && consultRes.evidence.length >= 1, 'consultLogic must attach structured evidence');
+  assert.ok(Array.isArray(consultRes.epistemic_gaps), 'consultLogic must report epistemic_gaps');
+  assert.ok(consultRes.confidence_assessment && consultRes.confidence_assessment.level, 'consultLogic must include confidence_assessment');
+  console.log('  ✔ Passed: Syran handles missing minimize scores, weight=0, and structured logical evidence accurately.\n');
+
   console.log('============================================================');
   console.log('🎉 ALL TESTS PASSED SUCCESSFULLY!');
   console.log('============================================================\n');

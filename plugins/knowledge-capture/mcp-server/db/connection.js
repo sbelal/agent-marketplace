@@ -57,18 +57,29 @@ export function getDatabase() {
       `);
     } catch {}
 
-    // Migration check for workspace_id partitioning
+    // Migration check for schema_version 2 (multi-team/subdir path keys, graph source_layer, binary BLOB vectors)
+    let needsV2Migration = false;
     try {
       const tableInfo = db.prepare('PRAGMA table_info(memories)').all();
       const hasWorkspaceId = tableInfo.some(col => col.name === 'workspace_id');
-      if (tableInfo.length > 0 && !hasWorkspaceId) {
-        db.exec(`
-          DROP TABLE IF EXISTS memories;
-          DROP TABLE IF EXISTS memories_fts;
-          DROP TABLE IF EXISTS memories_graph;
-        `);
+      const hasMetaTable = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='meta'").get();
+      let schemaVersion = null;
+      if (hasMetaTable) {
+        const verRow = db.prepare("SELECT val FROM meta WHERE key = 'schema_version'").get();
+        schemaVersion = verRow ? verRow.val : null;
+      }
+      if (tableInfo.length > 0 && (!hasWorkspaceId || schemaVersion !== '2')) {
+        needsV2Migration = true;
       }
     } catch {}
+
+    if (needsV2Migration) {
+      db.exec(`
+        DROP TABLE IF EXISTS memories;
+        DROP TABLE IF EXISTS memories_fts;
+        DROP TABLE IF EXISTS memories_graph;
+      `);
+    }
 
     // Initialize core schema
     db.exec(`
@@ -78,21 +89,23 @@ export function getDatabase() {
       );
 
       CREATE TABLE IF NOT EXISTS memories (
-        workspace_id TEXT,
-        layer TEXT,
-        slug TEXT,
+        workspace_id TEXT NOT NULL,
+        layer TEXT NOT NULL,
+        team_slug TEXT NOT NULL DEFAULT '',
+        path TEXT NOT NULL,
+        slug TEXT NOT NULL,
         domain TEXT,
         type TEXT,
         verified TEXT,
         trigger TEXT,
-        path TEXT,
         mtime INTEGER,
-        trigger_vector TEXT,
-        content_vector TEXT,
-        entity_vector TEXT,
-        team_slug TEXT,
-        PRIMARY KEY (workspace_id, layer, slug)
+        trigger_vector BLOB,
+        content_vector BLOB,
+        entity_vector BLOB,
+        PRIMARY KEY (workspace_id, layer, team_slug, path)
       );
+
+      CREATE INDEX IF NOT EXISTS idx_memories_ws_slug ON memories(workspace_id, slug);
 
       CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
         slug,
@@ -102,15 +115,18 @@ export function getDatabase() {
         content,
         layer UNINDEXED,
         workspace_id UNINDEXED,
+        team_slug UNINDEXED,
         tokenize='porter unicode61'
       );
 
       CREATE TABLE IF NOT EXISTS memories_graph (
-        workspace_id TEXT,
-        source_slug TEXT,
-        target_slug TEXT,
-        rel_type TEXT,
-        PRIMARY KEY (workspace_id, source_slug, target_slug, rel_type)
+        workspace_id TEXT NOT NULL,
+        source_layer TEXT NOT NULL DEFAULT 'workspace',
+        source_team_slug TEXT NOT NULL DEFAULT '',
+        source_slug TEXT NOT NULL,
+        target_slug TEXT NOT NULL,
+        rel_type TEXT NOT NULL,
+        PRIMARY KEY (workspace_id, source_layer, source_team_slug, source_slug, target_slug, rel_type)
       );
 
       CREATE TABLE IF NOT EXISTS telemetry (
@@ -126,22 +142,8 @@ export function getDatabase() {
       );
     `);
 
-    // Ensure migration columns exist for existing databases
     try {
-      const cols = db.prepare('PRAGMA table_info(memories)').all();
-      const colNames = new Set(cols.map(c => c.name));
-      if (!colNames.has('trigger_vector')) {
-        db.exec(`
-          ALTER TABLE memories ADD COLUMN trigger_vector TEXT;
-          ALTER TABLE memories ADD COLUMN content_vector TEXT;
-          ALTER TABLE memories ADD COLUMN entity_vector TEXT;
-        `);
-      }
-      if (!colNames.has('team_slug')) {
-        db.exec(`
-          ALTER TABLE memories ADD COLUMN team_slug TEXT;
-        `);
-      }
+      db.prepare("INSERT OR REPLACE INTO meta (key, val) VALUES ('schema_version', '2')").run();
     } catch {}
 
     try {

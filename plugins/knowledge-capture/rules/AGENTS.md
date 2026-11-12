@@ -126,8 +126,8 @@ At the start of complex tasks, consult memory with minimal token overhead using 
 
 1. **Startup Update Audit:** `SessionStart` hook audits for upstream updates. When available, an actionable notice is injected into the session report.
 2. **Autonomous Upgrade Execution:**
-   * **Source-Mode (`plugins.json`):** Run `node ./bin/install.js --update-source` or `git pull --ff-only`.
-   * **Copy-Mode (`.agents/plugins/`):** Run `node ./bin/install.js --update <target|all>`.
+   * **Source-Mode (`plugins.json`):** Run `npx git+https://github.com/sbelal/agent-marketplace.git --update-source` or `git pull --ff-only`.
+   * **Copy-Mode (`.agents/plugins/`):** Run `npx git+https://github.com/sbelal/agent-marketplace.git --update <target|all>`.
    * **Data Safety:** Personal memory files in `~/.gemini/knowledge-capture/` are decoupled from plugin code and never overwritten.
 
 ---
@@ -135,7 +135,7 @@ At the start of complex tasks, consult memory with minimal token overhead using 
 ## 7. State-Aware Interactive Setup Protocol
 
 When setup or configuration is requested (e.g. `/kc-init`, `/marketplace`):
-1. **Never Show Generic Terminal Readline Prompts in Chat:** Query `node ./bin/install.js --status-json` first.
+1. **Never Show Generic Terminal Readline Prompts in Chat:** Query `npx git+https://github.com/sbelal/agent-marketplace.git --status-json` first (or use the cached local script in `~/.gemini/sources/agent-marketplace/bin/install.js` if already cloned).
 2. **Option Pruning:** Omit redundant options (e.g. do not offer global source install if already active).
 3. **Native Interfaces:** Use `ask_question` modal in Antigravity, and interactive prompts in Claude Code.
 4. **Headless Execution:** Run operations with non-interactive CLI flags (`--private-url`, `--scope`, etc.).
