@@ -241,8 +241,18 @@ export function autoElicitSessionKnowledge(workspaceRoot = process.cwd(), option
     ...toTextArray(options.recentCommands)
   ];
 
-  if (typeof options.transcript === 'string') {
-    const errorMatches = options.transcript.match(/(?:Error:|Exception:|failed with exit code \d+|ENOENT|ECONNREFUSED|TypeError:)[^\n]+/gi);
+  if (Array.isArray(options.transcript)) {
+    for (const item of options.transcript) {
+      if (item && typeof item === 'object' && item.content) {
+        const textContent = typeof item.content === 'string' ? item.content : JSON.stringify(item.content);
+        const errorMatches = textContent.match(/(?:Error:|Exception:|failed with exit code \d+|ENOENT|ECONNREFUSED|TypeError:|AssertionError:)[^\n]+/gi);
+        if (errorMatches) {
+          errorTexts.push(...errorMatches.slice(0, 2));
+        }
+      }
+    }
+  } else if (typeof options.transcript === 'string') {
+    const errorMatches = options.transcript.match(/(?:Error:|Exception:|failed with exit code \d+|ENOENT|ECONNREFUSED|TypeError:|AssertionError:)[^\n]+/gi);
     if (errorMatches) {
       errorTexts.push(...errorMatches.slice(0, 3));
     }

@@ -35,7 +35,9 @@ export async function renderVisualMemoryStudio(workspaceRoot = process.cwd(), op
   // Determine artifact directory for HTML persistence
   let artifactDir = options.artifactDir || process.env.ARTIFACT_DIR;
   if (!artifactDir) {
-    if (process.env.GEMINI_HOME) {
+    if (process.env.ANTIGRAVITY_CONVERSATION_ID) {
+      artifactDir = path.join(os.homedir(), '.gemini', 'jetski', 'brain', process.env.ANTIGRAVITY_CONVERSATION_ID);
+    } else if (process.env.GEMINI_HOME) {
       artifactDir = path.join(process.env.GEMINI_HOME, 'artifacts');
     } else {
       artifactDir = path.join(paths.workspaceDir, '..');

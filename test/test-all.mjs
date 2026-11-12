@@ -1149,6 +1149,16 @@ Always execute tests with timeout guards.
   });
   assert.equal(debugElicitation.elicitation_needed, true, 'Elicitation should trigger on zero-code error logs');
   assert.ok(debugElicitation.suggested_candidates.some(c => c.elicited_from === 'zero_code_debugging'), 'Should propose debugging gotcha candidate');
+
+  const arrayTranscriptDebug = autoElicitSessionKnowledge(ws1Root, {
+    transcript: [
+      { role: 'user', content: 'Run integration check' },
+      { role: 'assistant', content: 'Running command...' },
+      { role: 'tool', content: 'TypeError: Cannot access uninitialized variable in database-pool' }
+    ]
+  });
+  assert.equal(arrayTranscriptDebug.elicitation_needed, true, 'Array transcript with error message must trigger elicitation');
+  assert.ok(arrayTranscriptDebug.suggested_candidates.some(c => c.elicited_from === 'zero_code_debugging'));
   console.log('  ✔ Passed: Trajectory-based zero-code debugging and user working preferences elicited accurately.\n');
 
   // ==========================================
@@ -1193,6 +1203,12 @@ Always execute tests with timeout guards.
   assert.ok(inChatHtml.includes('MiniD3'), 'Self-contained MiniD3 engine must be embedded for CSP compliance');
   assert.ok(inChatHtml.includes('https://www.gstatic.com/antigravity/web/dev/tailwindcss.min.js'), 'Antigravity Tailwind script must be referenced');
   assert.ok(inChatHtml.includes('var(--background'), 'Antigravity theme token must be styled');
+
+  // Test automatic artifact directory resolution via ANTIGRAVITY_CONVERSATION_ID
+  process.env.ANTIGRAVITY_CONVERSATION_ID = 'test-conv-987';
+  const autoArtifactResult = await renderVisualMemoryStudio(ws1Root, { mode: 'in_chat', fileName: 'auto-studio.html' });
+  assert.ok(autoArtifactResult.artifactPath.includes('test-conv-987'), 'Must resolve artifact path using ANTIGRAVITY_CONVERSATION_ID');
+  delete process.env.ANTIGRAVITY_CONVERSATION_ID;
 
   // 2. Claude Code Browser Fallback Mode
   const browserResult = await renderVisualMemoryStudio(ws1Root, {

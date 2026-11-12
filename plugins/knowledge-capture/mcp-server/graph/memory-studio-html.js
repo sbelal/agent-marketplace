@@ -55,6 +55,8 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd(), option
       border-radius: 12px;
       padding: 16px;
       width: 340px;
+      max-height: ${isCompact ? '388px' : 'calc(100vh - 32px)'};
+      overflow-y: auto;
       display: flex;
       flex-direction: column;
       gap: 12px;
@@ -165,7 +167,7 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd(), option
       border-radius: 12px;
       padding: 20px;
       width: 360px;
-      max-height: calc(100vh - 32px);
+      max-height: ${isCompact ? '388px' : 'calc(100vh - 32px)'};
       overflow-y: auto;
       box-shadow: -10px 0 25px -5px rgba(0, 0, 0, 0.5);
       transition: right 0.3s ease;
