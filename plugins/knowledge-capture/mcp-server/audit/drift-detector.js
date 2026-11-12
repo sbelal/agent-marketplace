@@ -85,7 +85,7 @@ function extractAffirmativeConfigReferences(body) {
 }
 
 function analyzeContradictionsAndDrifts(workspaceRoot, entryVectors, allKnownSlugs, shadowedSet, options = {}) {
-  const threshold = typeof options.threshold === 'number' ? options.threshold : 0.65;
+  const threshold = (typeof options.threshold === 'number' && Number.isFinite(options.threshold)) ? options.threshold : 0.65;
   const contradictions = [];
   const ambiguousPairs = [];
   const drifts = [];
@@ -283,7 +283,7 @@ function analyzeContradictionsAndDrifts(workspaceRoot, entryVectors, allKnownSlu
     }
 
     if (targetNodeEngine && /node/i.test(body)) {
-      const reqMatch = targetNodeEngine.match(/>=?\s*([0-9]+)/);
+      const reqMatch = targetNodeEngine.match(/(?:>=?\s*|\^|~|^v?)([0-9]+)/);
       if (reqMatch) {
         const minRequired = parseInt(reqMatch[1], 10);
         // Strip migration expressions like "from Node 18 to Node 22" before scanning required versions

@@ -51,7 +51,8 @@ export function getTeamRepositories(workspaceRoot = process.cwd()) {
     const slug = repo && typeof repo.slug === 'string' ? repo.slug.trim() : '';
     if (!slug || !/^[a-z0-9_-]+$/i.test(slug)) continue;
 
-    const repoDir = path.join(teamBaseDir, slug);
+    const defaultSubDir = path.join(teamBaseDir, slug);
+    const repoDir = (repo._legacyRoot && !fs.existsSync(defaultSubDir)) ? teamBaseDir : defaultSubDir;
     const gitDir = path.join(repoDir, '.git');
     const isGit = fs.existsSync(gitDir);
 
@@ -335,7 +336,23 @@ export function syncTeamRepositories(arg1 = process.cwd(), arg2 = {}) {
     if (targetSlug && repo.slug !== targetSlug) continue;
     if (!repo.active || !repo.isGit || !repo.url) continue;
 
+    if (!repo.isClean) {
+      syncResults.push({ slug: repo.slug, status: 'dirty-working-copy' });
+      continue;
+    }
+
     try {
+      const branch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
+        cwd: repo.path,
+        encoding: 'utf8',
+        timeout: 2000,
+        env: GIT_EXEC_ENV,
+        stdio: ['ignore', 'pipe', 'ignore']
+      }).trim();
+      if (branch.startsWith('promote/')) {
+        syncResults.push({ slug: repo.slug, status: 'on-promote-branch', branch });
+        continue;
+      }
       execFileSync('git', ['pull', '--ff-only'], {
         cwd: repo.path,
         timeout: 8000,

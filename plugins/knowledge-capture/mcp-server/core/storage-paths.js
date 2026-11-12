@@ -81,7 +81,8 @@ export function getSettings(storageDir = getStorageDir()) {
         slug: 'default',
         url: settings.teamRepoUrl,
         active: true,
-        name: 'Default Team Memory'
+        name: 'Default Team Memory',
+        _legacyRoot: true
       });
     }
     return settings;
@@ -137,10 +138,12 @@ export function resolveStoragePaths(workspaceRoot = process.cwd()) {
     for (const repo of settings.teamRepos) {
       const slug = repo && typeof repo.slug === 'string' ? repo.slug.trim() : '';
       if (repo && slug && /^[a-z0-9_-]+$/i.test(slug) && repo.active !== false) {
+        const defaultSubDir = path.join(teamBaseDir, slug);
+        const dir = (repo._legacyRoot && !fs.existsSync(defaultSubDir)) ? teamBaseDir : defaultSubDir;
         activeTeamDirs.push({
           slug,
           name: repo.name || slug,
-          dir: path.join(teamBaseDir, slug),
+          dir,
           url: repo.url || ''
         });
       }

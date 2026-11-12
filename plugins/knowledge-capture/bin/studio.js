@@ -54,7 +54,12 @@ function isAuthorizedRequest(req, studioToken) {
   return true;
 }
 
-function parseCliArgs(args) {
+function formatUrlHost(host) {
+  if (!host || typeof host !== 'string') return '127.0.0.1';
+  return host.includes(':') && !host.startsWith('[') ? `[${host}]` : host;
+}
+
+export function parseCliArgs(args) {
   const options = {
     port: 4242,
     host: '127.0.0.1',
@@ -66,10 +71,20 @@ function parseCliArgs(args) {
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (arg === '--port' || arg === '-p') {
-      options.port = parseInt(args[++i], 10) || 4242;
+      if (i + 1 >= args.length) {
+        throw new Error(`Missing value for ${arg}`);
+      }
+      const parsedPort = parseInt(args[++i], 10);
+      options.port = Number.isInteger(parsedPort) && parsedPort >= 1 && parsedPort <= 65535 ? parsedPort : 4242;
     } else if (arg === '--host' || arg === '-h') {
+      if (i + 1 >= args.length) {
+        throw new Error(`Missing value for ${arg}`);
+      }
       options.host = args[++i] || '127.0.0.1';
     } else if (arg === '--workspace' || arg === '-w') {
+      if (i + 1 >= args.length || !args[i + 1]) {
+        throw new Error(`Missing path for ${arg}`);
+      }
       options.workspace = path.resolve(args[++i]);
     } else if (arg === '--no-open') {
       options.autoOpen = false;
@@ -121,6 +136,7 @@ export function openBrowser(rawUrl) {
 
 export function startStudioServer(options = {}) {
   const host = options.host || '127.0.0.1';
+  const urlHost = formatUrlHost(host);
   const initialPort = options.port || 4242;
   const workspaceRoot = options.workspaceRoot || options.workspace || process.cwd();
   const autoOpen = options.autoOpen ?? true;
@@ -153,16 +169,26 @@ export function startStudioServer(options = {}) {
           return;
         }
 
-        const url = new URL(req.url, `http://${host}:${portAttempt}`);
-        const pathname = url.pathname;
-
         try {
+          let url;
+          try {
+            url = new URL(req.url || '/', `http://${urlHost}:${portAttempt}`);
+          } catch {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Invalid request URL' }));
+            return;
+          }
+          const pathname = url.pathname;
+
           if (req.method === 'GET' && (pathname === '/' || pathname === '/index.html')) {
             const html = generateKnowledgeGraphHtml(workspaceRoot, {
-              serverUrl: `http://${host}:${portAttempt}`,
+              serverUrl: `http://${urlHost}:${portAttempt}`,
               studioToken
             });
-            res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+            res.writeHead(200, {
+              'Content-Type': 'text/html; charset=utf-8',
+              'Cache-Control': 'no-store'
+            });
             res.end(html);
             return;
           }
@@ -201,8 +227,10 @@ export function startStudioServer(options = {}) {
               totalBytes += chunk.length;
               if (totalBytes > MAX_PATCH_BODY_BYTES) {
                 abortedTooLarge = true;
-                res.writeHead(413, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ ok: false, success: false, errors: ['Payload too large (max 1MB)'] }));
+                if (!res.headersSent) {
+                  res.writeHead(413, { 'Content-Type': 'application/json' });
+                  res.end(JSON.stringify({ ok: false, success: false, errors: ['Payload too large (max 1MB)'] }));
+                }
                 req.destroy();
                 return;
               }
@@ -219,8 +247,10 @@ export function startStudioServer(options = {}) {
                 res.writeHead(200, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify(patchResult));
               } catch (err) {
-                res.writeHead(400, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ ok: false, success: false, errors: [err.message] }));
+                if (!res.headersSent) {
+                  res.writeHead(400, { 'Content-Type': 'application/json' });
+                  res.end(JSON.stringify({ ok: false, success: false, errors: [err.message] }));
+                }
               }
             });
             return;
@@ -230,8 +260,10 @@ export function startStudioServer(options = {}) {
           res.writeHead(404, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'Not found' }));
         } catch (err) {
-          res.writeHead(500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: err.message }));
+          if (!res.headersSent) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: err.message }));
+          }
         }
       });
 
@@ -245,7 +277,7 @@ export function startStudioServer(options = {}) {
       });
 
       server.listen(portAttempt, host, () => {
-        const boundUrl = `http://${host}:${portAttempt}`;
+        const boundUrl = `http://${urlHost}:${portAttempt}`;
         if (autoOpen) {
           openBrowser(boundUrl);
         }
@@ -270,7 +302,13 @@ const isDirectCli = process.argv[1] && (
 );
 
 if (isDirectCli) {
-  const cliOptions = parseCliArgs(process.argv.slice(2));
+  let cliOptions;
+  try {
+    cliOptions = parseCliArgs(process.argv.slice(2));
+  } catch (err) {
+    console.error(`Invalid arguments: ${err.message}`);
+    process.exit(1);
+  }
   startStudioServer(cliOptions).then(({ url }) => {
     console.log(`
 🧠 Knowledge Capture Studio

@@ -262,7 +262,8 @@ export function autoElicitSessionKnowledge(workspaceRoot = process.cwd(), option
       result.signal_evidence.user_preference_excerpts.push(text.slice(0, 200));
       const preferred = preferMatch[1].trim();
       const avoided = preferMatch[2].trim();
-      const slug = `user-preference-${preferred.replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase()}`.replace(/--+/g, '-').slice(0, 40);
+      const prefPart = preferred.replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase().replace(/--+/g, '-').slice(0, 24).replace(/^-+|-+$/g, '') || 'custom';
+      const slug = `user-preference-${prefPart}`.slice(0, 40).replace(/-+$/g, '');
       if (!result.suggested_candidates.some(c => c.slug === slug)) {
         result.suggested_candidates.push({
           slug,
@@ -327,7 +328,7 @@ export function autoElicitSessionKnowledge(workspaceRoot = process.cwd(), option
       const rawSnippet = errorMatch[0].trim();
       const errSnippet = rawSnippet.slice(0, 60);
       const cleanPart = errSnippet.replace(/^(?:Error|Exception|TypeError|AssertionError|Fatal|Crash):\s*/i, '');
-      const errSlugPart = cleanPart.replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase().replace(/--+/g, '-').slice(0, 30);
+      const errSlugPart = cleanPart.replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase().replace(/--+/g, '-').slice(0, 30).replace(/^-+|-+$/g, '');
       const slug = `debug-gotcha-${errSlugPart || 'runtime-issue'}`;
       if (!result.suggested_candidates.some(c => c.slug === slug)) {
         result.suggested_candidates.push({

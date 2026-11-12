@@ -6,7 +6,12 @@
  */
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
+
+function getDefaultHomeDir() {
+  return process.env.USERPROFILE || process.env.HOME || os.homedir();
+}
 
 // ==========================================
 // PURE QUERIES (Resolution & Calculation)
@@ -32,7 +37,7 @@ function normalizePath(inputPath) {
  * @param {string} homeDir 
  * @returns {string} Absolute path to plugins.json
  */
-function resolveSourceConfigPath(scope, workspaceDir = process.cwd(), homeDir = (process.env.USERPROFILE || process.env.HOME || '')) {
+function resolveSourceConfigPath(scope, workspaceDir = process.cwd(), homeDir = getDefaultHomeDir()) {
   if (scope === 'workspace') {
     return path.join(workspaceDir, '.agents', 'plugins.json');
   }

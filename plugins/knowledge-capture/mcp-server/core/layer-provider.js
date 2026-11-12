@@ -12,12 +12,16 @@ import { atomicWriteFileSync } from './memory-store.js';
 function findFileCaseInsensitive(dir, fileName) {
   if (!fs.existsSync(dir)) return null;
   const directPath = path.join(dir, fileName);
-  if (fs.existsSync(directPath)) return directPath;
+  try {
+    if (fs.existsSync(directPath) && fs.statSync(directPath).isFile()) {
+      return directPath;
+    }
+  } catch {}
   try {
     const target = fileName.toLowerCase();
-    const files = fs.readdirSync(dir);
-    const match = files.find(f => f.toLowerCase() === target);
-    return match ? path.join(dir, match) : null;
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    const match = entries.find(e => e.isFile() && e.name.toLowerCase() === target);
+    return match ? path.join(dir, match.name) : null;
   } catch {
     return null;
   }
@@ -135,11 +139,7 @@ export class LayerProvider {
     if (this.paths.activeTeamDirs && this.paths.activeTeamDirs.length > 0) {
       if (teamSlug) {
         const match = this.paths.activeTeamDirs.find(r => r.slug.toLowerCase() === teamSlug.toLowerCase());
-        if (match) return match.dir;
-        if (teamSlug.toLowerCase() === 'default' && fs.existsSync(this.paths.teamDir)) {
-          return this.paths.teamDir;
-        }
-        return null;
+        return match ? match.dir : null;
       }
       return this.paths.activeTeamDirs[0].dir;
     }

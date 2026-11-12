@@ -90,10 +90,11 @@ export function mineGitHistoryMemories(workspaceRoot = process.cwd(), options = 
       .toLowerCase()
       .replace(/^(fix|feat|chore|refactor|docs|test|style|perf)\s*(\([^)]+\))?:\s*/i, '')
       .replace(/[^a-z0-9]+/g, '-')
-      .replace(/^-|-$/g, '')
-      .slice(0, 45);
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 45)
+      .replace(/-+$/g, '');
 
-    const slug = `git-${cleanSubject}`.replace(/^-|-$/g, '');
+    const slug = cleanSubject ? `git-${cleanSubject}` : `git-${hash.slice(0, 8)}`;
     if (!slug || seenSlugs.has(slug) || existingSlugs.has(slug)) continue;
     seenSlugs.add(slug);
 

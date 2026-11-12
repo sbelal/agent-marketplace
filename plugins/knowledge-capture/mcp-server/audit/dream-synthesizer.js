@@ -7,7 +7,7 @@ import { getActiveEmbeddingConfig } from '../embeddings/onnx-provider.js';
 import { loadCachedVectorsMap } from '../db/indexer.js';
 
 function clusterItemsForConsolidation(workspaceRoot, items, options = {}) {
-  const threshold = typeof options.threshold === 'number' ? options.threshold : 0.65;
+  const threshold = (typeof options.threshold === 'number' && Number.isFinite(options.threshold)) ? options.threshold : 0.65;
   const clusters = [];
   const assigned = new Set();
 
@@ -41,16 +41,17 @@ function clusterItemsForConsolidation(workspaceRoot, items, options = {}) {
       const memberSlugs = clusterMembers.map(m => m.slug);
       const unifiedDomain = primary.domain;
 
+      const prefix = primary.slug.split('-')[0];
       const combinedWords = memberSlugs
         .map(s => s.replace(/^(k8s|git|ci|docker|tf)-/, ''))
         .join('-')
         .split('-')
-        .filter((w, idx, arr) => arr.indexOf(w) === idx)
+        .filter((w, idx, arr) => w && arr.indexOf(w) === idx && w !== prefix)
         .slice(0, 5)
         .join('-');
 
-      const prefix = primary.slug.split('-')[0];
-      const targetSlug = `${prefix}-${combinedWords}`.slice(0, 45).replace(/-+$/, '');
+      const rawSlug = combinedWords ? `${prefix}-${combinedWords}` : prefix;
+      const targetSlug = (rawSlug.slice(0, 45).replace(/^-+|-+$/g, '')) || 'consolidated-memory';
 
       const triggers = clusterMembers.map(m => m.trigger.replace(/^When\s+/i, '').replace(/\.$/, ''));
       const unifiedTrigger = `When handling ${unifiedDomain} operations involving ${triggers.join(' or ')}`;

@@ -8,6 +8,7 @@
  */
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const readline = require('readline');
 const { execFileSync } = require('child_process');
@@ -42,7 +43,7 @@ const {
 
 const REPO_ROOT = path.resolve(__dirname, '..');
 const WORKSPACE_DIR = process.cwd();
-const HOME_DIR = process.env.USERPROFILE || process.env.HOME || '';
+const HOME_DIR = process.env.USERPROFILE || process.env.HOME || os.homedir();
 const REMOTE_REPO_URL = 'https://github.com/sbelal/agent-marketplace.git';
 
 /**
@@ -725,23 +726,33 @@ Options:
   if (updateArg || hasFlag('--update')) {
     const target = (!updateArg || updateArg.startsWith('-') ? 'all' : updateArg).toLowerCase();
     const inventory = getPluginInventory(REPO_ROOT, WORKSPACE_DIR, HOME_DIR);
+    if (target !== 'all' && !inventory.items.some(p => p.id.toLowerCase() === target)) {
+      const validIds = inventory.items.map(p => p.id).join(', ') || '(none)';
+      console.error(`\x1b[31mError: Unknown plugin '${updateArg}'. Available plugins: ${validIds}\x1b[0m`);
+      process.exit(1);
+    }
     let count = 0;
 
     for (const p of inventory.items) {
       if (target === 'all' || target === p.id.toLowerCase()) {
-        if (p.workspaceInstalled) {
-          const res = updatePlugin(p.id, REPO_ROOT, 'workspace', WORKSPACE_DIR, HOME_DIR);
-          if (res.updated) {
-            console.log(`\x1b[32m✔ Updated ${p.name} (workspace) v${res.fromVersion} -> v${res.toVersion}\x1b[0m`);
-            count++;
+        try {
+          if (p.workspaceInstalled) {
+            const res = updatePlugin(p.id, REPO_ROOT, 'workspace', WORKSPACE_DIR, HOME_DIR);
+            if (res.updated) {
+              console.log(`\x1b[32m✔ Updated ${p.name} (workspace) v${res.fromVersion} -> v${res.toVersion}\x1b[0m`);
+              count++;
+            }
           }
-        }
-        if (p.globalInstalled) {
-          const res = updatePlugin(p.id, REPO_ROOT, 'global', WORKSPACE_DIR, HOME_DIR);
-          if (res.updated) {
-            console.log(`\x1b[32m✔ Updated ${p.name} (global) v${res.fromVersion} -> v${res.toVersion}\x1b[0m`);
-            count++;
+          if (p.globalInstalled) {
+            const res = updatePlugin(p.id, REPO_ROOT, 'global', WORKSPACE_DIR, HOME_DIR);
+            if (res.updated) {
+              console.log(`\x1b[32m✔ Updated ${p.name} (global) v${res.fromVersion} -> v${res.toVersion}\x1b[0m`);
+              count++;
+            }
           }
+        } catch (err) {
+          console.error(`\x1b[31m✖ Failed updating ${p.id}: ${err.message}\x1b[0m`);
+          process.exit(1);
         }
       }
     }

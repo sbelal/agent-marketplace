@@ -727,6 +727,7 @@ const SUPPORTED_PROTOCOL_VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05'];
 let clientCapabilities = {};
 let cachedClientWorkspaceRoots = [];
 let rootsQueryInFlight = null;
+let rootsGeneration = 0;
 let hasQueriedRoots = false;
 let nextServerRequestId = 1;
 const pendingClientResponses = new Map();
@@ -759,6 +760,7 @@ function sendClientRequest(method, params = {}, timeoutMs = 500) {
 
 async function refreshClientRoots(timeoutMs = 500) {
   if (rootsQueryInFlight) return rootsQueryInFlight;
+  const gen = rootsGeneration;
   rootsQueryInFlight = (async () => {
     try {
       const result = await sendClientRequest('roots/list', {}, timeoutMs);
@@ -772,12 +774,19 @@ async function refreshClientRoots(timeoutMs = 500) {
           } catch {}
         }
       }
-      cachedClientWorkspaceRoots = parsedPaths;
-      hasQueriedRoots = true;
+      if (rootsGeneration === gen) {
+        cachedClientWorkspaceRoots = parsedPaths;
+        hasQueriedRoots = true;
+      }
     } catch {
-      hasQueriedRoots = true;
+      if (rootsGeneration === gen) {
+        hasQueriedRoots = true;
+      }
     } finally {
       rootsQueryInFlight = null;
+    }
+    if (rootsGeneration !== gen) {
+      return refreshClientRoots(timeoutMs);
     }
     return cachedClientWorkspaceRoots;
   })();
@@ -820,6 +829,7 @@ async function handleRequest(message) {
   // Handle notifications without responding
   if (id === undefined || id === null || (typeof method === 'string' && method.startsWith('notifications/'))) {
     if (method === 'notifications/roots/list_changed') {
+      rootsGeneration++;
       hasQueriedRoots = false;
       cachedClientWorkspaceRoots = [];
       refreshClientRoots().catch(() => {});
@@ -873,7 +883,9 @@ async function handleRequest(message) {
 
     case 'tools/call': {
       const toolName = params?.name;
-      const args = params?.arguments || {};
+      const args = (params?.arguments && typeof params.arguments === 'object' && !Array.isArray(params.arguments))
+        ? params.arguments
+        : {};
       const workspaceRoot = await resolveWorkspaceRoot(args);
 
       try {

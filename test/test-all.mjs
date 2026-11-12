@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import http from 'node:http';
 
 const tempRoot = path.join(os.tmpdir(), `kc-test-${Date.now()}`);
 fs.mkdirSync(tempRoot, { recursive: true });
@@ -10,7 +11,7 @@ fs.mkdirSync(tempRoot, { recursive: true });
 process.env.KC_STORAGE_DIR = path.join(tempRoot, 'kc-storage');
 fs.mkdirSync(process.env.KC_STORAGE_DIR, { recursive: true });
 
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 
 import {
   parseYamlFrontmatter,
@@ -44,7 +45,7 @@ import {
 import { mergeMemoryEntries } from '../plugins/knowledge-capture/mcp-server/core/memory-store.js';
 import { pullSingleRepo, validateSafeGitUrl } from '../plugins/knowledge-capture/bin/pull.js';
 import { setupEnvironment, testRemoteConnectivity } from '../plugins/knowledge-capture/bin/setup.js';
-import { startStudioServer } from '../plugins/knowledge-capture/bin/studio.js';
+import { startStudioServer, parseCliArgs } from '../plugins/knowledge-capture/bin/studio.js';
 
 import {
   syncSqliteIndex,
@@ -2327,6 +2328,169 @@ Body after rename.
   assert.equal(path.resolve(setupRes.baseDir), path.resolve(customSetupStorage), 'setupEnvironment must honor KC_STORAGE_DIR');
   assert.ok(fs.existsSync(path.join(customSetupStorage, 'settings.json')), 'setupEnvironment must write settings.json inside KC_STORAGE_DIR');
   console.log('  ✔ Passed: Mixed-case graph/rewire, indexer FTS orphan cleanup & setup storage honor verified.\n');
+
+  // ==========================================
+  // TEST 47: Studio Hardening, LayerProvider Guards & Legacy teamRepoUrl Resolution
+  // ==========================================
+  console.log('Test 47: Studio Hardening, LayerProvider Directory/Default Guards & Legacy teamRepoUrl Resolution...');
+
+  // 1. studio.js parseCliArgs missing value guard
+  assert.throws(
+    () => parseCliArgs(['--workspace']),
+    /Missing path for --workspace/,
+    'parseCliArgs must reject missing --workspace argument cleanly'
+  );
+  assert.throws(
+    () => parseCliArgs(['--port']),
+    /Missing value for --port/,
+    'parseCliArgs must reject missing --port argument cleanly'
+  );
+
+  // 2. studio.js malformed URL must return HTTP 400 without crashing server, and index must set Cache-Control: no-store
+  const studioGuardInstance = await startStudioServer({
+    workspaceRoot: caseWs,
+    port: 0,
+    host: '127.0.0.1',
+    autoOpen: false,
+    strictPort: true
+  });
+  try {
+    const indexRes = await fetch(`${studioGuardInstance.url}/`);
+    assert.equal(indexRes.status, 200);
+    assert.equal(indexRes.headers.get('cache-control'), 'no-store', 'Studio HTML response must disable caching');
+
+    const badUrlStatus = await new Promise((resolve, reject) => {
+      const req = http.request({
+        host: '127.0.0.1',
+        port: studioGuardInstance.port,
+        path: 'http://[::1',
+        method: 'GET'
+      }, (res) => {
+        res.resume();
+        resolve(res.statusCode);
+      });
+      req.on('error', reject);
+      req.end();
+    });
+    assert.equal(badUrlStatus, 400, 'Malformed request URL must return HTTP 400 without crashing server');
+  } finally {
+    await studioGuardInstance.close();
+  }
+
+  // 3. layer-provider.js must ignore subdirectories ending with .md and not leak root teamDir for 'default'
+  const dirTrapMemDir = path.join(caseWs, '.agents', 'rules', 'memory', 'dir-trap.md');
+  fs.mkdirSync(dirTrapMemDir, { recursive: true });
+  const trapLp = createLayerProvider(caseWs);
+  assert.equal(trapLp.findMemoryFile('dir-trap', 'workspace'), null, 'findMemoryFile must not match a directory ending with .md');
+
+  const multiTeamStorage = path.join(tempRoot, 'multi-team-guard-storage');
+  const prevStorageForMulti = process.env.KC_STORAGE_DIR;
+  process.env.KC_STORAGE_DIR = multiTeamStorage;
+  try {
+    addTeamRepository({ slug: 'platform-core', url: '', name: 'Platform Core', active: true }, caseWs);
+    const activeLp = createLayerProvider(caseWs);
+    assert.equal(
+      activeLp.resolveTeamRepoDir('default'),
+      null,
+      'resolveTeamRepoDir("default") must return null when explicit teamRepos entries are active'
+    );
+  } finally {
+    process.env.KC_STORAGE_DIR = prevStorageForMulti;
+  }
+
+  // 4. Legacy teamRepoUrl in settings.json must resolve to <storage>/team (unless <storage>/team/default exists)
+  const legacyStorage = path.join(tempRoot, 'legacy-team-url-storage');
+  const legacyTeamDir = path.join(legacyStorage, 'team');
+  fs.mkdirSync(legacyTeamDir, { recursive: true });
+  fs.writeFileSync(path.join(legacyStorage, 'settings.json'), JSON.stringify({
+    privateRepoUrl: '',
+    teamRepoUrl: 'https://github.com/acme/shared-memory.git',
+    embeddingEngine: 'heuristic',
+    teamRepos: []
+  }, null, 2), 'utf8');
+  fs.writeFileSync(path.join(legacyTeamDir, 'legacy-team-rule.md'), `---
+name: legacy-team-rule
+domain: general
+type: convention
+description: Legacy flat team directory rule
+verified: 2026-11-12
+---
+# Legacy Team Rule
+Enforce standard conventions.
+`, 'utf8');
+
+  const prevStorageForLegacy = process.env.KC_STORAGE_DIR;
+  process.env.KC_STORAGE_DIR = legacyStorage;
+  try {
+    const legacyPaths = resolveStoragePaths(caseWs);
+    assert.equal(
+      path.resolve(legacyPaths.activeTeamDirs[0].dir),
+      path.resolve(legacyTeamDir),
+      'Legacy teamRepoUrl must resolve to root teamDir when team/default does not exist'
+    );
+    const legacyStats = getLayerStatistics(caseWs);
+    assert.equal(legacyStats.counts.team, 1, 'Legacy flat team rule must be discovered by getLayerStatistics');
+    const legacyRepos = getTeamRepositories(caseWs);
+    assert.equal(legacyRepos[0]?.entriesCount, 1, 'getTeamRepositories must count entries in legacy root teamDir');
+  } finally {
+    process.env.KC_STORAGE_DIR = prevStorageForLegacy;
+  }
+
+  console.log('  ✔ Passed: Studio HTTP/CLI guards, LayerProvider directory/default isolation & legacy teamRepoUrl resolution verified.\n');
+
+  // ==========================================
+  // TEST 48: Slug Normalization, Installer --update Error Exit & homedir Fallback
+  // ==========================================
+  console.log('Test 48: Slug Normalization, Installer --update Validation & homedir Fallback...');
+
+  // 1. session-sentinel slug normalization after slicing (no trailing hyphens, non-empty fallback)
+  const longPrefElicit = autoElicitSessionKnowledge(caseWs, {
+    userFeedback: 'prefer very long explicit typescript strict-mode over loose js',
+    errorLogs: ['Error: ---   !!! ??? ***']
+  });
+  const prefCand = longPrefElicit.suggested_candidates.find(c => c.slug.startsWith('user-preference-') && c.slug !== 'user-preference-concise-conclusions');
+  assert.ok(prefCand, 'Preference candidate should be generated');
+  assert.equal(prefCand.slug.endsWith('-'), false, `Preference slug must not end with hyphen: ${prefCand.slug}`);
+  const debugCand = longPrefElicit.suggested_candidates.find(c => c.slug.startsWith('debug-gotcha-'));
+  assert.ok(debugCand, 'Debug candidate should be generated');
+  assert.equal(debugCand.slug, 'debug-gotcha-runtime-issue', 'Symbol-only error message must fall back cleanly to runtime-issue');
+
+  // 2. archeology-scanner slug normalization on long subjects and symbol-only subjects
+  const archRepo = path.join(tempRoot, 'arch-slug-repo');
+  fs.mkdirSync(archRepo, { recursive: true });
+  execFileSync('git', ['init'], { cwd: archRepo, stdio: 'ignore' });
+  execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: archRepo, stdio: 'ignore' });
+  execFileSync('git', ['config', 'user.name', 'Test User'], { cwd: archRepo, stdio: 'ignore' });
+  fs.writeFileSync(path.join(archRepo, 'a.txt'), '1\n', 'utf8');
+  execFileSync('git', ['add', '.'], { cwd: archRepo, stdio: 'ignore' });
+  execFileSync('git', ['commit', '-m', 'fix: prevent very long container crash loop backoff - edge'], { cwd: archRepo, stdio: 'ignore' });
+  fs.writeFileSync(path.join(archRepo, 'b.txt'), '2\n', 'utf8');
+  execFileSync('git', ['add', '.'], { cwd: archRepo, stdio: 'ignore' });
+  execFileSync('git', ['commit', '-m', 'fix: 🚀'], { cwd: archRepo, stdio: 'ignore' });
+
+  const archRes = mineGitHistoryMemories(archRepo, { maxCommits: 10 });
+  assert.equal(archRes.status, 'SUCCESS');
+  assert.ok(archRes.candidates.every(c => !c.slug.endsWith('-')), 'Archeology slugs must never end with a trailing hyphen');
+  assert.ok(archRes.candidates.every(c => c.slug !== 'git'), 'Symbol-only commit subject must fall back to commit hash slug instead of bare git');
+
+  // 3. bin/install.js --update nonexistent plugin exits non-zero, and homedir fallback works without HOME/USERPROFILE
+  const installCliPath = path.resolve(process.cwd(), 'bin', 'install.js');
+  const unknownUpdateRun = spawnSync(process.execPath, [installCliPath, '--update', 'non-existent-plugin-xyz'], {
+    encoding: 'utf8'
+  });
+  assert.notEqual(unknownUpdateRun.status, 0, '--update with unknown plugin ID must exit non-zero');
+  assert.match(unknownUpdateRun.stderr, /Unknown plugin/, '--update unknown plugin must print error message');
+
+  const noHomeEnv = { ...process.env };
+  delete noHomeEnv.HOME;
+  delete noHomeEnv.USERPROFILE;
+  const statusNoHomeRun = spawnSync(process.execPath, [installCliPath, '--status-json'], {
+    env: noHomeEnv,
+    encoding: 'utf8'
+  });
+  assert.equal(statusNoHomeRun.status, 0, 'install.js must resolve os.homedir() cleanly even when HOME and USERPROFILE are unset');
+
+  console.log('  ✔ Passed: Slug trimming, CLI --update error exit & os.homedir() fallback verified.\n');
 
   console.log('============================================================');
   console.log('🎉 ALL TESTS PASSED SUCCESSFULLY!');

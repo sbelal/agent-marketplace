@@ -7,6 +7,7 @@
  */
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
 const {
@@ -19,6 +20,10 @@ const {
 
 const DEFAULT_EXCLUDES = ['.git', 'node_modules', '.DS_Store', 'Thumbs.db'];
 const VALID_PLUGIN_ID_RE = /^[a-zA-Z0-9_-]+$/;
+
+function getDefaultHomeDir() {
+  return process.env.USERPROFILE || process.env.HOME || os.homedir();
+}
 
 function assertValidPluginId(pluginId) {
   if (!pluginId || typeof pluginId !== 'string' || !VALID_PLUGIN_ID_RE.test(pluginId)) {
@@ -36,7 +41,7 @@ function assertValidPluginId(pluginId) {
  * @param {string} homeDir 
  * @returns {string} Path to ~/.gemini/config/config.json
  */
-function resolveUserConfigPath(homeDir = (process.env.USERPROFILE || process.env.HOME || '')) {
+function resolveUserConfigPath(homeDir = getDefaultHomeDir()) {
   if (!homeDir) return '';
   return path.join(homeDir, '.gemini', 'config', 'config.json');
 }
@@ -67,7 +72,7 @@ function getUserConfig(configPath) {
  * @param {string} homeDir 
  * @returns {boolean}
  */
-function isPluginEnabled(pluginId, homeDir = (process.env.USERPROFILE || process.env.HOME || '')) {
+function isPluginEnabled(pluginId, homeDir = getDefaultHomeDir()) {
   const configPath = resolveUserConfigPath(homeDir);
   const cfg = getUserConfig(configPath);
   if (!cfg.plugins || !cfg.plugins[pluginId]) {
@@ -121,7 +126,7 @@ function calculateConfigWithRemovedPlugin(currentConfig, pluginId) {
  * @param {string} homeDir 
  * @returns {string} Absolute install destination path
  */
-function resolvePluginInstallPath(pluginId, scope, workspaceDir = process.cwd(), homeDir = (process.env.USERPROFILE || process.env.HOME || '')) {
+function resolvePluginInstallPath(pluginId, scope, workspaceDir = process.cwd(), homeDir = getDefaultHomeDir()) {
   assertValidPluginId(pluginId);
   if (scope === 'workspace') {
     return path.join(workspaceDir, '.agents', 'plugins', pluginId);
@@ -249,7 +254,7 @@ function compareVersions(v1, v2) {
  * @param {string} homeDir 
  * @returns {Object} Full inventory report
  */
-function getPluginInventory(repoRoot, workspaceDir = process.cwd(), homeDir = (process.env.USERPROFILE || process.env.HOME || '')) {
+function getPluginInventory(repoRoot, workspaceDir = process.cwd(), homeDir = getDefaultHomeDir()) {
   const available = getAvailablePlugins(repoRoot);
   const pluginsSrcDir = path.join(repoRoot, 'plugins');
 
@@ -315,7 +320,7 @@ function getPluginInventory(repoRoot, workspaceDir = process.cwd(), homeDir = (p
  * @param {string} homeDir 
  * @returns {Object} State and filtered relevant actions
  */
-function getSystemInstallationState(repoRoot, workspaceDir = process.cwd(), homeDir = (process.env.USERPROFILE || process.env.HOME || '')) {
+function getSystemInstallationState(repoRoot, workspaceDir = process.cwd(), homeDir = getDefaultHomeDir()) {
   const inventory = getPluginInventory(repoRoot, workspaceDir, homeDir);
   const isGlobalSource = inventory.sources.global.active;
   const isWorkspaceSource = inventory.sources.workspace.active;
@@ -485,7 +490,7 @@ function getSystemInstallationState(repoRoot, workspaceDir = process.cwd(), home
  * @param {string} homeDir 
  * @returns {{ hasUpdate: boolean, details: Array<{ id: string, name: string, currentVersion: string, availableVersion: string, scope: string }> }}
  */
-function checkMarketplaceUpdates(repoRoot, workspaceDir = process.cwd(), homeDir = (process.env.USERPROFILE || process.env.HOME || '')) {
+function checkMarketplaceUpdates(repoRoot, workspaceDir = process.cwd(), homeDir = getDefaultHomeDir()) {
   const inventory = getPluginInventory(repoRoot, workspaceDir, homeDir);
   const details = [];
 
@@ -666,7 +671,7 @@ function writeUserConfig(configPath, config) {
  * @param {string} homeDir 
  * @returns {boolean}
  */
-function setPluginEnabled(pluginId, enabled = true, homeDir = (process.env.USERPROFILE || process.env.HOME || '')) {
+function setPluginEnabled(pluginId, enabled = true, homeDir = getDefaultHomeDir()) {
   assertValidPluginId(pluginId);
   const configPath = resolveUserConfigPath(homeDir);
   if (!configPath) return false;
@@ -692,7 +697,7 @@ function setPluginEnabled(pluginId, enabled = true, homeDir = (process.env.USERP
  * @param {string} homeDir 
  * @returns {boolean}
  */
-function removePluginFromConfig(pluginId, homeDir = (process.env.USERPROFILE || process.env.HOME || '')) {
+function removePluginFromConfig(pluginId, homeDir = getDefaultHomeDir()) {
   assertValidPluginId(pluginId);
   const configPath = resolveUserConfigPath(homeDir);
   if (!configPath) return false;
@@ -720,7 +725,7 @@ function removePluginFromConfig(pluginId, homeDir = (process.env.USERPROFILE || 
  * @param {string} homeDir 
  * @returns {{ success: boolean, targetPath: string, version: string, activated: boolean }}
  */
-function installPlugin(pluginId, repoRoot, scope, workspaceDir = process.cwd(), homeDir = (process.env.USERPROFILE || process.env.HOME || '')) {
+function installPlugin(pluginId, repoRoot, scope, workspaceDir = process.cwd(), homeDir = getDefaultHomeDir()) {
   const available = getAvailablePlugins(repoRoot);
   const plugin = available.find(p => p.id.toLowerCase() === pluginId.toLowerCase());
 
@@ -757,7 +762,7 @@ function installPlugin(pluginId, repoRoot, scope, workspaceDir = process.cwd(), 
  * @param {string} homeDir 
  * @returns {{ success: boolean, targetPath: string }}
  */
-function uninstallPlugin(pluginId, scope, workspaceDir = process.cwd(), homeDir = (process.env.USERPROFILE || process.env.HOME || '')) {
+function uninstallPlugin(pluginId, scope, workspaceDir = process.cwd(), homeDir = getDefaultHomeDir()) {
   const targetPath = resolvePluginInstallPath(pluginId, scope, workspaceDir, homeDir);
 
   if (fs.existsSync(targetPath)) {
@@ -788,7 +793,7 @@ function uninstallPlugin(pluginId, scope, workspaceDir = process.cwd(), homeDir 
  * @param {string} homeDir 
  * @returns {{ success: boolean, updated: boolean, fromVersion: string, toVersion: string, targetPath: string }}
  */
-function updatePlugin(pluginId, repoRoot, scope, workspaceDir = process.cwd(), homeDir = (process.env.USERPROFILE || process.env.HOME || '')) {
+function updatePlugin(pluginId, repoRoot, scope, workspaceDir = process.cwd(), homeDir = getDefaultHomeDir()) {
   const targetPath = resolvePluginInstallPath(pluginId, scope, workspaceDir, homeDir);
   const info = getInstalledPluginInfo(targetPath);
 
