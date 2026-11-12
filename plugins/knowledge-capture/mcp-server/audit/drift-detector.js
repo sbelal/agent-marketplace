@@ -26,8 +26,13 @@ export function detectContradictionsAndDrift(workspaceRoot = process.cwd(), opti
   }
 
   const slugMap = new Map();
+  const allKnownSlugs = new Map();
   for (const entry of activeEntries) {
     slugMap.set(entry.slug, entry);
+    allKnownSlugs.set(entry.slug.toLowerCase(), entry);
+  }
+  for (const entry of shadowedEntries) {
+    allKnownSlugs.set(entry.slug.toLowerCase(), entry);
   }
 
   const shadowedSet = new Set();
@@ -190,15 +195,18 @@ export function detectContradictionsAndDrift(workspaceRoot = process.cwd(), opti
       }
     }
 
-    if (entry.overrides) {
-      const targetSlug = entry.overrides;
-      if (!slugMap.has(targetSlug)) {
+    const targetOverrides = entry.overridesList && entry.overridesList.length > 0
+      ? entry.overridesList
+      : (entry.overrides ? String(entry.overrides).split(',').map(s => s.trim()).filter(Boolean) : []);
+
+    for (const targetSlug of targetOverrides) {
+      if (!allKnownSlugs.has(targetSlug.toLowerCase())) {
         drifts.push({
           slug: entry.slug,
           layer: entry.layerKey,
           type: 'dangling_override_drift',
           severity: 'medium',
-          detail: `Entry declares 'overrides: ${targetSlug}', but target slug '${targetSlug}' does not exist in any lower tier.`,
+          detail: `Entry declares 'overrides: ${targetSlug}', but target slug '${targetSlug}' does not exist in any layer.`,
           remediation: `Remove 'overrides: ${targetSlug}' or rename to matching upstream slug.`
         });
       }
@@ -206,7 +214,7 @@ export function detectContradictionsAndDrift(workspaceRoot = process.cwd(), opti
 
     if (Array.isArray(entry.related)) {
       for (const rel of entry.related) {
-        if (rel && !slugMap.has(rel)) {
+        if (rel && !allKnownSlugs.has(rel.toLowerCase())) {
           drifts.push({
             slug: entry.slug,
             layer: entry.layerKey,

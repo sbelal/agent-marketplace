@@ -394,6 +394,11 @@ Never use pnpm, always enforce npm install with package-lock.json.
   assert.ok(driftAudit.drifts.some(d => d.type === 'staleness_drift'), 'Must detect staleness drift (> 180 days)');
   assert.ok(driftAudit.drifts.some(d => d.type === 'referenced_file_missing'), 'Must detect missing .eslintrc.json');
   assert.ok(driftAudit.drifts.some(d => d.type === 'runtime_engine_drift'), 'Must detect Node 18 vs >=26.0.0 engine mismatch');
+  assert.equal(
+    driftAudit.drifts.some(d => d.type === 'dangling_override_drift' && d.slug === 'pkg-pnpm-standards'),
+    false,
+    'Valid rules must not trigger false dangling override drift'
+  );
   console.log('  ✔ Passed: Semantic Contradiction and Drift Engine accurately detects rule conflicts and codebase divergence.\n');
 
   // ==========================================

@@ -23,8 +23,14 @@ export function ingestTeamAdr(workspaceRoot, adrFilePath, options = {}) {
   let targetDir = paths.workspaceDir;
   if (targetLayer === 'private') {
     targetDir = paths.privateDir;
-  } else if (targetLayer === 'team') {
-    targetDir = paths.teamDir;
+  } else if (targetLayer === 'team' || targetLayer.startsWith('team/')) {
+    const specifiedSlug = options.teamSlug || (targetLayer.startsWith('team/') ? targetLayer.slice(5) : null);
+    if (paths.activeTeamDirs && paths.activeTeamDirs.length > 0) {
+      const match = specifiedSlug ? paths.activeTeamDirs.find(r => r.slug.toLowerCase() === specifiedSlug.toLowerCase()) : paths.activeTeamDirs[0];
+      targetDir = match ? match.dir : paths.teamDir;
+    } else {
+      targetDir = paths.teamDir;
+    }
   }
 
   if (!fs.existsSync(targetDir)) {
@@ -47,13 +53,13 @@ export function ingestTeamAdr(workspaceRoot, adrFilePath, options = {}) {
   const targetFile = path.join(targetDir, `${slug}.md`);
 
   let branchName = null;
-  if (targetLayer === 'team' && fs.existsSync(path.join(paths.teamDir, '.git'))) {
+  if ((targetLayer === 'team' || targetLayer.startsWith('team/')) && fs.existsSync(path.join(targetDir, '.git'))) {
     branchName = `adr/${slug}`;
     try {
-      execFileSync('git', ['checkout', '-b', branchName], { cwd: paths.teamDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
+      execFileSync('git', ['checkout', '-b', branchName], { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
     } catch {
       try {
-        execFileSync('git', ['checkout', branchName], { cwd: paths.teamDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
+        execFileSync('git', ['checkout', branchName], { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
       } catch {}
     }
   }
