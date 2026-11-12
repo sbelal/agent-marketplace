@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { execSync } from 'node:child_process';
+import { execSync, execFileSync } from 'node:child_process';
 
 /**
  * Pure Query Functions for Knowledge Capture Storage & Inspection (Strict CQS Compliance)
@@ -9,6 +9,31 @@ import { execSync } from 'node:child_process';
 
 export function getHomeDir() {
   return os.homedir();
+}
+
+/**
+ * POSIX-compliant atomic file write (write-to-temp-then-rename)
+ * Guarantees that concurrent reads or crashes never see partially-written files.
+ *
+ * @param {string} filePath Absolute destination file path
+ * @param {string} content File content to persist
+ * @param {string} [encoding='utf8'] Character encoding
+ */
+export function atomicWriteFileSync(filePath, content, encoding = 'utf8') {
+  const dir = path.dirname(filePath);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  const tempPath = path.join(dir, `.${path.basename(filePath)}.tmp.${process.pid}.${Date.now()}`);
+  try {
+    fs.writeFileSync(tempPath, content, encoding);
+    fs.renameSync(tempPath, filePath);
+  } catch (err) {
+    try {
+      if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
+    } catch {}
+    throw err;
+  }
 }
 
 export function resolveStoragePaths(workspaceRoot = process.cwd()) {
@@ -759,12 +784,48 @@ function resolveSingleMemoryContent(workspaceRoot, normalizedLayer, rawSlug, act
       '\n';
   }
 
+  // Resolve bi-directional graph backlinks (memories that cite/reference this slug)
+  const backlinks = [];
+  const backlinkLines = [];
+  const seenBacklinkSlugs = new Set();
+
+  for (const [entrySlug, entry] of activeIndex.entries()) {
+    if (entrySlug === slugKey || !entry || seenBacklinkSlugs.has(entry.slug)) continue;
+    const isRelated = Array.isArray(entry.related) && entry.related.includes(slugKey);
+    const isOverridden = Array.isArray(entry.overridesList) && entry.overridesList.includes(slugKey);
+
+    if (isRelated || isOverridden) {
+      seenBacklinkSlugs.add(entry.slug);
+      const relType = isOverridden ? 'overridden_by' : 'related_by';
+      backlinks.push({
+        slug: entry.slug,
+        layer: entry.layerKey,
+        type: entry.type,
+        relation: relType,
+        description: entry.trigger,
+        resolved: true
+      });
+      backlinkLines.push(
+        `- \`[${entry.layerKey}] ${entry.slug}\` (${entry.type}, ${relType}): ${entry.trigger}`
+      );
+    }
+  }
+
+  if (backlinkLines.length > 0) {
+    enrichedContent =
+      enrichedContent.trimEnd() +
+      '\n\n---\n### Incoming Backlinks (Referenced By)\n' +
+      backlinkLines.join('\n') +
+      '\n';
+  }
+
   return {
     layer: resolvedLayer,
     slug: slugKey,
     path: filePath,
     frontmatter: parsed.frontmatter,
     relatedMemories: resolvedRelated,
+    backlinks,
     content: enrichedContent
   };
 }
@@ -899,7 +960,7 @@ export function rewireMemoryReferences(workspaceRoot, oldSlug, newSlug) {
 
         if (modified) {
           const updatedRaw = serializeYamlFrontmatter(parsed.frontmatter, parsed.body);
-          fs.writeFileSync(file, updatedRaw, 'utf8');
+          atomicWriteFileSync(file, updatedRaw, 'utf8');
           rewiredCount++;
         }
       } catch {}
@@ -947,7 +1008,7 @@ export function cleanDanglingReferences(workspaceRoot, deletedSlug) {
 
         if (modified) {
           const updatedRaw = serializeYamlFrontmatter(parsed.frontmatter, parsed.body);
-          fs.writeFileSync(file, updatedRaw, 'utf8');
+          atomicWriteFileSync(file, updatedRaw, 'utf8');
           cleanedCount++;
         }
       } catch {}
@@ -1026,7 +1087,7 @@ export function saveMemoryEntry(workspaceRoot, params = {}) {
 
   const fileContent = serializeYamlFrontmatter(frontmatter, markdownBody);
   const targetFile = path.join(targetDir, `${cleanSlug}.md`);
-  fs.writeFileSync(targetFile, fileContent, 'utf8');
+  atomicWriteFileSync(targetFile, fileContent, 'utf8');
 
   let rewiredCount = 0;
   if (oldSlug && oldSlug !== cleanSlug) {
@@ -1194,16 +1255,18 @@ export function syncMemoryLayer(workspaceRoot, params = {}) {
 
 /**
  * Explicit command: Prepares an isolated promotion branch in the Team memory repository.
+ * Supports LLM-sanitized memory content (PII-scrubbed, neutral voice, generalized paths)
+ * with graceful fallback to privateFile baseline sanitization.
  */
 export function prepareTeamPromotion(workspaceRoot, params = {}) {
-  const { slug } = params;
+  const { slug, content: customContent, frontmatter: customFm } = params;
   if (!slug) throw new Error('A memory slug is required for promotion.');
 
   const cleanSlug = path.basename(slug.trim()).replace(/\.md$/i, '');
   const paths = resolveStoragePaths(workspaceRoot);
   const privateFile = path.join(paths.privateDir, `${cleanSlug}.md`);
 
-  if (!fs.existsSync(privateFile)) {
+  if (!customContent && !fs.existsSync(privateFile)) {
     throw new Error(`Private memory file '${cleanSlug}.md' does not exist.`);
   }
 
@@ -1215,56 +1278,81 @@ export function prepareTeamPromotion(workspaceRoot, params = {}) {
   // 1. Detect default branch (main or master) and pull latest
   let defaultBranch = 'main';
   try {
-    const branchList = execSync('git branch -a', { cwd: paths.teamDir, env: GIT_EXEC_ENV, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    const branchList = execFileSync('git', ['branch', '-a'], { cwd: paths.teamDir, env: GIT_EXEC_ENV, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
     if (branchList.includes('master') && !branchList.includes('main')) {
       defaultBranch = 'master';
     }
   } catch {}
 
   try {
-    execSync(`git checkout ${defaultBranch}`, { cwd: paths.teamDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
-    execSync('git pull --ff-only', { cwd: paths.teamDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
+    execFileSync('git', ['checkout', defaultBranch], { cwd: paths.teamDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
+    execFileSync('git', ['pull', '--ff-only'], { cwd: paths.teamDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
   } catch {}
 
   // 2. Create promotion branch
   const dateStr = new Date().toISOString().slice(0, 10);
   const branchName = `promote/${dateStr}-${cleanSlug}`;
   try {
-    execSync(`git checkout -b "${branchName}"`, { cwd: paths.teamDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
+    execFileSync('git', ['checkout', '-b', branchName], { cwd: paths.teamDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
   } catch {
-    execSync(`git checkout "${branchName}"`, { cwd: paths.teamDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
+    execFileSync('git', ['checkout', branchName], { cwd: paths.teamDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
   }
 
-  // 3. Scrub and write team memory
-  const rawContent = fs.readFileSync(privateFile, 'utf8');
-  const parsed = parseYamlFrontmatter(rawContent);
+  // 3. Determine team content and frontmatter
+  let teamContent = '';
+  if (customContent) {
+    // Primary Architecture: LLM has transformed content, stripped PII, and neutralized voice
+    let bodyText = customContent;
+    let fmData = { ...(customFm || {}) };
 
-  // Scrub personal usernames (with strict word boundaries) and machine paths
-  const home = os.homedir();
-  let username = '';
-  try {
-    username = os.userInfo().username;
-  } catch {}
+    if (customContent.trimStart().startsWith('---')) {
+      const parsed = parseYamlFrontmatter(customContent);
+      bodyText = parsed.body;
+      fmData = { ...parsed.frontmatter, ...fmData };
+    }
 
-  let scrubbedBody = parsed.body.replaceAll(home, '~');
-  if (username && username.length > 1) {
-    const escapedUser = username.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    scrubbedBody = scrubbedBody.replace(new RegExp(`\\b${escapedUser}\\b`, 'gi'), '<developer>');
+    const teamFm = {
+      name: cleanSlug,
+      type: fmData.type || 'convention',
+      domain: (fmData.domain || 'general').toLowerCase(),
+      description: fmData.description || 'Team engineering standard',
+      verified: fmData.verified || dateStr,
+      related: Array.isArray(fmData.related) ? fmData.related : []
+    };
+
+    teamContent = serializeYamlFrontmatter(teamFm, bodyText);
+  } else {
+    // Fallback: Read privateFile and apply baseline sanitization
+    const rawContent = fs.readFileSync(privateFile, 'utf8');
+    const parsed = parseYamlFrontmatter(rawContent);
+
+    const home = os.homedir();
+    let username = '';
+    try {
+      username = os.userInfo().username;
+    } catch {}
+
+    let scrubbedBody = parsed.body.replaceAll(home, '~');
+    if (username && username.length > 1) {
+      const escapedUser = username.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      scrubbedBody = scrubbedBody.replace(new RegExp(`\\b${escapedUser}\\b`, 'gi'), '<developer>');
+    }
+    scrubbedBody = scrubbedBody.replace(/[A-Za-z]:\\(?:Users|Documents)[^\s\n]+/gi, '<path>');
+
+    const teamFm = {
+      name: cleanSlug,
+      type: parsed.frontmatter.type || 'convention',
+      domain: (parsed.frontmatter.domain || 'general').toLowerCase(),
+      description: parsed.frontmatter.description || 'Team engineering standard',
+      verified: dateStr,
+      related: parsed.frontmatter.related || []
+    };
+
+    teamContent = serializeYamlFrontmatter(teamFm, scrubbedBody);
   }
-  scrubbedBody = scrubbedBody.replace(/[A-Za-z]:\\[Users|Documents][^\s\n]+/gi, '<path>');
 
-  const teamFm = {
-    name: cleanSlug,
-    type: parsed.frontmatter.type || 'convention',
-    domain: parsed.frontmatter.domain || 'general',
-    description: parsed.frontmatter.description || 'Team engineering standard',
-    verified: dateStr,
-    related: parsed.frontmatter.related || []
-  };
-
-  const teamContent = serializeYamlFrontmatter(teamFm, scrubbedBody);
   const targetFile = path.join(paths.teamDir, `${cleanSlug}.md`);
-  fs.writeFileSync(targetFile, teamContent, 'utf8');
+  atomicWriteFileSync(targetFile, teamContent, 'utf8');
 
   return {
     success: true,
@@ -1453,15 +1541,15 @@ export function ingestTeamAdr(workspaceRoot, adrFilePath, options = {}) {
   if (targetLayer === 'team' && fs.existsSync(path.join(paths.teamDir, '.git'))) {
     branchName = `adr/${slug}`;
     try {
-      execSync(`git checkout -b "${branchName}"`, { cwd: paths.teamDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
+      execFileSync('git', ['checkout', '-b', branchName], { cwd: paths.teamDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
     } catch {
       try {
-        execSync(`git checkout "${branchName}"`, { cwd: paths.teamDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
+        execFileSync('git', ['checkout', branchName], { cwd: paths.teamDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
       } catch {}
     }
   }
 
-  fs.writeFileSync(targetFile, serialized, 'utf8');
+  atomicWriteFileSync(targetFile, serialized, 'utf8');
 
   return {
     success: true,

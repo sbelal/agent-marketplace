@@ -10,6 +10,8 @@ fs.mkdirSync(tempRoot, { recursive: true });
 process.env.KC_STORAGE_DIR = path.join(tempRoot, 'kc-storage');
 fs.mkdirSync(process.env.KC_STORAGE_DIR, { recursive: true });
 
+import { execFileSync } from 'node:child_process';
+
 import {
   parseYamlFrontmatter,
   serializeYamlFrontmatter,
@@ -19,7 +21,10 @@ import {
   cleanDanglingReferences,
   bootstrapRepoMemories,
   mineGitHistoryMemories,
-  autoElicitSessionKnowledge
+  autoElicitSessionKnowledge,
+  atomicWriteFileSync,
+  getMemoryContent,
+  prepareTeamPromotion
 } from '../plugins/knowledge-capture/mcp-server/memory-service.js';
 
 import {
@@ -35,7 +40,8 @@ import {
   computeMultiVectorSimilarity,
   detectContradictionsAndDrift,
   proactiveMemoryProbe,
-  recordMemoryEfficacy
+  recordMemoryEfficacy,
+  getMemoryGraphNeighbors
 } from '../plugins/knowledge-capture/mcp-server/sqlite-index.js';
 
 import {
@@ -377,6 +383,84 @@ Never use pnpm, always enforce npm install with package-lock.json.
   const graphDataAfter = getKnowledgeGraphData(ws1Root);
   assert.ok(typeof graphDataAfter.summary.avgEfficacyScore === 'number', 'Summary must include avgEfficacyScore');
   console.log('  ✔ Passed: Memory efficacy telemetry accurately tracks verification feedback.\n');
+
+  // ==========================================
+  // TEST 13: Atomic File Persistence Pattern
+  // ==========================================
+  console.log('Test 13: Atomic File Persistence Pattern (Write-Temp-and-Rename)...');
+  const atomicTarget = path.join(tempRoot, 'atomic-test.md');
+  atomicWriteFileSync(atomicTarget, '# Atomic Content\nWritten safely.\n');
+  assert.ok(fs.existsSync(atomicTarget), 'Target file must exist after atomic write');
+  assert.equal(fs.readFileSync(atomicTarget, 'utf8'), '# Atomic Content\nWritten safely.\n');
+  const tempFiles = fs.readdirSync(tempRoot).filter(f => f.includes('.tmp.'));
+  assert.equal(tempFiles.length, 0, 'No temporary staging files should linger after write');
+  console.log('  ✔ Passed: atomicWriteFileSync guarantees POSIX atomic persistence without lingering temp files.\n');
+
+  // ==========================================
+  // TEST 14: Bi-Directional Knowledge Graph with Backlink Traversal
+  // ==========================================
+  console.log('Test 14: Bi-Directional Knowledge Graph with Backlink Traversal...');
+  const podGovYaml = `---
+name: k8s-pod-governance
+domain: kubernetes
+type: convention
+description: Pod scheduling and governance
+---
+# Pod Governance
+`;
+  fs.writeFileSync(path.join(wsDir, 'k8s-pod-governance.md'), podGovYaml, 'utf8');
+  syncSqliteIndex(ws1Root);
+
+  const neighbors = getMemoryGraphNeighbors(ws1Root, 'k8s-pod-governance');
+  assert.equal(neighbors.slug, 'k8s-pod-governance');
+  assert.ok(neighbors.incoming.some(l => l.source_slug === 'k8s-delete-guard'), 'k8s-pod-governance must have k8s-delete-guard as incoming backlink');
+
+  const contentWithBacklinks = getMemoryContent(ws1Root, 'workspace', 'k8s-pod-governance');
+  assert.ok(contentWithBacklinks.backlinks.some(b => b.slug === 'k8s-delete-guard'), 'getMemoryContent must return backlinks array');
+  assert.ok(contentWithBacklinks.content.includes('Incoming Backlinks (Referenced By)'), 'Enriched content must render Incoming Backlinks footer');
+  console.log('  ✔ Passed: Bi-directional knowledge graph resolves both forward references and incoming backlinks.\n');
+
+  // ==========================================
+  // TEST 15: LLM-Driven Team Promotion Architecture
+  // ==========================================
+  console.log('Test 15: LLM-Driven Team Promotion Architecture...');
+  const teamRepoDir = path.join(process.env.KC_STORAGE_DIR, 'team');
+  fs.mkdirSync(teamRepoDir, { recursive: true });
+  execFileSync('git', ['init', '-b', 'main'], { cwd: teamRepoDir, stdio: 'ignore' });
+  execFileSync('git', ['config', 'user.name', 'Test Agent'], { cwd: teamRepoDir, stdio: 'ignore' });
+  execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: teamRepoDir, stdio: 'ignore' });
+  fs.writeFileSync(path.join(teamRepoDir, 'README.md'), '# Team Memory\n', 'utf8');
+  execFileSync('git', ['add', '.'], { cwd: teamRepoDir, stdio: 'ignore' });
+  execFileSync('git', ['commit', '-m', 'Initial commit'], { cwd: teamRepoDir, stdio: 'ignore' });
+
+  const llmSanitizedBody = `## Why\nIn containerized environments, pod memory limits must align with cgroup thresholds.\n\n## How to apply\nConfigure resources.limits.memory equal to or greater than requests.memory.\n`;
+  const promotionRes = prepareTeamPromotion(ws1Root, {
+    slug: 'k8s-pod-governance',
+    content: llmSanitizedBody,
+    frontmatter: {
+      domain: 'kubernetes',
+      type: 'convention',
+      description: 'When defining pod container memory limits and cgroup allocations'
+    }
+  });
+
+  assert.equal(promotionRes.success, true);
+  assert.ok(promotionRes.branch.startsWith('promote/'));
+  assert.ok(fs.existsSync(promotionRes.stagedFile));
+  const promotedContent = fs.readFileSync(promotionRes.stagedFile, 'utf8');
+  assert.ok(promotedContent.includes('When defining pod container memory limits'), 'Must use LLM-refined trigger');
+  assert.ok(promotedContent.includes('cgroup thresholds'), 'Must persist LLM-sanitized content');
+  console.log('  ✔ Passed: prepareTeamPromotion successfully stages LLM-sanitized memory content.\n');
+
+  // ==========================================
+  // TEST 16: Single-Source Manifest Build & Sync
+  // ==========================================
+  console.log('Test 16: Single-Source Manifest Build & Sync Validation...');
+  const syncScript = path.resolve('bin/sync-manifests.js');
+  assert.ok(fs.existsSync(syncScript), 'bin/sync-manifests.js must exist');
+  const checkOut = execFileSync(process.execPath, [syncScript, '--check'], { encoding: 'utf8' });
+  assert.ok(checkOut.includes('in sync'), 'All derived plugin configuration files must be synchronized');
+  console.log('  ✔ Passed: Single-source manifest generator validates zero configuration drift.\n');
 
   console.log('============================================================');
   console.log('🎉 ALL TESTS PASSED SUCCESSFULLY!');

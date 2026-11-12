@@ -5,7 +5,8 @@ import {
   resolveStoragePaths,
   findMarkdownFiles,
   parseYamlFrontmatter,
-  scanLayerEntries
+  scanLayerEntries,
+  atomicWriteFileSync
 } from './memory-service.js';
 
 /**
@@ -236,17 +237,21 @@ export function generateDenseEmbedding(text, dimensions = 128) {
   if (words.length === 0) return Array.from(vec);
 
   const features = [];
-  for (const w of words) {
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i];
     features.push(`w:${w}`);
     if (w.length >= 3) {
-      for (let i = 0; i <= w.length - 3; i++) {
-        features.push(`3:${w.slice(i, i + 3)}`);
+      for (let j = 0; j <= w.length - 3; j++) {
+        features.push(`3:${w.slice(j, j + 3)}`);
       }
     }
     if (w.length >= 4) {
-      for (let i = 0; i <= w.length - 4; i++) {
-        features.push(`4:${w.slice(i, i + 4)}`);
+      for (let j = 0; j <= w.length - 4; j++) {
+        features.push(`4:${w.slice(j, j + 4)}`);
       }
+    }
+    if (i < words.length - 1) {
+      features.push(`b:${w}_${words[i + 1]}`);
     }
   }
 
@@ -820,6 +825,30 @@ export function getKnowledgeGraphData(workspaceRoot) {
     }
   }
 
+  // Compute bi-directional degree and link lists on each node
+  const incomingMap = new Map();
+  const outgoingMap = new Map();
+  for (const n of nodes) {
+    incomingMap.set(n.id, []);
+    outgoingMap.set(n.id, []);
+  }
+
+  for (const l of validLinks) {
+    if (outgoingMap.has(l.source)) {
+      outgoingMap.get(l.source).push(l.target);
+    }
+    if (incomingMap.has(l.target)) {
+      incomingMap.get(l.target).push(l.source);
+    }
+  }
+
+  for (const node of nodes) {
+    node.backlinks = incomingMap.get(node.id) || [];
+    node.forwardlinks = outgoingMap.get(node.id) || [];
+    node.incomingCount = node.backlinks.length;
+    node.outgoingCount = node.forwardlinks.length;
+  }
+
   const avgEfficacy = nodes.length
     ? Number((nodes.reduce((acc, n) => acc + (n.efficacy_score || 1.0), 0) / nodes.length).toFixed(2))
     : 1.0;
@@ -839,6 +868,33 @@ export function getKnowledgeGraphData(workspaceRoot) {
 }
 
 /**
+ * Retrieves bi-directional graph neighbors (both outgoing references and incoming backlinks) for a given slug.
+ */
+export function getMemoryGraphNeighbors(workspaceRoot, slug) {
+  if (!slug) return { slug: '', outgoing: [], incoming: [] };
+  const cleanSlug = path.basename(slug.trim()).replace(/\.md$/i, '');
+  const graph = getKnowledgeGraphData(workspaceRoot);
+  const targetNode = graph.nodes.find(n => n.id === cleanSlug || n.slug === cleanSlug);
+
+  const outgoing = graph.links
+    .filter(l => l.source === cleanSlug)
+    .map(l => ({ target_slug: l.target, rel_type: l.type }));
+
+  const incoming = graph.links
+    .filter(l => l.target === cleanSlug)
+    .map(l => ({ source_slug: l.source, rel_type: l.type }));
+
+  return {
+    slug: cleanSlug,
+    node: targetNode || null,
+    outgoing,
+    incoming,
+    backlinksCount: incoming.length,
+    outgoingCount: outgoing.length
+  };
+}
+
+/**
  * File-based telemetry helpers for SQLite fallback.
  */
 function readTelemetryJson() {
@@ -854,7 +910,7 @@ function readTelemetryJson() {
 function writeTelemetryJson(data) {
   const p = getTelemetryJsonPath();
   try {
-    fs.writeFileSync(p, JSON.stringify(data, null, 2), 'utf8');
+    atomicWriteFileSync(p, JSON.stringify(data, null, 2), 'utf8');
   } catch {}
 }
 

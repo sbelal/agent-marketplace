@@ -24,7 +24,8 @@ import {
   generateKnowledgeGraphHtml,
   detectContradictionsAndDrift,
   proactiveMemoryProbe,
-  recordMemoryEfficacy
+  recordMemoryEfficacy,
+  getMemoryGraphNeighbors
 } from './sqlite-index.js';
 
 /**
@@ -126,6 +127,21 @@ const TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {}
+    }
+  },
+  {
+    name: 'get_memory_graph_neighbors',
+    description:
+      'Retrieves bi-directional graph neighbors (both outgoing references and incoming backlinks) for a specific memory slug.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        slug: {
+          type: 'string',
+          description: 'Memory slug to inspect for bi-directional graph neighbors.'
+        }
+      },
+      required: ['slug']
     }
   },
   {
@@ -315,13 +331,21 @@ const TOOLS = [
   {
     name: 'prepare_team_promotion',
     description:
-      'Prepares an isolated promotion branch in the Team memory repository, scrubs personal machine paths/usernames, and generates the PR command.',
+      'Prepares an isolated promotion branch in the Team memory repository and persists sanitized memory content (with PII scrubbed, voice neutralized, and paths generalized by the Agent LLM).',
     inputSchema: {
       type: 'object',
       properties: {
         slug: {
           type: 'string',
           description: 'Slug in Private memory to promote to Team layer.'
+        },
+        content: {
+          type: 'string',
+          description: 'Optional LLM-sanitized markdown body or full markdown content (with PII scrubbed, first-person narrative generalized, and workstation paths converted to generic paths).'
+        },
+        frontmatter: {
+          type: 'object',
+          description: 'Optional sanitized frontmatter object (type, domain, description, verified, related).'
         }
       },
       required: ['slug']
@@ -539,6 +563,10 @@ function handleRequest(message) {
 
           case 'get_memory_graph':
             resultData = getKnowledgeGraphData(workspaceRoot);
+            break;
+
+          case 'get_memory_graph_neighbors':
+            resultData = getMemoryGraphNeighbors(workspaceRoot, args.slug);
             break;
 
           case 'generate_knowledge_graph_html':

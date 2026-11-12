@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import readline from 'node:readline';
-import { execSync } from 'node:child_process';
+import { execSync, execFileSync } from 'node:child_process';
 
 const GIT_EXEC_ENV = {
   ...process.env,
@@ -68,10 +68,10 @@ export function setupEnvironment(options = {}) {
     const gitDir = path.join(targetDir, '.git');
     if (fs.existsSync(gitDir)) {
       try {
-        execSync(`git remote set-url origin "${remoteUrl}"`, { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
+        execFileSync('git', ['remote', 'set-url', 'origin', remoteUrl], { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
       } catch {
         try {
-          execSync(`git remote add origin "${remoteUrl}"`, { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
+          execFileSync('git', ['remote', 'add', 'origin', remoteUrl], { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
         } catch {}
       }
       return;
@@ -79,7 +79,7 @@ export function setupEnvironment(options = {}) {
 
     let hasRemoteBranches = false;
     try {
-      const lsOut = execSync(`git ls-remote --heads "${remoteUrl}"`, {
+      const lsOut = execFileSync('git', ['ls-remote', '--heads', remoteUrl], {
         encoding: 'utf8',
         timeout: 5000,
         env: GIT_EXEC_ENV,
@@ -92,15 +92,15 @@ export function setupEnvironment(options = {}) {
       try {
         const hasExistingFiles = fs.existsSync(targetDir) && fs.readdirSync(targetDir).length > 0;
         if (hasExistingFiles) {
-          execSync('git init -b main', { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
-          execSync(`git remote add origin "${remoteUrl}"`, { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
-          execSync('git fetch origin', { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
+          execFileSync('git', ['init', '-b', 'main'], { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
+          execFileSync('git', ['remote', 'add', 'origin', remoteUrl], { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
+          execFileSync('git', ['fetch', 'origin'], { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
           try {
-            execSync('git branch --set-upstream-to=origin/main main', { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
+            execFileSync('git', ['branch', '--set-upstream-to=origin/main', 'main'], { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
           } catch {}
         } else {
           fs.rmSync(targetDir, { recursive: true, force: true });
-          execSync(`git clone "${remoteUrl}" "${targetDir}"`, { env: GIT_EXEC_ENV, stdio: 'ignore' });
+          execFileSync('git', ['clone', remoteUrl, targetDir], { env: GIT_EXEC_ENV, stdio: 'ignore' });
         }
         return;
       } catch {}
@@ -110,8 +110,8 @@ export function setupEnvironment(options = {}) {
       if (!fs.existsSync(targetDir)) {
         fs.mkdirSync(targetDir, { recursive: true });
       }
-      execSync('git init -b main', { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
-      execSync(`git remote add origin "${remoteUrl}"`, { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
+      execFileSync('git', ['init', '-b', 'main'], { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
+      execFileSync('git', ['remote', 'add', 'origin', remoteUrl], { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
     } catch {}
   }
 
@@ -139,7 +139,7 @@ export function testRemoteConnectivity(url) {
     return { ok: false, error: 'Empty URL' };
   }
   try {
-    execSync(`git ls-remote "${url.trim()}" HEAD`, {
+    execFileSync('git', ['ls-remote', url.trim(), 'HEAD'], {
       encoding: 'utf8',
       timeout: 5000,
       env: GIT_EXEC_ENV,
@@ -269,7 +269,7 @@ async function runInteractiveWizard() {
   if (options.teamRepoUrl) {
     console.log('\n\x1b[36mPerforming initial Team memory clone/pull...\x1b[0m');
     try {
-      execSync(`git clone "${options.teamRepoUrl}" "${res.teamDir}"`, {
+      execFileSync('git', ['clone', options.teamRepoUrl, res.teamDir], {
         env: GIT_EXEC_ENV,
         stdio: 'inherit'
       });

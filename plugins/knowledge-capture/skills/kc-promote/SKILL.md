@@ -15,31 +15,59 @@ This skill promotes personal memories from `~/.gemini/knowledge-capture/private/
 
 ## Workflow
 
-### 1. Select Candidates
+### 1. Select Candidate & Retrieve Private Memory
 Identify the memory file to promote:
-- If specified by command argument (`/kc-promote <slug>`), load `~/.gemini/knowledge-capture/private/<slug>.md`.
-- Otherwise, call `get_memory_summary` with `layer: "private"` and ask the user which entry to promote.
+- If specified by command argument (`/kc-promote <slug>`), call **`get_memory_content(layer="private", slug="<slug>")`**.
+- Otherwise, call **`get_memory_summary(layer="private")`** and ask the developer which entry to promote.
 
 Confirm before proceeding:
-- Is this guideline broadly true for the entire team, not just machine-local?
+- Is this guideline broadly applicable to the entire team, not just machine-local?
 - Has it been verified against production reality?
-- Does the user want it published organization-wide?
 
-### 2. Prepare Promotion Branch & Scrub Memory File
-Call the MCP tool **`prepare_team_promotion({ slug: "<slug>" })`** (or run manually):
-The tool automatically:
+### 2. Semantic Transformation & Sanitization (Agent LLM)
+Transform the raw private memory into an organization-wide standard:
+1. **PII & Secrets Scrubbing:** Remove personal usernames, coworker names, email addresses, internal IP/hostnames, credentials, and ticket/incident numbers.
+2. **Generalization:** Convert machine-specific paths (e.g., `/Users/dan/...`, `/home/sbelal/...`, `C:\Users\...`) into universal conventions (e.g., `~`, `<project-root>`, `<config-dir>`).
+3. **Voice Neutralization:** Rewrite first-person phrasing ("I fixed", "on my machine") into neutral, imperative third-person engineering tone ("When configuring...", "Ensure that...").
+4. **Trigger Optimization:** Refine the `description:` frontmatter trigger condition so teammates' agents will easily recall it during relevant tasks.
+5. **Strip `overrides:`:** Remove the `overrides:` field (team-tier rules establish baseline standards).
+
+### 3. Developer Preview & Confirmation
+Present the proposed sanitized memory (frontmatter and body) to the developer in chat:
+```markdown
+### 📋 Proposed Team Guideline Sanitization
+**Slug:** `<slug>`
+**Domain:** `<domain>`
+**Trigger:** `<updated-description>`
+
+---
+<sanitized-markdown-preview>
+---
+```
+Ask for developer confirmation before staging to Git.
+
+### 4. Stage to Isolated Promotion Branch (`prepare_team_promotion`)
+Upon developer confirmation, invoke the MCP tool:
+```json
+prepare_team_promotion({
+  "slug": "<slug>",
+  "content": "<sanitized-markdown-body>",
+  "frontmatter": {
+    "domain": "<domain>",
+    "type": "<convention|platform-fact|tool-gotcha>",
+    "description": "<refined-description>",
+    "related": ["<related-slug-1>"]
+  }
+})
+```
+The MCP server deterministically:
 - Checks out `main` in `~/.gemini/knowledge-capture/team/` and pulls latest changes.
 - Creates an isolated Git branch: `promote/<date>-<slug>`.
-- Scrubs personal usernames and machine-specific paths (`/home/...`, `C:\Users\...`).
-- Writes the sanitized team file in `~/.gemini/knowledge-capture/team/<slug>.md`.
+- Atomically writes the sanitized file to `~/.gemini/knowledge-capture/team/<slug>.md`.
 - Returns the exact branch name and `gh pr create` command.
-- Remove ticket/incident numbers unless the memory is explicitly about that artefact.
-- Strip the `overrides:` field.
-- Rewrite first-person phrasing ("I", "my") in neutral, third-person engineering tone.
-- If a team file with the same slug already exists, update its content, bump the `verified:` date, and retain history.
 
-### 4. Stop and Hand Over for Developer Inspection
-**Do not commit or push.** Run:
+### 5. Stop and Hand Over for Final Developer Inspection
+**Do not commit or push automatically.** Run:
 ```bash
 git -C ~/.gemini/knowledge-capture/team status --short
 ```

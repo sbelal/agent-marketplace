@@ -103,7 +103,7 @@ At the start of complex tasks, consult memory with minimal token overhead:
 ## 5. Team Promotion & 4-Point Consolidation Protocol
 
 * **Team Promotion (`/kc-promote <slug>`):**
-  Personal memories mature in Private storage before entering Team memory. Promotion creates branch `promote/<date>-<slug>` in `team/`, scrubs personal usernames/paths, and halts for developer inspection before `gh pr create`.
+  Personal memories mature in Private storage before entering Team memory. The Agent LLM semantically transforms content (scrubbing PII/secrets, neutralizing voice, and generalizing workstation paths). Promotion creates branch `promote/<date>-<slug>` in `team/`, writes the sanitized guideline, and halts for developer inspection before `gh pr create`.
 * **Repository Bootstrapping (`/kc-bootstrap`):**
   Scans project ADRs (`docs/adr/`), CI workflows (`.github/workflows/`), linters (`.golangci.yml`, `ruff.toml`, `.eslintrc`), and Dockerfiles to auto-discover and propose initial Workspace memory rules on day one.
 * **Session-End Auto-Elicitation (`/kc-elicit`):**

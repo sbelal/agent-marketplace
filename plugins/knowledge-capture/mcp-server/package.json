@@ -5,6 +5,6 @@
   "type": "module",
   "main": "index.js",
   "engines": {
-    "node": ">=26.0.0"
+    "node": ">=20.0.0"
   }
 }

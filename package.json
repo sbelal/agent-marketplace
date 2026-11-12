@@ -9,6 +9,7 @@
   },
   "scripts": {
     "install-plugins": "node ./bin/install.js",
+    "sync-manifests": "node ./bin/sync-manifests.js",
     "test": "node test/test-all.mjs"
   },
   "repository": {
