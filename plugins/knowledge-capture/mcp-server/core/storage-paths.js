@@ -2,6 +2,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 
+export const GIT_EXEC_ENV = {
+  ...process.env,
+  GIT_TERMINAL_PROMPT: '0',
+  GIT_SSH_COMMAND: 'ssh -o BatchMode=yes -o ConnectTimeout=3'
+};
+
 /**
  * Returns user home directory with multi-platform environment support.
  */
@@ -26,7 +32,7 @@ export function getStorageDir() {
  * Resolves path to SQLite database.
  */
 export function getDbPath() {
-  return path.join(getStorageDir(), 'knowledge-index.db');
+  return path.join(getStorageDir(), 'cache.sqlite');
 }
 
 /**

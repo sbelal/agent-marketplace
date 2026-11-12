@@ -51,7 +51,8 @@ export {
 
 export {
   recordTelemetryEvent,
-  recordMemoryEfficacy
+  recordMemoryEfficacy,
+  correlateTestExecutionEfficacy
 } from './db/telemetry.js';
 
 export {
@@ -65,3 +66,7 @@ export {
 export {
   detectContradictionsAndDrift
 } from './audit/drift-detector.js';
+
+export {
+  dreamMemoryConsolidation
+} from './audit/dream-synthesizer.js';

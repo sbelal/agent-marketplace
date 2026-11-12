@@ -2,15 +2,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { execSync, execFileSync } from 'node:child_process';
-import { resolveStoragePaths } from './storage-paths.js';
+import { resolveStoragePaths, GIT_EXEC_ENV } from './storage-paths.js';
 import { parseYamlFrontmatter, serializeYamlFrontmatter, parseInlineArrayOrList } from './yaml-parser.js';
 import { findMarkdownFiles, scanLayerEntries } from '../retrieval/shadow-resolver.js';
-
-const GIT_EXEC_ENV = {
-  ...process.env,
-  GIT_TERMINAL_PROMPT: '0',
-  GIT_SSH_COMMAND: 'ssh -o BatchMode=yes -o ConnectTimeout=3'
-};
 
 const STALE_THRESHOLD_DAYS = 180;
 

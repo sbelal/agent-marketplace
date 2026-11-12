@@ -13,7 +13,8 @@ import {
   getPersonaDirectives,
   consultLogic,
   analyzeLogicalFallacies,
-  evaluateProbability
+  evaluateProbability,
+  evaluateArchitecturalTradeoffs
 } from './logic-service.js';
 
 const TOOLS = [
@@ -83,6 +84,50 @@ const TOOLS = [
       },
       required: ['hypotheses']
     }
+  },
+  {
+    name: 'syran_evaluate_tradeoffs',
+    description: 'First-Principles Architectural Trade-Off Matrix. Evaluates competing architectural options across weighted criteria using multi-attribute utility theory (MAUT), detects Pareto dominance, and isolates critical pivot dimensions without contractions.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        options: {
+          type: 'array',
+          description: 'Array of candidate architectural options with names and criterion scores.',
+          items: {
+            type: 'object',
+            properties: {
+              name: { type: 'string', description: 'Name of the architectural candidate.' },
+              description: { type: 'string', description: 'Optional description of the candidate architecture.' },
+              scores: {
+                type: 'object',
+                description: 'Key-value map of numerical criterion scores (e.g. { latency: 12, memory: 40, complexity: 2 }).'
+              }
+            },
+            required: ['name', 'scores']
+          }
+        },
+        criteria: {
+          type: 'array',
+          description: 'Optional explicit evaluation criteria with weights and optimization directions.',
+          items: {
+            type: 'object',
+            properties: {
+              name: { type: 'string', description: 'Criterion identifier matching option score keys.' },
+              weight: { type: 'number', description: 'Relative weight or priority (e.g. 1.0 to 5.0).' },
+              direction: {
+                type: 'string',
+                enum: ['maximize', 'minimize'],
+                description: 'Optimization direction ("maximize" if higher is better, "minimize" if lower is better).'
+              },
+              description: { type: 'string', description: 'Criterion description.' }
+            },
+            required: ['name']
+          }
+        }
+      },
+      required: ['options']
+    }
   }
 ];
 
@@ -115,7 +160,7 @@ function handleRequest(message) {
           },
           serverInfo: {
             name: 'syran-logic',
-            version: '1.0.0'
+            version: '1.1.0'
           }
         }
       });
@@ -169,6 +214,11 @@ function handleRequest(message) {
 
           case 'syran_evaluate_probability': {
             resultData = evaluateProbability(args.hypotheses, args.prior);
+            break;
+          }
+
+          case 'syran_evaluate_tradeoffs': {
+            resultData = evaluateArchitecturalTradeoffs(args.options, args.criteria);
             break;
           }
 

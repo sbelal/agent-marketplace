@@ -19,7 +19,9 @@ import {
   setTeamRepositoryActive,
   removeTeamRepository,
   syncTeamRepositories,
-  applyMemoryPatch
+  applyMemoryPatch,
+  auditTeamConflicts,
+  resolveTeamConflict
 } from './memory-service.js';
 
 import {
@@ -31,7 +33,9 @@ import {
   detectContradictionsAndDrift,
   proactiveMemoryProbe,
   recordMemoryEfficacy,
-  getMemoryGraphNeighbors
+  getMemoryGraphNeighbors,
+  dreamMemoryConsolidation,
+  correlateTestExecutionEfficacy
 } from './sqlite-index.js';
 
 /**
@@ -521,6 +525,105 @@ const TOOLS = [
       },
       required: ['patch']
     }
+  },
+  {
+    name: 'audit_team_conflicts',
+    description:
+      'Audits multi-repository and team synchronization for potential conflicts (divergent overrides, conflicting rule bodies, missing dependencies). Returns detected conflicts with 3-way visual diffs.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        workspaceRoot: {
+          type: 'string',
+          description: 'Optional path to the project root directory. Defaults to current working directory.'
+        }
+      }
+    }
+  },
+  {
+    name: 'resolve_team_conflict',
+    description:
+      'Resolves a detected team memory conflict by choosing a resolution strategy ("adopt_team", "keep_private", or "merge_both") and updates persistent disk files, followed by index resynchronization.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        slug: {
+          type: 'string',
+          description: 'Unique slug of the conflicting memory entry.'
+        },
+        resolution: {
+          type: 'string',
+          enum: ['adopt_team', 'keep_private', 'merge_both'],
+          description: 'Conflict resolution strategy.'
+        },
+        mergedContent: {
+          type: 'string',
+          description: 'Merged markdown content or rule body (required when resolution is "merge_both").'
+        },
+        mergedFrontmatter: {
+          type: 'object',
+          description: 'Optional YAML frontmatter overrides for the merged entry.'
+        }
+      },
+      required: ['slug', 'resolution']
+    }
+  },
+  {
+    name: 'dream_memory_consolidation',
+    description:
+      'Executes automated "Memory Dreaming" & Semantic Synthesis (/kc-dream). Scans persistent memories across layers, clusters semantically overlapping or fragmented entries, and generates consolidation proposals to reduce context bloat and synthesize unified architectural rules.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        domain: {
+          type: 'string',
+          description: 'Optional category filter to isolate clustering to a specific domain.'
+        },
+        threshold: {
+          type: 'number',
+          description: 'Semantic cosine similarity threshold for clustering (default: 0.65).'
+        },
+        workspaceRoot: {
+          type: 'string',
+          description: 'Optional path to the project root directory. Defaults to current working directory.'
+        }
+      }
+    }
+  },
+  {
+    name: 'correlate_test_efficacy',
+    description:
+      'Closed-Loop Execution-Driven Efficacy automated verification hook. Correlates test suite executions (command, exitCode, stdout, stderr) with memory rules to boost or penalize efficacy scores and modulate future search confidence.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        command: {
+          type: 'string',
+          description: 'Test command executed (e.g. "npm test" or "go test ./...").'
+        },
+        exitCode: {
+          type: 'number',
+          description: 'Exit code of the test command (0 for pass, >0 for failure).'
+        },
+        stdout: {
+          type: 'string',
+          description: 'Standard output captured from test execution.'
+        },
+        stderr: {
+          type: 'string',
+          description: 'Standard error captured from test execution.'
+        },
+        slugs: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Optional explicit memory slugs to correlate. If omitted, uses recently applied/recalled memories.'
+        },
+        workspaceRoot: {
+          type: 'string',
+          description: 'Optional path to the project root directory. Defaults to current working directory.'
+        }
+      }
+    }
   }
 ];
 
@@ -553,7 +656,7 @@ function handleRequest(message) {
           },
           serverInfo: {
             name: 'knowledge-capture',
-            version: '2.0.0'
+            version: '2.2.0'
           }
         }
       });
@@ -601,10 +704,6 @@ function handleRequest(message) {
               mode: args.mode || 'hybrid',
               format: args.format || 'compact'
             });
-            // Record telemetry for top match
-            if (resultData && resultData.length > 0) {
-              recordTelemetryEvent(resultData[0].slug, 'recall');
-            }
             break;
 
           case 'get_layer_statistics':
@@ -619,10 +718,6 @@ function handleRequest(message) {
               args.slugs
             );
             resultData = contentObj.content;
-            if (args.slug) recordTelemetryEvent(args.slug, 'apply');
-            if (Array.isArray(args.slugs)) {
-              args.slugs.forEach(s => recordTelemetryEvent(s, 'apply'));
-            }
             break;
           }
 
@@ -727,6 +822,23 @@ function handleRequest(message) {
           case 'apply_memory_patch':
             resultData = applyMemoryPatch(workspaceRoot, args.patch || args);
             await syncSqliteIndex(workspaceRoot);
+            break;
+
+          case 'audit_team_conflicts':
+            resultData = auditTeamConflicts(workspaceRoot);
+            break;
+
+          case 'resolve_team_conflict':
+            resultData = resolveTeamConflict(workspaceRoot, args);
+            await syncSqliteIndex(workspaceRoot);
+            break;
+
+          case 'dream_memory_consolidation':
+            resultData = dreamMemoryConsolidation(workspaceRoot, args);
+            break;
+
+          case 'correlate_test_efficacy':
+            resultData = correlateTestExecutionEfficacy(workspaceRoot, args);
             break;
 
           default:

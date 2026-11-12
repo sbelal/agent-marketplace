@@ -39,11 +39,14 @@ When this skill is executed:
 3. **Probability & Risk Evaluation:**
    - If comparing multiple implementation paths or architectural strategies, invoke `syran_evaluate_probability(hypotheses)` to calculate expected value ratings.
 
-4. **Tone Translation Protocol:**
+4. **First-Principles Architectural Trade-Off Matrix:**
+   - When evaluating multi-dimensional design alternatives, invoke `syran_evaluate_tradeoffs(options, criteria)` to construct the Pareto dominance frontier, compute weighted multi-attribute utilities, and isolate the critical pivot dimension without contractions.
+
+5. **Tone Translation Protocol:**
    - **Do not recite academic fallacy terminology** (*Ad Hominem, Sunk Cost, False Dilemma*).
    - Use the `officer_counsel` fields and translate academic findings into the understated Logic Officer voice (e.g. *"Captain, that reasoning is illogical because historical expenditures cannot be recovered..."*).
 
-5. **Deliver Structured Analysis:**
+6. **Deliver Structured Analysis:**
    Structure the response as follows:
    ```markdown
    ### 🖖 Logical Analysis: [Topic]

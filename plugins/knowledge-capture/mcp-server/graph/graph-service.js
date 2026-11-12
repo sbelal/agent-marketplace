@@ -86,61 +86,68 @@ export function syncSqliteMetadata(workspaceRoot = process.cwd()) {
     VALUES (?, ?, ?, ?)
   `);
 
-  for (const [key, item] of currentFiles.entries()) {
-    const prevMtime = existingMap.get(key);
-    if (prevMtime && prevMtime === item.mtime) {
-      continue;
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    for (const [key, item] of currentFiles.entries()) {
+      const prevMtime = existingMap.get(key);
+      if (prevMtime && prevMtime === item.mtime) {
+        continue;
+      }
+
+      try {
+        const rawContent = fs.readFileSync(item.filePath, 'utf8');
+        const parsed = parseYamlFrontmatter(rawContent);
+        const fm = parsed.frontmatter;
+
+        const domain = fm.domain || 'general';
+        const type = fm.type || 'general';
+        const verified = fm.verified || '';
+        const trigger = fm.description || fm.trigger || '';
+
+        insertMetaNoVec.run(
+          item.wsId,
+          item.layer,
+          item.slug,
+          domain,
+          type,
+          verified,
+          trigger,
+          item.filePath,
+          item.mtime,
+          item.teamSlug || null
+        );
+
+        deleteFts.run(item.wsId, item.layer, item.slug);
+        insertFts.run(item.slug, domain, type, trigger, parsed.body, item.layer, item.wsId);
+
+        deleteGraph.run(item.wsId, item.slug);
+        if (Array.isArray(fm.related)) {
+          for (const rel of fm.related) {
+            if (rel) insertGraph.run(item.wsId, item.slug, rel, 'related');
+          }
+        }
+        if (fm.overrides) {
+          const overridesList = Array.isArray(fm.overrides) ? fm.overrides : [fm.overrides];
+          for (const ov of overridesList) {
+            if (ov) insertGraph.run(item.wsId, item.slug, ov, 'overrides');
+          }
+        }
+      } catch {}
     }
 
-    try {
-      const rawContent = fs.readFileSync(item.filePath, 'utf8');
-      const parsed = parseYamlFrontmatter(rawContent);
-      const fm = parsed.frontmatter;
-
-      const domain = fm.domain || 'general';
-      const type = fm.type || 'general';
-      const verified = fm.verified || '';
-      const trigger = fm.description || fm.trigger || '';
-
-      insertMetaNoVec.run(
-        item.wsId,
-        item.layer,
-        item.slug,
-        domain,
-        type,
-        verified,
-        trigger,
-        item.filePath,
-        item.mtime,
-        item.teamSlug || null
-      );
-
-      deleteFts.run(item.wsId, item.layer, item.slug);
-      insertFts.run(item.slug, domain, type, trigger, parsed.body, item.layer, item.wsId);
-
-      deleteGraph.run(item.wsId, item.slug);
-      if (Array.isArray(fm.related)) {
-        for (const rel of fm.related) {
-          if (rel) insertGraph.run(item.wsId, item.slug, rel, 'related');
-        }
+    const deleteMeta = db.prepare('DELETE FROM memories WHERE workspace_id = ? AND layer = ? AND slug = ?');
+    for (const row of existingRows) {
+      const key = `${row.workspace_id}:${row.layer}:${row.slug}`;
+      if (!currentFiles.has(key)) {
+        deleteMeta.run(row.workspace_id, row.layer, row.slug);
+        deleteFts.run(row.workspace_id, row.layer, row.slug);
+        deleteGraph.run(row.workspace_id, row.slug);
       }
-      if (fm.overrides) {
-        const overridesList = Array.isArray(fm.overrides) ? fm.overrides : [fm.overrides];
-        for (const ov of overridesList) {
-          if (ov) insertGraph.run(item.wsId, item.slug, ov, 'overrides');
-        }
-      }
-    } catch {}
-  }
-
-  const deleteMeta = db.prepare('DELETE FROM memories WHERE workspace_id = ? AND layer = ? AND slug = ?');
-  for (const row of existingRows) {
-    const key = `${row.workspace_id}:${row.layer}:${row.slug}`;
-    if (!currentFiles.has(key)) {
-      deleteMeta.run(row.workspace_id, row.layer, row.slug);
-      deleteFts.run(row.workspace_id, row.layer, row.slug);
-      deleteGraph.run(row.workspace_id, row.slug);
     }
+    db.exec('COMMIT');
+  } catch (err) {
+    db.exec('ROLLBACK');
+    throw err;
   }
 
   return { totalIndexed: currentFiles.size };
@@ -148,6 +155,7 @@ export function syncSqliteMetadata(workspaceRoot = process.cwd()) {
 
 /**
  * Returns complete referentially-validated knowledge graph data with bi-directional degree metrics.
+ * Pure read query adhering to CQS (does not mutate SQLite metadata).
  */
 export function getKnowledgeGraphData(workspaceRoot) {
   const db = getDatabase();
@@ -157,8 +165,6 @@ export function getKnowledgeGraphData(workspaceRoot) {
   let rawLinks = [];
 
   if (db) {
-    syncSqliteMetadata(workspaceRoot);
-
     rawNodes = db.prepare(`
       SELECT m.slug as id, m.slug, m.layer, m.domain, m.type, m.verified, m.trigger as description,
              COALESCE(t.applied_count, 0) as applied_count,
@@ -172,7 +178,7 @@ export function getKnowledgeGraphData(workspaceRoot) {
     `).all(currentWsId);
 
     rawLinks = db.prepare(`
-      SELECT source_slug as source, target_slug as target, rel_type as type
+      SELECT DISTINCT source_slug as source, target_slug as target, rel_type as type
       FROM memories_graph
       WHERE workspace_id = ? OR workspace_id = 'global'
     `).all(currentWsId);
@@ -195,15 +201,24 @@ export function getKnowledgeGraphData(workspaceRoot) {
       efficacy_score: typeof tele[e.slug]?.efficacy_score === 'number' ? tele[e.slug].efficacy_score : 1.0
     }));
 
+    const seenFallbackLinks = new Set();
     for (const entry of activeEntries) {
       if (Array.isArray(entry.related)) {
         for (const rel of entry.related) {
-          if (rel) rawLinks.push({ source: entry.slug, target: rel, type: 'related' });
+          const key = `${entry.slug}->${rel}:related`;
+          if (rel && !seenFallbackLinks.has(key)) {
+            seenFallbackLinks.add(key);
+            rawLinks.push({ source: entry.slug, target: rel, type: 'related' });
+          }
         }
       }
       if (entry.overridesList) {
         for (const ov of entry.overridesList) {
-          if (ov) rawLinks.push({ source: entry.slug, target: ov, type: 'overrides' });
+          const key = `${entry.slug}->${ov}:overrides`;
+          if (ov && !seenFallbackLinks.has(key)) {
+            seenFallbackLinks.add(key);
+            rawLinks.push({ source: entry.slug, target: ov, type: 'overrides' });
+          }
         }
       }
     }

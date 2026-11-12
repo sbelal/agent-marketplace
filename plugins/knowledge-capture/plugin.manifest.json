@@ -1,7 +1,7 @@
 {
   "name": "knowledge-capture",
   "displayName": "Knowledge Capture",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "Multi-layered persistent memory system with full CQS stdio MCP server, local SQLite FTS5 hybrid search, Memory Studio, proactive recall, and Git synchronization.",
   "author": "Sal Belal",
   "repository": "https://github.com/sbelal/agent-marketplace",

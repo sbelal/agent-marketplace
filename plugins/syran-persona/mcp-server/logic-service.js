@@ -221,3 +221,196 @@ export function evaluateProbability(hypotheses = [], prior = 0.5) {
     advisory: `Logically, hypothesis '${evaluations[0]?.label}' presents the optimal expected value rating.`
   };
 }
+
+/**
+ * First-Principles Architectural Trade-Off Matrix for Syran.
+ * 
+ * Performs deterministic multi-attribute utility theory (MAUT) evaluation,
+ * Pareto dominance analysis, and pivot sensitivity calculation across competing
+ * technical designs or architectural options.
+ * 
+ * @param {Array<{ name: string, description?: string, scores: Record<string, number> }>} options
+ * @param {Array<{ name: string, weight?: number, direction?: 'maximize'|'minimize', description?: string }>} [criteria]
+ * @returns {Object} Formal First-Principles Trade-Off Evaluation
+ */
+export function evaluateArchitecturalTradeoffs(options = [], criteria = []) {
+  if (!Array.isArray(options) || options.length < 2) {
+    return {
+      status: 'error',
+      officer: 'Syran',
+      message: 'A minimum of two candidate architectural options is required for comparative trade-off analysis.'
+    };
+  }
+
+  // Derive criteria list if not provided
+  let activeCriteria = Array.isArray(criteria) && criteria.length > 0 ? [...criteria] : [];
+  if (activeCriteria.length === 0) {
+    const firstScores = options[0].scores || {};
+    activeCriteria = Object.keys(firstScores).map(key => {
+      const isCost = /(cost|risk|latency|overhead|complexity|memory|cpu|delay|debt)/i.test(key);
+      return {
+        name: key,
+        weight: 1.0,
+        direction: isCost ? 'minimize' : 'maximize'
+      };
+    });
+  }
+
+  if (activeCriteria.length === 0) {
+    return {
+      status: 'error',
+      officer: 'Syran',
+      message: 'No architectural evaluation criteria were specified or could be inferred from options.'
+    };
+  }
+
+  // Normalize criteria weights
+  const totalWeight = activeCriteria.reduce((sum, c) => sum + (typeof c.weight === 'number' && c.weight > 0 ? c.weight : 1.0), 0);
+  const normalizedCriteria = activeCriteria.map(c => ({
+    name: c.name,
+    weight: (typeof c.weight === 'number' && c.weight > 0 ? c.weight : 1.0) / totalWeight,
+    rawWeight: typeof c.weight === 'number' && c.weight > 0 ? c.weight : 1.0,
+    direction: c.direction === 'minimize' ? 'minimize' : 'maximize',
+    description: c.description || c.name
+  }));
+
+  // Find min and max for each criterion
+  const criteriaBounds = {};
+  for (const c of normalizedCriteria) {
+    const values = options.map(o => (o.scores && typeof o.scores[c.name] === 'number') ? o.scores[c.name] : 0);
+    const minVal = Math.min(...values);
+    const maxVal = Math.max(...values);
+    criteriaBounds[c.name] = { min: minVal, max: maxVal, range: maxVal - minVal };
+  }
+
+  // Compute normalized scores and multi-attribute utility for each option
+  const evaluatedOptions = options.map(opt => {
+    const scores = opt.scores || {};
+    const normalizedScores = {};
+    let totalUtility = 0;
+
+    for (const c of normalizedCriteria) {
+      const rawVal = typeof scores[c.name] === 'number' ? scores[c.name] : 0;
+      const { min, max, range } = criteriaBounds[c.name];
+      let norm = 1.0;
+      if (range > 0) {
+        if (c.direction === 'maximize') {
+          norm = (rawVal - min) / range;
+        } else {
+          norm = (max - rawVal) / range;
+        }
+      }
+      normalizedScores[c.name] = Number(norm.toFixed(4));
+      totalUtility += norm * c.weight;
+    }
+
+    return {
+      name: opt.name || 'Unnamed Candidate',
+      description: opt.description || '',
+      rawScores: scores,
+      normalizedScores,
+      utility: Number(totalUtility.toFixed(4)),
+      utilityPercentage: Number((totalUtility * 100).toFixed(2)) + '%',
+      isDominated: false,
+      dominatedBy: []
+    };
+  });
+
+  // Pareto Dominance Analysis
+  for (let i = 0; i < evaluatedOptions.length; i++) {
+    for (let j = 0; j < evaluatedOptions.length; j++) {
+      if (i === j) continue;
+      const optA = evaluatedOptions[i];
+      const optB = evaluatedOptions[j];
+
+      let aAtLeastAsGood = true;
+      let aStrictlyBetter = false;
+
+      for (const c of normalizedCriteria) {
+        const scoreA = optA.normalizedScores[c.name];
+        const scoreB = optB.normalizedScores[c.name];
+        if (scoreA < scoreB) {
+          aAtLeastAsGood = false;
+          break;
+        }
+        if (scoreA > scoreB) {
+          aStrictlyBetter = true;
+        }
+      }
+
+      if (aAtLeastAsGood && aStrictlyBetter) {
+        optB.isDominated = true;
+        optB.dominatedBy.push(optA.name);
+      }
+    }
+  }
+
+  // Sort by composite utility descending
+  evaluatedOptions.sort((a, b) => b.utility - a.utility);
+
+  const paretoFrontier = evaluatedOptions
+    .filter(o => !o.isDominated)
+    .map(o => o.name);
+
+  const optimalOption = evaluatedOptions[0];
+  const runnerUp = evaluatedOptions.length > 1 ? evaluatedOptions[1] : null;
+
+  // Sensitivity / Critical Pivot Analysis
+  let pivotAnalysis = null;
+  if (runnerUp) {
+    let maxAdvantageCriterion = null;
+    let maxDelta = -1;
+
+    for (const c of normalizedCriteria) {
+      const runnerUpScore = runnerUp.normalizedScores[c.name];
+      const optimalScore = optimalOption.normalizedScores[c.name];
+      const delta = runnerUpScore - optimalScore;
+      if (delta > maxDelta) {
+        maxDelta = delta;
+        maxAdvantageCriterion = c;
+      }
+    }
+
+    if (maxAdvantageCriterion && maxDelta > 0) {
+      pivotAnalysis = {
+        criticalDimension: maxAdvantageCriterion.name,
+        runnerUpAdvantageDelta: Number(maxDelta.toFixed(4)),
+        explanation: `Candidate '${runnerUp.name}' demonstrates superior performance in '${maxAdvantageCriterion.name}'. If organizational constraints prioritize this dimension above all others, candidate '${runnerUp.name}' becomes viable.`
+      };
+    } else {
+      pivotAnalysis = {
+        criticalDimension: 'None',
+        explanation: `Candidate '${optimalOption.name}' strictly dominates or maintains parity across all assessed dimensions.`
+      };
+    }
+  }
+
+  // Formal Syran Logic Officer counsel (STRICTLY NO CONTRACTIONS)
+  let officerCounsel = `Captain, I have evaluated the ${options.length} architectural candidates across ${normalizedCriteria.length} dimensions from first principles. `;
+  officerCounsel += `The Pareto frontier contains: ${paretoFrontier.join(', ')}. `;
+  officerCounsel += `Option '${optimalOption.name}' yields the highest composite utility at ${optimalOption.utilityPercentage}. `;
+  if (runnerUp && pivotAnalysis && pivotAnalysis.criticalDimension !== 'None') {
+    officerCounsel += `The critical trade-off centers upon '${pivotAnalysis.criticalDimension}'. Should priorities shift toward '${pivotAnalysis.criticalDimension}', option '${runnerUp.name}' would merit reconsideration. `;
+  }
+  officerCounsel += `It is mathematically optimal to select '${optimalOption.name}' under the designated weight distribution.`;
+
+  return {
+    officer: 'Syran',
+    status: 'COMPLETE',
+    candidatesEvaluated: options.length,
+    criteriaCount: normalizedCriteria.length,
+    paretoFrontier,
+    optimalCandidate: optimalOption.name,
+    utilityRanking: evaluatedOptions.map((o, idx) => ({
+      rank: idx + 1,
+      name: o.name,
+      utilityPercentage: o.utilityPercentage,
+      utilityScore: o.utility,
+      isParetoOptimal: !o.isDominated,
+      dominatedBy: o.dominatedBy
+    })),
+    pivotAnalysis,
+    officerCounsel,
+    matrixDetails: evaluatedOptions
+  };
+}

@@ -115,3 +115,63 @@ export function recordMemoryEfficacy(slug, feedbackType, details = {}) {
   const data = readTelemetryJson();
   return data[slug] || { slug, efficacy_score: 1.0 };
 }
+
+/**
+ * Closed-Loop Execution-Driven Efficacy Hook.
+ * Correlates test suite executions (command, exitCode, stdout, stderr) with memory rules.
+ */
+export function correlateTestExecutionEfficacy(workspaceRoot = process.cwd(), options = {}) {
+  const { command = '', exitCode = 0, stdout = '', stderr = '', slugs = [] } = options;
+  const db = getDatabase();
+
+  let targetSlugs = Array.isArray(slugs) && slugs.length > 0 ? slugs : [];
+
+  if (targetSlugs.length === 0) {
+    if (db) {
+      try {
+        const rows = db.prepare(`
+          SELECT slug FROM telemetry 
+          WHERE last_applied IS NOT NULL OR last_recalled IS NOT NULL
+          ORDER BY COALESCE(last_applied, last_recalled) DESC
+          LIMIT 5
+        `).all();
+        targetSlugs = rows.map(r => r.slug);
+      } catch {}
+    } else {
+      const data = readTelemetryJson();
+      targetSlugs = Object.keys(data).slice(0, 5);
+    }
+  }
+
+  const results = {
+    command,
+    exitCode,
+    outcome: exitCode === 0 ? 'PASSED' : 'FAILED',
+    correlatedSlugs: [],
+    updatedScores: {}
+  };
+
+  if (exitCode === 0) {
+    for (const s of targetSlugs) {
+      const updated = recordMemoryEfficacy(s, 'test_pass', { command, message: 'Verified by automated test pass' });
+      results.correlatedSlugs.push(s);
+      results.updatedScores[s] = updated.efficacy_score;
+    }
+  } else {
+    const failureText = `${stdout}\n${stderr}`.toLowerCase();
+    for (const s of targetSlugs) {
+      const slugKey = s.replace(/-/g, ' ');
+      const isCorrelated = failureText.includes(s) || failureText.includes(slugKey) || targetSlugs.length <= 2;
+      if (isCorrelated) {
+        const updated = recordMemoryEfficacy(s, 'test_fail', {
+          command,
+          message: `Correlated with test failure: ${(stderr || stdout).slice(0, 200)}`
+        });
+        results.correlatedSlugs.push(s);
+        results.updatedScores[s] = updated.efficacy_score;
+      }
+    }
+  }
+
+  return results;
+}
