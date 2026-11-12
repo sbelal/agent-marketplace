@@ -238,7 +238,32 @@ export function getLayerStatistics(workspaceRoot) {
   }
 
   const privateGit = queryGitRepoStatus(paths.privateDir);
-  const teamGit = queryGitRepoStatus(paths.teamDir);
+  let teamGit = queryGitRepoStatus(paths.teamDir);
+
+  if (paths.activeTeamDirs && paths.activeTeamDirs.length > 0) {
+    const teamReposGit = [];
+    for (const tRepo of paths.activeTeamDirs) {
+      const gStatus = queryGitRepoStatus(tRepo.dir);
+      if (gStatus.isGit) {
+        teamReposGit.push({ slug: tRepo.slug, name: tRepo.name, ...gStatus });
+      }
+    }
+    if (teamReposGit.length > 0) {
+      const hasUncommitted = teamReposGit.some(r => !r.isClean);
+      const onPromote = teamReposGit.find(r => r.isPromoteBranch);
+      const totalBehind = teamReposGit.reduce((acc, r) => acc + (r.upstreamBehind || 0), 0);
+      const totalUncommitted = teamReposGit.reduce((acc, r) => acc + (r.uncommittedCount || 0), 0);
+      teamGit = {
+        isGit: true,
+        isClean: !hasUncommitted,
+        uncommittedCount: totalUncommitted,
+        branch: onPromote ? onPromote.branch : (teamReposGit[0]?.branch || 'main'),
+        isPromoteBranch: Boolean(onPromote),
+        upstreamBehind: totalBehind,
+        repos: teamReposGit
+      };
+    }
+  }
 
   return {
     counts: {
@@ -875,6 +900,7 @@ export function applyMemoryPatch(workspaceRoot = process.cwd(), patchData = {}) 
   const entryMap = new Map();
   for (const entry of activeEntries) {
     entryMap.set(entry.slug, entry);
+    entryMap.set(entry.slug.toLowerCase(), entry);
   }
 
   const results = {
@@ -887,7 +913,7 @@ export function applyMemoryPatch(workspaceRoot = process.cwd(), patchData = {}) 
   // 1. Update modified nodes
   for (const mod of modifiedNodes) {
     const slug = mod.slug;
-    const existing = entryMap.get(slug);
+    const existing = entryMap.get(slug) || (slug ? entryMap.get(String(slug).toLowerCase()) : null);
     if (!existing) {
       results.errors.push(`Memory slug '${slug}' not found on disk.`);
       continue;
@@ -915,7 +941,7 @@ export function applyMemoryPatch(workspaceRoot = process.cwd(), patchData = {}) 
     const targetSlug = typeof link.target === 'object' ? link.target.id || link.target.slug : link.target;
     const relType = link.type || 'related';
 
-    const sourceEntry = entryMap.get(sourceSlug);
+    const sourceEntry = entryMap.get(sourceSlug) || (sourceSlug ? entryMap.get(String(sourceSlug).toLowerCase()) : null);
     if (!sourceEntry) {
       results.errors.push(`Source memory '${sourceSlug}' not found.`);
       continue;
@@ -925,12 +951,13 @@ export function applyMemoryPatch(workspaceRoot = process.cwd(), patchData = {}) 
     try {
       const raw = fs.readFileSync(sourceFilePath, 'utf8');
       const parsed = parseYamlFrontmatter(raw);
+      const targetClean = String(targetSlug).trim();
       if (relType === 'overrides') {
-        parsed.frontmatter.overrides = targetSlug;
+        parsed.frontmatter.overrides = targetClean;
       } else {
         const related = Array.isArray(parsed.frontmatter.related) ? [...parsed.frontmatter.related] : [];
-        if (!related.includes(targetSlug)) {
-          related.push(targetSlug);
+        if (!related.some(r => r.toLowerCase() === targetClean.toLowerCase())) {
+          related.push(targetClean);
           parsed.frontmatter.related = related;
         }
       }
@@ -948,17 +975,18 @@ export function applyMemoryPatch(workspaceRoot = process.cwd(), patchData = {}) 
     const targetSlug = typeof link.target === 'object' ? link.target.id || link.target.slug : link.target;
     const relType = link.type || 'related';
 
-    const sourceEntry = entryMap.get(sourceSlug);
+    const sourceEntry = entryMap.get(sourceSlug) || (sourceSlug ? entryMap.get(String(sourceSlug).toLowerCase()) : null);
     if (!sourceEntry) continue;
 
     const sourceFilePath = sourceEntry.file || sourceEntry.path;
     try {
       const raw = fs.readFileSync(sourceFilePath, 'utf8');
       const parsed = parseYamlFrontmatter(raw);
-      if (relType === 'overrides' && parsed.frontmatter.overrides === targetSlug) {
+      const targetClean = String(targetSlug).trim().toLowerCase();
+      if (relType === 'overrides' && String(parsed.frontmatter.overrides || '').toLowerCase() === targetClean) {
         delete parsed.frontmatter.overrides;
       } else if (Array.isArray(parsed.frontmatter.related)) {
-        parsed.frontmatter.related = parsed.frontmatter.related.filter(s => s !== targetSlug);
+        parsed.frontmatter.related = parsed.frontmatter.related.filter(s => String(s).toLowerCase() !== targetClean);
       }
       const newContent = serializeYamlFrontmatter(parsed.frontmatter, parsed.body);
       atomicWriteFileSync(sourceFilePath, newContent, 'utf8');

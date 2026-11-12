@@ -43,10 +43,15 @@ export function scanLayerEntries(workspaceRoot, targetLayer = 'all') {
   if (normalized === 'all' || normalized === 'private') {
     layersToScan.push({ name: 'Private', key: 'private', dir: paths.privateDir });
   }
-  if (normalized === 'all' || normalized === 'team') {
+  const targetTeamSlug = normalized.startsWith('team/')
+    ? normalized.slice(5)
+    : (normalized !== 'all' && normalized !== 'team' && normalized !== 'workspace' && normalized !== 'private' ? normalized : null);
+
+  if (normalized === 'all' || normalized === 'team' || targetTeamSlug) {
     // Scan active team repositories
     if (paths.activeTeamDirs && paths.activeTeamDirs.length > 0) {
       for (const tRepo of paths.activeTeamDirs) {
+        if (targetTeamSlug && tRepo.slug.toLowerCase() !== targetTeamSlug.toLowerCase()) continue;
         layersToScan.push({
           name: `Team (${tRepo.slug})`,
           key: 'team',
@@ -55,7 +60,9 @@ export function scanLayerEntries(workspaceRoot, targetLayer = 'all') {
         });
       }
     } else if (!paths.settings?.teamRepos || paths.settings.teamRepos.length === 0) {
-      layersToScan.push({ name: 'Team', key: 'team', teamSlug: 'default', dir: paths.teamDir });
+      if (!targetTeamSlug || targetTeamSlug === 'default') {
+        layersToScan.push({ name: 'Team', key: 'team', teamSlug: 'default', dir: paths.teamDir });
+      }
     }
   }
 

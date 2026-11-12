@@ -611,6 +611,9 @@ Always specify runs-on: [self-hosted, linux, x64].
   assert.ok(foundTeamMem, 'Team memory under platform-eng must be discoverable in hybrid search');
   assert.equal(foundTeamMem.layer, 'team');
 
+  const teamSummary = getMemorySummary(ws1Root, { layer: 'platform-eng' });
+  assert.ok(teamSummary.includes('platform-ci-standard'), 'getMemorySummary with team slug should discover team entries');
+
   // 18.3 Deactivate platform-eng
   const deactRes = setTeamRepositoryActive('platform-eng', false, ws1Root);
   assert.equal(deactRes.ok, true);
@@ -754,6 +757,12 @@ Test only.
   assert.equal(patchResult.nodesUpdated, 1, 'Should update 1 node');
   assert.equal(patchResult.linksAdded, 1, 'Should add 1 link');
   assert.equal(patchResult.linksRemoved, 1, 'Should remove 1 link');
+
+  // Verify case-insensitive patch update
+  const casePatchResult = applyMemoryPatch(ws1Root, {
+    modified_nodes: [{ slug: 'K8S-DELETE-GUARD', domain: 'security' }]
+  });
+  assert.equal(casePatchResult.ok, true, 'Case-insensitive patch should succeed');
 
   // Verify on-disk file content
   const updatedFile = fs.readFileSync(path.join(ws1Root, '.agents', 'rules', 'memory', 'k8s-delete-guard.md'), 'utf8');

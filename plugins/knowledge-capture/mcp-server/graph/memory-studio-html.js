@@ -8,6 +8,7 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd(), option
   const graphData = getKnowledgeGraphData(workspaceRoot);
   const dataJson = JSON.stringify(graphData);
   const isCompact = Boolean(options.compact);
+  const serverUrl = options.serverUrl || '';
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -935,10 +936,10 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd(), option
 
       updatePendingBadge();
       updateSimulation();
-      if (isHttpServer) {
-        showToast(\`Node '\${selectedNode.slug}' staged! Click 'Save to Disk' to persist.\`);
+      if (isHttpServer || configuredServerUrl) {
+        showToast("Node '" + selectedNode.slug + "' staged! Click 'Save to Disk' to persist.");
       } else {
-        alert(\`Node '\${selectedNode.slug}' updated! Click Export Patch to apply.\`);
+        alert("Node '" + selectedNode.slug + "' updated! Click Export Patch to apply.");
       }
     };
 
@@ -955,8 +956,10 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd(), option
 
     // HTTP Server Direct Persistence
     const isHttpServer = window.location.protocol.startsWith('http');
+    const configuredServerUrl = "${serverUrl}";
+    const apiBase = isHttpServer ? '' : configuredServerUrl;
     const saveDiskBtn = document.getElementById('btn-save-disk');
-    if (isHttpServer && saveDiskBtn) {
+    if ((isHttpServer || configuredServerUrl) && saveDiskBtn) {
       saveDiskBtn.style.display = 'flex';
       const exportLabel = document.getElementById('export-btn-label');
       if (exportLabel) exportLabel.textContent = 'Patch JSON';
@@ -991,7 +994,8 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd(), option
         saveDiskBtn.innerHTML = '<span>⏳ Saving...</span>';
 
         try {
-          const res = await fetch('/api/patch', {
+          const targetUrl = (apiBase ? apiBase : '') + '/api/patch';
+          const res = await fetch(targetUrl, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(staged)

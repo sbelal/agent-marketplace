@@ -72,10 +72,18 @@ function main() {
 
   if (shouldPullTeam) {
     if (specificSlug) {
-      const targets = (paths.activeTeamDirs || []).filter(t => t.slug === specificSlug);
+      const targets = (paths.activeTeamDirs || []).filter(t => t.slug.toLowerCase() === specificSlug.toLowerCase());
       if (targets.length === 0) {
-        console.error(`Error: Team repository with slug '${specificSlug}' not found in settings.`);
-        exitCode = 1;
+        const inactiveRepo = (paths.settings?.teamRepos || []).find(r => r.slug.toLowerCase() === specificSlug.toLowerCase());
+        if (inactiveRepo) {
+          console.log(`Notice: Team repository '${specificSlug}' is configured but currently inactive in settings. Pulling updates...`);
+          const inactiveDir = path.join(paths.teamDir, inactiveRepo.slug);
+          const res = pullSingleRepo(inactiveDir, `Team Memory [${inactiveRepo.slug}]`, inactiveRepo.url);
+          if (res !== 0) exitCode = res;
+        } else {
+          console.error(`Error: Team repository with slug '${specificSlug}' not found in settings.`);
+          exitCode = 1;
+        }
       } else {
         for (const tRepo of targets) {
           const res = pullSingleRepo(tRepo.dir, `Team Memory [${tRepo.slug}]`, tRepo.url);
