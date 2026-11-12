@@ -31,7 +31,8 @@ import {
   removeTeamRepository,
   syncTeamRepositories,
   getMemorySummary,
-  deriveTeamRepoSlug
+  deriveTeamRepoSlug,
+  applyMemoryPatch
 } from '../plugins/knowledge-capture/mcp-server/memory-service.js';
 
 import {
@@ -676,6 +677,57 @@ Test only.
   assert.ok(fullSearch.length > 0, 'Full search must return results');
   assert.ok(typeof fullSearch[0].content === 'string' && fullSearch[0].content.length > 0, 'Full search results must expand markdown content body');
   console.log('  ✔ Passed: Token-budgeted hierarchical recall provides compact index cards and full body expansion on demand.\n');
+
+  // ==========================================
+  // TEST 21: Bidirectional Memory Studio Patch Application & Persistence
+  // ==========================================
+  console.log('Test 21: Bidirectional Memory Studio Patch Application & Persistence...');
+
+  const patchPayload = {
+    modified_nodes: [
+      {
+        slug: 'k8s-delete-guard',
+        domain: 'security',
+        type: 'convention',
+        description: 'WHEN deleting production namespace or ingress THEN verify manual confirmation and rollback plan',
+        verified: '2026-03-15'
+      }
+    ],
+    added_links: [
+      {
+        source: 'k8s-delete-guard',
+        target: 'k8s-crashloop-backoff',
+        type: 'related'
+      }
+    ],
+    removed_links: [
+      {
+        source: 'k8s-delete-guard',
+        target: 'k8s-pod-governance',
+        type: 'related'
+      }
+    ]
+  };
+
+  const patchResult = applyMemoryPatch(ws1Root, patchPayload);
+  assert.equal(patchResult.ok, true, 'applyMemoryPatch must succeed');
+  assert.equal(patchResult.nodesUpdated, 1, 'Should update 1 node');
+  assert.equal(patchResult.linksAdded, 1, 'Should add 1 link');
+  assert.equal(patchResult.linksRemoved, 1, 'Should remove 1 link');
+
+  // Verify on-disk file content
+  const updatedFile = fs.readFileSync(path.join(ws1Root, '.agents', 'rules', 'memory', 'k8s-delete-guard.md'), 'utf8');
+  const parsedUpdated = parseYamlFrontmatter(updatedFile);
+  assert.equal(parsedUpdated.frontmatter.domain, 'security', 'Frontmatter domain should be updated to security');
+  assert.equal(parsedUpdated.frontmatter.verified, '2026-03-15', 'Frontmatter verified date should be updated');
+  assert.ok(parsedUpdated.frontmatter.related.includes('k8s-crashloop-backoff'), 'New related link must be present');
+  assert.ok(!parsedUpdated.frontmatter.related.includes('k8s-pod-governance'), 'Removed related link must not be present');
+
+  // Sync SQLite and verify query reflection
+  await syncSqliteIndex(ws1Root);
+  const updatedSearch = await searchMemoriesHybrid(ws1Root, 'security ingress rollback', { format: 'compact' });
+  assert.ok(updatedSearch.some(m => m.slug === 'k8s-delete-guard'), 'Updated memory must be discoverable with new domain/trigger');
+  console.log('  ✔ Passed: Memory Studio patch successfully persisted to markdown frontmatter and synced to SQLite.\n');
 
   console.log('============================================================');
   console.log('🎉 ALL TESTS PASSED SUCCESSFULLY!');

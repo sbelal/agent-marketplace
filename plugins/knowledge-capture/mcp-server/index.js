@@ -18,7 +18,8 @@ import {
   addTeamRepository,
   setTeamRepositoryActive,
   removeTeamRepository,
-  syncTeamRepositories
+  syncTeamRepositories,
+  applyMemoryPatch
 } from './memory-service.js';
 
 import {
@@ -505,6 +506,21 @@ const TOOLS = [
       },
       required: ['action']
     }
+  },
+  {
+    name: 'apply_memory_patch',
+    description:
+      'Applies a structured memory patch (such as exported from the Bidirectional Memory Studio UI). Atomically updates memory frontmatter fields (domain, type, description, verified) and re-wires directional links (related, overrides) on disk, then synchronizes the SQLite index.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        patch: {
+          type: 'object',
+          description: 'The JSON patch object containing modified_nodes, added_links, and removed_links.'
+        }
+      },
+      required: ['patch']
+    }
   }
 ];
 
@@ -707,6 +723,11 @@ function handleRequest(message) {
             }
             break;
           }
+
+          case 'apply_memory_patch':
+            resultData = applyMemoryPatch(workspaceRoot, args.patch || args);
+            await syncSqliteIndex(workspaceRoot);
+            break;
 
           default:
             sendJsonRpc({

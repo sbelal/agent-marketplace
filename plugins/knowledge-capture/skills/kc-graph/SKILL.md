@@ -34,3 +34,8 @@ Write the generated HTML to a standalone `.html` artifact in `<appDataDir>/brain
 
 ### 3. Surface Graph Link in Chat
 Display a summary card in chat with metrics (total nodes, active domains, stale alerts) and point the developer to the newly generated knowledge graph artifact.
+
+### 4. Persisting Studio Changes (`apply_memory_patch`)
+When the developer makes modifications or links nodes in Memory Studio and exports a patch:
+- Pass the structured patch object to the MCP tool **`apply_memory_patch(patch)`**.
+- The server atomically modifies the corresponding markdown files across layers using POSIX atomic writes, updates `related` and `overrides` arrays, and immediately synchronizes the SQLite index with zero downtime.

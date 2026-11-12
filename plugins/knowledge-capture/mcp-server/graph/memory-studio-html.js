@@ -619,7 +619,8 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd()) {
       const remCount = staged.removed_links.length;
 
       document.getElementById('modal-summary').innerHTML = \`
-        <strong>Staged Changes:</strong> \${modCount} node(s) modified, \${addCount} link(s) added, \${remCount} link(s) removed.
+        <strong>Staged Changes:</strong> \${modCount} node(s) modified, \${addCount} link(s) added, \${remCount} link(s) removed.<br>
+        <span style="font-size:11px; color:#94a3b8; display:block; margin-top:4px;">To persist these changes to disk, copy the JSON below and pass it to the <code>apply_memory_patch</code> MCP tool, or paste it in chat for the assistant to apply.</span>
       \`;
 
       const patchData = {

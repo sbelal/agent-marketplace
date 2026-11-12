@@ -811,3 +811,117 @@ export function prepareTeamPromotion(workspaceRoot, params = {}) {
     prCommand: `gh pr create --base ${defaultBranch} --head "${branchName}" --title "memory: promote ${cleanSlug}" --fill`
   };
 }
+
+/**
+ * Applies a structured memory patch (such as exported from Bidirectional Memory Studio UI).
+ * Updates node frontmatters and re-wires directional links (related, overrides) on disk.
+ */
+export function applyMemoryPatch(workspaceRoot = process.cwd(), patchData = {}) {
+  const patch = patchData.patch || patchData;
+  const modifiedNodes = Array.isArray(patch.modified_nodes) ? patch.modified_nodes : [];
+  const addedLinks = Array.isArray(patch.added_links) ? patch.added_links : [];
+  const removedLinks = Array.isArray(patch.removed_links) ? patch.removed_links : [];
+
+  const { activeEntries } = scanLayerEntries(workspaceRoot, 'all');
+  const entryMap = new Map();
+  for (const entry of activeEntries) {
+    entryMap.set(entry.slug, entry);
+  }
+
+  const results = {
+    nodesUpdated: 0,
+    linksAdded: 0,
+    linksRemoved: 0,
+    errors: []
+  };
+
+  // 1. Update modified nodes
+  for (const mod of modifiedNodes) {
+    const slug = mod.slug;
+    const existing = entryMap.get(slug);
+    if (!existing) {
+      results.errors.push(`Memory slug '${slug}' not found on disk.`);
+      continue;
+    }
+    const filePath = existing.file || existing.path;
+    try {
+      const raw = fs.readFileSync(filePath, 'utf8');
+      const parsed = parseYamlFrontmatter(raw);
+      if (mod.domain) parsed.frontmatter.domain = mod.domain;
+      if (mod.type) parsed.frontmatter.type = mod.type;
+      if (mod.description) parsed.frontmatter.description = mod.description;
+      if (mod.verified) parsed.frontmatter.verified = mod.verified;
+
+      const newContent = serializeYamlFrontmatter(parsed.frontmatter, parsed.body);
+      atomicWriteFileSync(filePath, newContent, 'utf8');
+      results.nodesUpdated++;
+    } catch (err) {
+      results.errors.push(`Failed to update node '${slug}': ${err.message}`);
+    }
+  }
+
+  // 2. Add links (edges)
+  for (const link of addedLinks) {
+    const sourceSlug = typeof link.source === 'object' ? link.source.id || link.source.slug : link.source;
+    const targetSlug = typeof link.target === 'object' ? link.target.id || link.target.slug : link.target;
+    const relType = link.type || 'related';
+
+    const sourceEntry = entryMap.get(sourceSlug);
+    if (!sourceEntry) {
+      results.errors.push(`Source memory '${sourceSlug}' not found.`);
+      continue;
+    }
+
+    const sourceFilePath = sourceEntry.file || sourceEntry.path;
+    try {
+      const raw = fs.readFileSync(sourceFilePath, 'utf8');
+      const parsed = parseYamlFrontmatter(raw);
+      if (relType === 'overrides') {
+        parsed.frontmatter.overrides = targetSlug;
+      } else {
+        const related = Array.isArray(parsed.frontmatter.related) ? [...parsed.frontmatter.related] : [];
+        if (!related.includes(targetSlug)) {
+          related.push(targetSlug);
+          parsed.frontmatter.related = related;
+        }
+      }
+      const newContent = serializeYamlFrontmatter(parsed.frontmatter, parsed.body);
+      atomicWriteFileSync(sourceFilePath, newContent, 'utf8');
+      results.linksAdded++;
+    } catch (err) {
+      results.errors.push(`Failed to add link from '${sourceSlug}' to '${targetSlug}': ${err.message}`);
+    }
+  }
+
+  // 3. Remove links
+  for (const link of removedLinks) {
+    const sourceSlug = typeof link.source === 'object' ? link.source.id || link.source.slug : link.source;
+    const targetSlug = typeof link.target === 'object' ? link.target.id || link.target.slug : link.target;
+    const relType = link.type || 'related';
+
+    const sourceEntry = entryMap.get(sourceSlug);
+    if (!sourceEntry) continue;
+
+    const sourceFilePath = sourceEntry.file || sourceEntry.path;
+    try {
+      const raw = fs.readFileSync(sourceFilePath, 'utf8');
+      const parsed = parseYamlFrontmatter(raw);
+      if (relType === 'overrides' && parsed.frontmatter.overrides === targetSlug) {
+        delete parsed.frontmatter.overrides;
+      } else if (Array.isArray(parsed.frontmatter.related)) {
+        parsed.frontmatter.related = parsed.frontmatter.related.filter(s => s !== targetSlug);
+      }
+      const newContent = serializeYamlFrontmatter(parsed.frontmatter, parsed.body);
+      atomicWriteFileSync(sourceFilePath, newContent, 'utf8');
+      results.linksRemoved++;
+    } catch (err) {
+      results.errors.push(`Failed to remove link: ${err.message}`);
+    }
+  }
+
+  return {
+    ok: results.errors.length === 0,
+    success: results.errors.length === 0,
+    ...results
+  };
+}

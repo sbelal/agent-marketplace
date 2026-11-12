@@ -102,6 +102,7 @@ The plugin includes a lightweight, zero-dependency Node.js stdio **Model Context
 | **`proactive_memory_probe`** | Zero-turn pre-flight probe evaluating user prompts against memory triggers in < 5ms to surface immediate guidance cards. | `query` (*required* string), `threshold` (*optional* number), `limit` (*optional* number) |
 | **`mine_git_history_memories`** | Tacit knowledge archeology scanning Git commits, reverts, and bug fixes for undocumented gotchas. | `maxCommits` (*optional* number) |
 | **`record_memory_efficacy`** | Records verification feedback and efficacy telemetry for memory rules (`test_pass`, `test_fail`). | `slug` (*required* string), `feedbackType` (*required* string), `details` (*optional* object) |
+| **`apply_memory_patch`** | Atomically updates memory frontmatters (domain, type, description, verified) and directional graph links (`related:`, `overrides:`) on disk from a structured patch exported by Memory Studio, then re-synchronizes the SQLite index. | `patch` (*required* object) |
 
 ---
 
@@ -171,6 +172,14 @@ The **Bidirectional Memory Studio** (`/kc-graph`) is engineered with a **100% se
 - **Standalone Artifact Generation:** The MCP tool `generate_knowledge_graph_html` (or skill `/kc-graph`) outputs a self-contained HTML file containing embedded SVG layout styles, inlined graph data JSON, and client-side JavaScript bundle using D3.js.
 - **Direct Browser / Webview Execution:** The generated file (`knowledge-graph.html`) is written to the agent artifact directory (`<appDataDir>/brain/<conversation-id>/knowledge-graph.html`) and bookmarked as a user-facing deliverable. The IDE preview pane or web browser opens the file directly via `file://`.
 - **In-Browser Physics & Interactions:** Draggable node physics, live search filtering, domain cluster pills, the Connect Mode edge drawer, and the Quick Edit inspector drawer run **entirely inside the browser's JavaScript engine alone**. Staged edge additions and metadata updates are exported from the browser as structured JSON patches.
+
+### 💾 Persistence Bridge (How Edits Made in the Studio are Persisted)
+
+When the developer interacts with the visual canvas in their browser or preview pane:
+1. **Client-Side Staging:** Modifying node properties in the Quick Edit drawer (domain, type, trigger description, verified date) or drawing links between nodes in Connect Mode records changes in the in-memory client state (`stagedChanges`).
+2. **Export Patch:** Clicking **"Export Patch"** opens a modal with a structured JSON patch payload summarizing all modifications (`modified_nodes`, `added_links`, `removed_links`).
+3. **Application via MCP:** The patch is persisted to the file system using the **`apply_memory_patch`** MCP tool (or simply pasted in chat for the AI assistant to invoke).
+4. **Atomic Disk & SQLite Update:** The server locates the target `.md` files on disk, updates YAML frontmatters atomically using POSIX temp-and-rename (`atomicWriteFileSync`), re-wires `related` / `overrides` arrays, and triggers an immediate SQLite re-synchronization (`syncSqliteIndex`).
 
 ### Autonomous Agent-Only Skills (`user-invocable: false`)
 These skills are hidden from the user's slash command palette and run autonomously during agent execution:

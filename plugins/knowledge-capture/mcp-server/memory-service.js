@@ -27,7 +27,8 @@ export {
   mergeMemoryEntries,
   deleteMemoryEntry,
   syncMemoryLayer,
-  prepareTeamPromotion
+  prepareTeamPromotion,
+  applyMemoryPatch
 } from './core/memory-store.js';
 
 export {
