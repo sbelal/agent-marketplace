@@ -7,6 +7,7 @@ import { findMarkdownFiles, scanLayerEntries } from './shadow-resolver.js';
 import { tokenizeText, computeCosineSimilarity, computeDenseCosineSimilarity } from '../embeddings/heuristic-provider.js';
 import { getActiveEmbeddingConfig, generateEmbedding } from '../embeddings/onnx-provider.js';
 import { generateMultiVector, generateMultiVectorAsync, computeMultiVectorSimilarity } from '../embeddings/multi-vector.js';
+import { readTelemetryJson } from '../db/telemetry.js';
 
 /**
  * Checks if the SQLite cache is dirty (files modified, added, deleted, or embedding dimension changed).
@@ -180,6 +181,8 @@ export async function syncSqliteIndex(workspaceRoot = process.cwd()) {
     VALUES (?, ?, ?, ?)
   `);
 
+  const pendingUpdates = [];
+
   for (const [key, item] of currentFiles.entries()) {
     const prev = existingMap.get(key);
     if (prev && prev.mtime === item.mtime && prev.hasValidVector) {
@@ -217,49 +220,62 @@ export async function syncSqliteIndex(workspaceRoot = process.cwd()) {
         });
       }
 
-      insertMeta.run(
-        item.wsId,
-        item.layer,
-        item.slug,
-        domain,
-        type,
-        verified,
-        trigger,
-        item.filePath,
-        item.mtime,
-        JSON.stringify(multiVec.trigger_vector),
-        JSON.stringify(multiVec.content_vector),
-        JSON.stringify(multiVec.entity_vector),
-        item.teamSlug || null
-      );
-
-      deleteFts.run(item.wsId, item.layer, item.slug);
-      insertFts.run(item.slug, domain, type, trigger, parsed.body, item.layer, item.wsId);
-
-      deleteGraph.run(item.wsId, item.slug);
-      if (Array.isArray(fm.related)) {
-        for (const rel of fm.related) {
-          if (rel) insertGraph.run(item.wsId, item.slug, rel, 'related');
-        }
-      }
-      if (fm.overrides) {
-        const overridesList = Array.isArray(fm.overrides) ? fm.overrides : [fm.overrides];
-        for (const ov of overridesList) {
-          if (ov) insertGraph.run(item.wsId, item.slug, ov, 'overrides');
-        }
-      }
+      pendingUpdates.push({ item, domain, type, verified, trigger, body: parsed.body, fm, multiVec });
     } catch {}
   }
 
-  // Delete removed files from DB
-  const deleteMeta = db.prepare('DELETE FROM memories WHERE workspace_id = ? AND layer = ? AND slug = ?');
-  for (const row of existingRows) {
-    const key = `${row.workspace_id}:${row.layer}:${row.slug}`;
-    if (!currentFiles.has(key)) {
-      deleteMeta.run(row.workspace_id, row.layer, row.slug);
-      deleteFts.run(row.workspace_id, row.layer, row.slug);
-      deleteGraph.run(row.workspace_id, row.slug);
+  // Atomically flush updates and deletions within an immediate transaction
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    for (const u of pendingUpdates) {
+      insertMeta.run(
+        u.item.wsId,
+        u.item.layer,
+        u.item.slug,
+        u.domain,
+        u.type,
+        u.verified,
+        u.trigger,
+        u.item.filePath,
+        u.item.mtime,
+        JSON.stringify(u.multiVec.trigger_vector),
+        JSON.stringify(u.multiVec.content_vector),
+        JSON.stringify(u.multiVec.entity_vector),
+        u.item.teamSlug || null
+      );
+
+      deleteFts.run(u.item.wsId, u.item.layer, u.item.slug);
+      insertFts.run(u.item.slug, u.domain, u.type, u.trigger, u.body, u.item.layer, u.item.wsId);
+
+      deleteGraph.run(u.item.wsId, u.item.slug);
+      if (Array.isArray(u.fm.related)) {
+        for (const rel of u.fm.related) {
+          if (rel) insertGraph.run(u.item.wsId, u.item.slug, rel, 'related');
+        }
+      }
+      if (u.fm.overrides) {
+        const overridesList = Array.isArray(u.fm.overrides) ? u.fm.overrides : [u.fm.overrides];
+        for (const ov of overridesList) {
+          if (ov) insertGraph.run(u.item.wsId, u.item.slug, ov, 'overrides');
+        }
+      }
     }
+
+    // Delete removed files from DB
+    const deleteMeta = db.prepare('DELETE FROM memories WHERE workspace_id = ? AND layer = ? AND slug = ?');
+    for (const row of existingRows) {
+      const key = `${row.workspace_id}:${row.layer}:${row.slug}`;
+      if (!currentFiles.has(key)) {
+        deleteMeta.run(row.workspace_id, row.layer, row.slug);
+        deleteFts.run(row.workspace_id, row.layer, row.slug);
+        deleteGraph.run(row.workspace_id, row.slug);
+      }
+    }
+
+    db.exec('COMMIT');
+  } catch (err) {
+    db.exec('ROLLBACK');
+    throw err;
   }
 
   return { totalIndexed: currentFiles.size };
@@ -273,6 +289,7 @@ export function searchMemoriesFileBasedFallback(workspaceRoot, queryText, option
   const tokens = tokenizeText(queryText);
   if (!tokens.length) return [];
 
+  const tele = readTelemetryJson();
   const scored = [];
   const precedence = { workspace: 3, private: 2, team: 1 };
 
@@ -293,15 +310,19 @@ export function searchMemoriesFileBasedFallback(workspaceRoot, queryText, option
     const combinedScore = (sim * 0.6) + (keywordBoost * 0.4);
 
     if (combinedScore > 0.05) {
-      const confidence = Math.round(Math.min(1.0, combinedScore * 1.5) * 100);
+      const efficacyScore = typeof tele[entry.slug]?.efficacy_score === 'number' ? tele[entry.slug].efficacy_score : 1.0;
+      const baseConfidence = Math.round(Math.min(1.0, combinedScore * 1.5) * 100);
+      const modulatedConfidence = Math.round(baseConfidence * (0.6 + 0.4 * efficacyScore));
       scored.push({
         slug: entry.slug,
         layer: entry.layerKey,
         domain: entry.domain,
         type: entry.type,
         description: entry.trigger,
-        confidence,
-        confidenceDecimal: confidence / 100,
+        confidence: modulatedConfidence,
+        confidenceDecimal: modulatedConfidence / 100,
+        efficacyScore,
+        ...(efficacyScore < 0.6 ? { lowEfficacyWarning: `Memory efficacy rating is ${Math.round(efficacyScore * 100)}% due to prior test failures.` } : {}),
         related: entry.related || [],
         precedenceTier: precedence[entry.layerKey] || 0
       });
@@ -359,10 +380,28 @@ export async function searchMemoriesHybrid(workspaceRoot, queryText, options = {
 
   const allRows = db.prepare(`
     SELECT m.slug, m.layer, m.workspace_id, m.domain, m.type, m.trigger, m.path,
-           m.trigger_vector, m.content_vector, m.entity_vector
+           m.trigger_vector, m.content_vector, m.entity_vector,
+           COALESCE(t.efficacy_score, 1.0) as efficacy_score,
+           COALESCE(t.test_pass_count, 0) as test_pass_count,
+           COALESCE(t.test_fail_count, 0) as test_fail_count
     FROM memories m
+    LEFT JOIN telemetry t ON m.slug = t.slug
     WHERE (m.workspace_id = ? OR m.workspace_id = 'global')
   `).all(currentWsId);
+
+  const precedence = { workspace: 3, private: 2, team: 1 };
+  const allRowsMap = new Map();
+  const allRowsLayerMap = new Map();
+  for (const r of allRows) {
+    if (shadowedSet.has(`${r.layer}:${r.slug}`) || (r.layer === 'team' && shadowedSet.has(r.slug))) {
+      continue;
+    }
+    allRowsLayerMap.set(`${r.layer}:${r.slug}`, r);
+    const existing = allRowsMap.get(r.slug);
+    if (!existing || (precedence[r.layer] || 0) > (precedence[existing.layer] || 0)) {
+      allRowsMap.set(r.slug, r);
+    }
+  }
 
   const vecCandidates = [];
   for (const row of allRows) {
@@ -422,8 +461,10 @@ export async function searchMemoriesHybrid(workspaceRoot, queryText, options = {
   let ftsMatches = [];
   try {
     const stmt = db.prepare(`
-      SELECT f.slug, f.layer, f.workspace_id, f.domain, f.type, f.trigger, f.content, bm25(memories_fts) as bm25_score
+      SELECT f.slug, f.layer, f.workspace_id, f.domain, f.type, f.trigger, f.content, bm25(memories_fts) as bm25_score,
+             COALESCE(t.efficacy_score, 1.0) as efficacy_score
       FROM memories_fts f
+      LEFT JOIN telemetry t ON f.slug = t.slug
       WHERE memories_fts MATCH ?
         AND (f.workspace_id = ? OR f.workspace_id = 'global')
       ORDER BY bm25_score ASC
@@ -442,7 +483,6 @@ export async function searchMemoriesHybrid(workspaceRoot, queryText, options = {
   });
 
   const candidateSlugs = new Set([...vecRankMap.keys(), ...ftsRankMap.keys()]);
-  const precedence = { workspace: 3, private: 2, team: 1 };
   const candidateMap = new Map();
 
   const k = 60;
@@ -451,7 +491,7 @@ export async function searchMemoriesHybrid(workspaceRoot, queryText, options = {
   for (const slug of candidateSlugs) {
     const vecItem = vecRankMap.get(slug);
     const ftsItem = ftsRankMap.get(slug);
-    const baseRow = (ftsItem && ftsItem.row) || (vecItem && vecItem.row);
+    const baseRow = allRowsMap.get(slug) || (ftsItem && ftsItem.row) || (vecItem && vecItem.row);
     if (!baseRow) continue;
 
     let rrfScore = 0;
@@ -475,14 +515,20 @@ export async function searchMemoriesHybrid(workspaceRoot, queryText, options = {
       WHERE (workspace_id = ? OR workspace_id = 'global') AND source_slug = ?
     `).all(currentWsId, slug);
 
+    const efficacyScore = typeof baseRow.efficacy_score === 'number' ? baseRow.efficacy_score : 1.0;
+    const baseConfidence = Math.round(confidenceDecimal * 100);
+    const modulatedConfidence = Math.round(baseConfidence * (0.6 + 0.4 * efficacyScore));
+
     const cand = {
       slug: baseRow.slug,
       layer: baseRow.layer,
       domain: baseRow.domain,
       type: baseRow.type,
       description: baseRow.trigger,
-      confidence: Math.round(confidenceDecimal * 100),
-      confidenceDecimal,
+      confidence: modulatedConfidence,
+      confidenceDecimal: modulatedConfidence / 100,
+      efficacyScore,
+      ...(efficacyScore < 0.6 ? { lowEfficacyWarning: `Memory efficacy rating is ${Math.round(efficacyScore * 100)}% due to prior test failures.` } : {}),
       related: graphRows.map(g => g.target_slug),
       precedenceTier: precedence[baseRow.layer] || 0
     };

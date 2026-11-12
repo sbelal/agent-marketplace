@@ -20,26 +20,9 @@ const GIT_EXEC_ENV = {
  * 2. Interactive step-by-step TUI wizard when run without flags in an interactive terminal.
  */
 
-/**
- * Auto-derives a unique team repository slug in the format <org_id>-<repo_slug> or <account_id>-<repo_slug>.
- */
-export function deriveTeamRepoSlug(url) {
-  if (!url || typeof url !== 'string') return 'team-repo';
-  const clean = url.trim().replace(/\.git$/i, '').replace(/\/+$/, '');
-  const scpMatch = clean.match(/[:/]([^/:]+)\/([^/:]+)$/);
-  if (scpMatch) {
-    const org = scpMatch[1].replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
-    const repo = scpMatch[2].replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
-    return `${org}-${repo}`.replace(/--+/g, '-').replace(/^-|-$/g, '');
-  }
-  const parts = clean.split(/[/:\\\\]/).filter(Boolean);
-  if (parts.length >= 2) {
-    const org = parts[parts.length - 2].replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
-    const repo = parts[parts.length - 1].replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
-    return `${org}-${repo}`.replace(/--+/g, '-').replace(/^-|-$/g, '');
-  }
-  return clean.replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase() || 'team-repo';
-}
+import { deriveTeamRepoSlug } from '../mcp-server/core/storage-paths.js';
+
+export { deriveTeamRepoSlug };
 
 export function setupEnvironment(options = {}) {
   const home = os.homedir();

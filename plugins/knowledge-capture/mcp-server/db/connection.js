@@ -1,7 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import os from 'node:os';
-import { getStorageDir } from '../core/storage-paths.js';
+import { getStorageDir, getDbPath } from '../core/storage-paths.js';
+
+export { getDbPath };
 
 let DatabaseSync = null;
 let isSqliteSupported = false;
@@ -18,10 +19,6 @@ try {
 
 export function isSqliteAvailable() {
   return isSqliteSupported;
-}
-
-export function getDbPath() {
-  return path.join(getStorageDir(), 'cache.sqlite');
 }
 
 let dbInstance = null;

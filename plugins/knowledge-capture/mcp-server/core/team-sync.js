@@ -1,15 +1,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { execSync } from 'node:child_process';
-import { resolveStoragePaths, getStorageDir, getSettings, deriveTeamRepoSlug } from './storage-paths.js';
+import { resolveStoragePaths, getStorageDir, getSettings, deriveTeamRepoSlug, GIT_EXEC_ENV } from './storage-paths.js';
+import { findMarkdownFiles } from '../retrieval/shadow-resolver.js';
+import { parseYamlFrontmatter, serializeYamlFrontmatter } from './yaml-parser.js';
+import { atomicWriteFileSync } from './memory-store.js';
 
 export { deriveTeamRepoSlug };
-
-const GIT_EXEC_ENV = {
-  ...process.env,
-  GIT_TERMINAL_PROMPT: '0',
-  GIT_SSH_COMMAND: 'ssh -o BatchMode=yes -o ConnectTimeout=3'
-};
 
 function saveSettings(settings, storageDir = getStorageDir()) {
   const p = path.join(storageDir, 'settings.json');
@@ -317,4 +314,192 @@ export function syncTeamRepositories(arg1 = process.cwd(), arg2 = {}) {
     success: true,
     synced: syncResults
   };
+}
+
+/**
+ * 3-Way Team Conflict & Divergence Auditor.
+ * Audits active Team repositories against local Private overrides and detects diverged or stale rules.
+ */
+export function auditTeamConflicts(workspaceRoot = process.cwd()) {
+  const paths = resolveStoragePaths(workspaceRoot);
+  const conflicts = [];
+
+  const privateFiles = findMarkdownFiles(paths.privateDir);
+  const privateMap = new Map();
+
+  for (const pf of privateFiles) {
+    const base = path.basename(pf, '.md');
+    if (base.toUpperCase() === 'README') continue;
+    try {
+      const raw = fs.readFileSync(pf, 'utf8');
+      const parsed = parseYamlFrontmatter(raw);
+      const slug = parsed.frontmatter.name || base;
+      const data = {
+        slug,
+        filePath: pf,
+        frontmatter: parsed.frontmatter,
+        body: parsed.body,
+        overrides: parsed.frontmatter.overrides || null
+      };
+      privateMap.set(slug.toLowerCase(), data);
+      if (parsed.frontmatter.overrides) {
+        const ovs = Array.isArray(parsed.frontmatter.overrides) ? parsed.frontmatter.overrides : [parsed.frontmatter.overrides];
+        for (const ov of ovs) {
+          privateMap.set(String(ov).toLowerCase(), data);
+        }
+      }
+    } catch {}
+  }
+
+  const teamRepos = paths.activeTeamDirs && paths.activeTeamDirs.length > 0
+    ? paths.activeTeamDirs
+    : [{ slug: 'default', name: 'Default Team', dir: paths.teamDir }];
+
+  for (const tRepo of teamRepos) {
+    const teamFiles = findMarkdownFiles(tRepo.dir);
+    for (const tf of teamFiles) {
+      const base = path.basename(tf, '.md');
+      if (base.toUpperCase() === 'README') continue;
+
+      try {
+        const raw = fs.readFileSync(tf, 'utf8');
+        const parsed = parseYamlFrontmatter(raw);
+        const slug = parsed.frontmatter.name || base;
+        const slugKey = slug.toLowerCase();
+
+        const privateMatch = privateMap.get(slugKey);
+        if (privateMatch) {
+          const teamBody = parsed.body.trim();
+          const privBody = privateMatch.body.trim();
+          const teamFm = parsed.frontmatter;
+          const privFm = privateMatch.frontmatter;
+
+          const isBodyIdentical = teamBody === privBody;
+          const isTriggerIdentical = (teamFm.description || teamFm.trigger) === (privFm.description || privFm.trigger);
+
+          if (!isBodyIdentical || !isTriggerIdentical) {
+            let divergenceType = 'content_divergence';
+            let recommendedResolution = 'keep_private';
+
+            const teamVerified = Date.parse(teamFm.verified || '') || 0;
+            const privVerified = Date.parse(privFm.verified || '') || 0;
+
+            if (teamVerified > privVerified && (teamVerified - privVerified) > 14 * 24 * 3600 * 1000) {
+              divergenceType = 'upstream_updated_ahead';
+              recommendedResolution = 'adopt_team';
+            } else if (privFm.overrides === slug) {
+              divergenceType = 'intentional_private_override';
+              recommendedResolution = 'keep_private';
+            } else {
+              divergenceType = 'diverged_edits';
+              recommendedResolution = 'merge_both';
+            }
+
+            conflicts.push({
+              slug,
+              privateSlug: privateMatch.slug,
+              teamSlug: tRepo.slug,
+              teamRepoName: tRepo.name,
+              teamPath: tf,
+              privatePath: privateMatch.filePath,
+              teamFrontmatter: teamFm,
+              privateFrontmatter: privFm,
+              divergenceType,
+              recommendedResolution,
+              diffSummary: {
+                triggerChanged: !isTriggerIdentical,
+                bodyLengthDelta: privBody.length - teamBody.length,
+                teamVerified: teamFm.verified || 'unverified',
+                privateVerified: privFm.verified || 'unverified'
+              }
+            });
+          }
+        }
+      } catch {}
+    }
+  }
+
+  return {
+    workspace: workspaceRoot,
+    conflictsCount: conflicts.length,
+    status: conflicts.length === 0 ? 'SYNCHRONIZED' : 'CONFLICTS_DETECTED',
+    conflicts
+  };
+}
+
+/**
+ * 3-Way Team Conflict Resolver.
+ */
+export function resolveTeamConflict(workspaceRoot = process.cwd(), options = {}) {
+  const { slug, resolution, mergedContent, mergedFrontmatter } = options;
+  if (!slug) throw new Error('slug is required to resolve conflict.');
+  if (!['adopt_team', 'keep_private', 'merge_both'].includes(resolution)) {
+    throw new Error(`Invalid resolution: '${resolution}'. Must be 'adopt_team', 'keep_private', or 'merge_both'.`);
+  }
+
+  const paths = resolveStoragePaths(workspaceRoot);
+  const cleanSlug = path.basename(slug.trim()).replace(/\.md$/i, '');
+  const privateFile = path.join(paths.privateDir, `${cleanSlug}.md`);
+
+  if (!fs.existsSync(privateFile)) {
+    throw new Error(`Private memory file not found: ${privateFile}`);
+  }
+
+  if (resolution === 'adopt_team') {
+    fs.unlinkSync(privateFile);
+    return {
+      ok: true,
+      success: true,
+      slug: cleanSlug,
+      action: 'adopted_team_standard',
+      removedPrivateFile: privateFile
+    };
+  }
+
+  if (resolution === 'keep_private') {
+    const raw = fs.readFileSync(privateFile, 'utf8');
+    const parsed = parseYamlFrontmatter(raw);
+    parsed.frontmatter.verified = new Date().toISOString().slice(0, 10);
+    const updated = serializeYamlFrontmatter(parsed.frontmatter, parsed.body);
+    atomicWriteFileSync(privateFile, updated, 'utf8');
+    return {
+      ok: true,
+      success: true,
+      slug: cleanSlug,
+      action: 'kept_private_override',
+      verified: parsed.frontmatter.verified
+    };
+  }
+
+  if (resolution === 'merge_both') {
+    if (!mergedContent) {
+      throw new Error('mergedContent is required when resolution is "merge_both".');
+    }
+    const raw = fs.readFileSync(privateFile, 'utf8');
+    const parsed = parseYamlFrontmatter(raw);
+    let contentFm = {};
+    let body = mergedContent;
+    if (mergedContent.trimStart().startsWith('---')) {
+      const parsedContent = parseYamlFrontmatter(mergedContent);
+      contentFm = parsedContent.frontmatter || {};
+      body = parsedContent.body || '';
+    }
+
+    const fm = {
+      ...parsed.frontmatter,
+      ...contentFm,
+      ...(mergedFrontmatter || {}),
+      verified: new Date().toISOString().slice(0, 10)
+    };
+
+    const serialized = serializeYamlFrontmatter(fm, body);
+    atomicWriteFileSync(privateFile, serialized, 'utf8');
+    return {
+      ok: true,
+      success: true,
+      slug: cleanSlug,
+      action: 'merged_both_versions',
+      filePath: privateFile
+    };
+  }
 }

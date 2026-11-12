@@ -32,7 +32,9 @@ import {
   syncTeamRepositories,
   getMemorySummary,
   deriveTeamRepoSlug,
-  applyMemoryPatch
+  applyMemoryPatch,
+  auditTeamConflicts,
+  resolveTeamConflict
 } from '../plugins/knowledge-capture/mcp-server/memory-service.js';
 
 import { startStudioServer } from '../plugins/knowledge-capture/bin/studio.js';
@@ -55,13 +57,16 @@ import {
   generateEmbedding,
   getActiveEmbeddingConfig,
   resetOnnxState,
-  isIndexDirty
+  isIndexDirty,
+  dreamMemoryConsolidation,
+  correlateTestExecutionEfficacy
 } from '../plugins/knowledge-capture/mcp-server/sqlite-index.js';
 
 import {
   consultLogic,
   analyzeLogicalFallacies,
-  evaluateProbability
+  evaluateProbability,
+  evaluateArchitecturalTradeoffs
 } from '../plugins/syran-persona/mcp-server/logic-service.js';
 
 function teardown() {
@@ -800,6 +805,275 @@ Test only.
     await studioServer.close();
   }
   console.log('  ✔ Passed: Standalone Memory Studio CLI server provides direct browser-to-disk persistence via /api/patch.\n');
+
+  // ==========================================
+  // TEST 23: 3-Way Conflict Resolution & Visual Diff for Team Layer
+  // ==========================================
+  console.log('Test 23: 3-Way Conflict Resolution & Visual Diff for Team Layer...');
+  
+  // 23.1 Register team repo and setup rule
+  const addConflictRes = addTeamRepository('core-platform', 'https://github.com/org/core-platform.git', 'Core Platform', ws1Root);
+  const teamRulePath = path.join(addConflictRes.dir, 'k8s-pod-governance.md');
+  fs.writeFileSync(teamRulePath, `---
+name: k8s-pod-governance
+type: convention
+domain: kubernetes
+description: Pod governance standards across core platform
+verified: 2026-03-25
+---
+# Pod Governance
+## Why
+Standardize pod security context.
+## How to apply
+Always set runAsNonRoot: true.
+`, 'utf8');
+
+  // Setup divergent private rule
+  const privateDir = path.join(process.env.KC_STORAGE_DIR, 'private');
+  fs.mkdirSync(privateDir, { recursive: true });
+  const privateRulePath = path.join(privateDir, 'k8s-pod-governance.md');
+  fs.writeFileSync(privateRulePath, `---
+name: k8s-pod-governance
+type: convention
+domain: kubernetes
+description: Local custom pod governance rule
+verified: 2026-01-01
+---
+# Pod Governance
+## Why
+Local override for development testing.
+## How to apply
+Local dev pods may use runAsNonRoot: false.
+`, 'utf8');
+
+  // 23.2 Audit conflicts
+  const conflictAudit = auditTeamConflicts(ws1Root);
+  assert.equal(conflictAudit.status, 'CONFLICTS_DETECTED', 'Conflict audit must detect divergence between private and team');
+  assert.ok(conflictAudit.conflictsCount >= 1, 'Should find at least 1 conflict');
+  const targetConflict = conflictAudit.conflicts.find(c => c.slug === 'k8s-pod-governance');
+  assert.ok(targetConflict, 'Conflict list must contain k8s-pod-governance');
+  assert.ok(targetConflict.diffSummary, 'Conflict must contain visual diffSummary');
+
+  // 23.3 Resolve via keep_private
+  const keepRes = resolveTeamConflict(ws1Root, { slug: 'k8s-pod-governance', resolution: 'keep_private' });
+  assert.equal(keepRes.ok, true, 'resolveTeamConflict with keep_private must succeed');
+  assert.equal(keepRes.action, 'kept_private_override');
+  assert.ok(fs.existsSync(privateRulePath), 'Private file must remain after keep_private');
+
+  // 23.4 Resolve via merge_both
+  const mergedRule = `---
+name: k8s-pod-governance
+type: convention
+domain: kubernetes
+description: Unified pod governance for both prod and local dev
+verified: 2026-03-25
+---
+# Pod Governance
+## Why
+Standardize pod security context while supporting dev exceptions.
+## How to apply
+Enforce runAsNonRoot: true in production, allow exceptions in dev.
+`;
+  const mergeRes = resolveTeamConflict(ws1Root, {
+    slug: 'k8s-pod-governance',
+    resolution: 'merge_both',
+    mergedContent: mergedRule
+  });
+  assert.equal(mergeRes.ok, true, 'resolveTeamConflict with merge_both must succeed');
+  assert.equal(mergeRes.action, 'merged_both_versions');
+  const mergedContentDisk = fs.readFileSync(privateRulePath, 'utf8');
+  assert.ok(mergedContentDisk.includes('Unified pod governance'), 'Disk file must contain merged content');
+
+  // 23.5 Resolve via adopt_team (unlinks private copy)
+  const adoptRes = resolveTeamConflict(ws1Root, { slug: 'k8s-pod-governance', resolution: 'adopt_team' });
+  assert.equal(adoptRes.ok, true, 'resolveTeamConflict with adopt_team must succeed');
+  assert.equal(adoptRes.action, 'adopted_team_standard');
+  assert.equal(fs.existsSync(privateRulePath), false, 'Private file must be removed after adopting team standard');
+
+  // Cleanup conflict repo
+  removeTeamRepository('core-platform', true, ws1Root);
+  console.log('  ✔ Passed: 3-way conflict detection, visual diff summary, and resolution strategies verified.\n');
+
+  // ==========================================
+  // TEST 24: Memory Dreaming & Autonomous Semantic Synthesis (/kc-dream)
+  // ==========================================
+  console.log('Test 24: Memory Dreaming & Autonomous Semantic Synthesis (/kc-dream)...');
+
+  // Create two closely related, fragmented memories in workspace
+  const dreamDir = path.join(ws1Root, '.agents', 'rules', 'memory');
+  fs.writeFileSync(path.join(dreamDir, 'k8s-cpu-throttling.md'), `---
+name: k8s-cpu-throttling
+type: tool-gotcha
+domain: kubernetes
+description: When detecting CFS CPU throttling in Kubernetes pods
+verified: 2026-03-01
+---
+# CPU Throttling
+## Why
+CFS quota throttling causes latency spikes.
+## How to apply
+Increase CPU limits or disable quotas.
+`, 'utf8');
+
+  fs.writeFileSync(path.join(dreamDir, 'k8s-memory-oom-guard.md'), `---
+name: k8s-memory-oom-guard
+type: tool-gotcha
+domain: kubernetes
+description: When preventing Kubernetes pod container OOM kills and cgroup memory exhaustion
+verified: 2026-03-01
+---
+# Memory OOM Guard
+## Why
+Container OOM kills drop traffic abruptly.
+## How to apply
+Set memory request equal to limit.
+`, 'utf8');
+
+  await syncSqliteIndex(ws1Root);
+
+  const dreamResult = dreamMemoryConsolidation(ws1Root, { domain: 'kubernetes', threshold: 0.5 });
+  assert.ok(dreamResult.totalMemoriesAnalyzed >= 2, 'Should analyze at least 2 memories');
+  assert.ok(Array.isArray(dreamResult.clusters), 'Dream result must contain clusters array');
+  assert.ok(dreamResult.clusters.length >= 1, 'Should discover at least 1 consolidation cluster');
+  const dreamCluster = dreamResult.clusters[0];
+  assert.ok(dreamCluster.memberSlugs.length >= 2, 'Cluster must contain multiple member slugs');
+  assert.ok(dreamCluster.targetSlug, 'Cluster must propose a consolidated target slug');
+  assert.ok(dreamCluster.unifiedTrigger, 'Cluster must synthesize a unified trigger');
+  assert.ok(dreamCluster.synthesizedBody.includes('## How to apply'), 'Synthesized body must format structured guideline');
+  assert.ok(typeof dreamCluster.estimatedTokenSavingsPct === 'number', 'Token savings percentage must be calculated');
+
+  // Cleanup dream memories
+  fs.unlinkSync(path.join(dreamDir, 'k8s-cpu-throttling.md'));
+  fs.unlinkSync(path.join(dreamDir, 'k8s-memory-oom-guard.md'));
+  await syncSqliteIndex(ws1Root);
+  console.log('  ✔ Passed: Automated memory dreaming, semantic clustering, and proposal synthesis verified.\n');
+
+  // ==========================================
+  // TEST 25: Closed-Loop Execution-Driven Efficacy Hook
+  // ==========================================
+  console.log('Test 25: Closed-Loop Execution-Driven Efficacy Hook & Confidence Modulation...');
+
+  // 25.1 Create test memory
+  fs.writeFileSync(path.join(dreamDir, 'test-runner-guideline.md'), `---
+name: test-runner-guideline
+type: convention
+domain: testing
+description: When configuring unit and integration test runner environments
+verified: 2026-03-01
+---
+# Test Runner Guideline
+## Why
+Ensure deterministic test execution.
+## How to apply
+Always execute tests with timeout guards.
+`, 'utf8');
+  await syncSqliteIndex(ws1Root);
+
+  // Initial baseline efficacy
+  recordMemoryEfficacy('test-runner-guideline', 'applied');
+
+  // 25.2 Correlate successful test run
+  const passHookResult = correlateTestExecutionEfficacy(ws1Root, {
+    command: 'npm test',
+    exitCode: 0,
+    stdout: 'All 24 test suites passed successfully in 3.2s',
+    slugs: ['test-runner-guideline']
+  });
+  assert.equal(passHookResult.outcome, 'PASSED', 'Hook outcome must be PASSED');
+  assert.ok(passHookResult.correlatedSlugs.includes('test-runner-guideline'));
+  assert.ok(passHookResult.updatedScores['test-runner-guideline'] >= 1.0, 'Efficacy score must remain high on pass');
+
+  // 25.3 Correlate failed test run
+  const failHookResult = correlateTestExecutionEfficacy(ws1Root, {
+    command: 'npm test',
+    exitCode: 1,
+    stderr: 'Failure in test-runner-guideline: timeout exceeded',
+    slugs: ['test-runner-guideline']
+  });
+  assert.equal(failHookResult.outcome, 'FAILED', 'Hook outcome must be FAILED');
+  assert.ok(failHookResult.correlatedSlugs.includes('test-runner-guideline'));
+  assert.ok(failHookResult.updatedScores['test-runner-guideline'] < 1.0, 'Efficacy score must be penalized on fail');
+
+  // Repeat failures to bring score below 0.6 threshold
+  for (let i = 0; i < 4; i++) {
+    correlateTestExecutionEfficacy(ws1Root, {
+      command: 'npm test',
+      exitCode: 1,
+      stderr: 'Repeated assertion failure on test-runner-guideline',
+      slugs: ['test-runner-guideline']
+    });
+  }
+
+  // 25.4 Verify hybrid search confidence modulation and warning
+  const modulatedSearch = await searchMemoriesHybrid(ws1Root, 'test runner environments');
+  const targetResult = modulatedSearch.find(m => m.slug === 'test-runner-guideline');
+  assert.ok(targetResult, 'Target memory must be found in hybrid search');
+  assert.ok(targetResult.efficacyScore < 0.6, 'Efficacy score must reflect penalized state');
+  assert.ok(targetResult.lowEfficacyWarning, 'Search must attach lowEfficacyWarning when score < 0.6');
+
+  // Cleanup
+  fs.unlinkSync(path.join(dreamDir, 'test-runner-guideline.md'));
+  await syncSqliteIndex(ws1Root);
+  console.log('  ✔ Passed: Execution-driven efficacy hook adjusts telemetry and modulates search confidence.\n');
+
+  // ==========================================
+  // TEST 26: Syran First-Principles Pareto Architectural Trade-Off Matrix
+  // ==========================================
+  console.log('Test 26: Syran First-Principles Pareto Architectural Trade-Off Matrix...');
+
+  const architecturalOptions = [
+    {
+      name: 'Direct SQLite FTS + Vector',
+      description: 'Embedded single-binary database with FTS5 and in-process vector cosine calculation',
+      scores: { latency: 5, operational_overhead: 1, implementation_cost: 2, extensibility: 8 }
+    },
+    {
+      name: 'External Elastic Cluster',
+      description: 'Distributed external cluster with dedicated REST coordinator nodes',
+      scores: { latency: 45, operational_overhead: 9, implementation_cost: 8, extensibility: 9 }
+    },
+    {
+      name: 'In-Memory Linear Scan',
+      description: 'Plain JSON in memory with linear regex scan',
+      scores: { latency: 25, operational_overhead: 2, implementation_cost: 1, extensibility: 3 }
+    }
+  ];
+
+  const architecturalCriteria = [
+    { name: 'latency', weight: 3.0, direction: 'minimize', description: 'Query execution latency in milliseconds' },
+    { name: 'operational_overhead', weight: 2.0, direction: 'minimize', description: 'Infrastructure maintenance complexity' },
+    { name: 'implementation_cost', weight: 2.0, direction: 'minimize', description: 'Development effort in engineer-weeks' },
+    { name: 'extensibility', weight: 1.0, direction: 'maximize', description: 'Feature growth capacity' }
+  ];
+
+  const mautEvaluation = evaluateArchitecturalTradeoffs(architecturalOptions, architecturalCriteria);
+  assert.equal(mautEvaluation.status, 'COMPLETE', 'Evaluation status must be COMPLETE');
+  assert.equal(mautEvaluation.officer, 'Syran');
+  assert.equal(mautEvaluation.candidatesEvaluated, 3);
+  assert.equal(mautEvaluation.criteriaCount, 4);
+
+  // Pareto Frontier verification
+  assert.ok(Array.isArray(mautEvaluation.paretoFrontier), 'Pareto frontier must be an array');
+  assert.ok(mautEvaluation.paretoFrontier.includes('Direct SQLite FTS + Vector'), 'Optimal candidate must be on Pareto frontier');
+
+  // Utility ranking
+  assert.equal(mautEvaluation.optimalCandidate, 'Direct SQLite FTS + Vector', 'Direct SQLite must rank first based on weights');
+  assert.equal(mautEvaluation.utilityRanking[0].name, 'Direct SQLite FTS + Vector');
+  assert.ok(mautEvaluation.utilityRanking[0].utilityScore > mautEvaluation.utilityRanking[1].utilityScore);
+
+  // Pivot Analysis
+  assert.ok(mautEvaluation.pivotAnalysis, 'Pivot sensitivity analysis must be generated');
+
+  // Syran Persona Contraction Prohibition Check
+  const counsel = mautEvaluation.officerCounsel;
+  assert.ok(typeof counsel === 'string' && counsel.length > 50, 'Officer counsel must be a non-empty string');
+  assert.ok(counsel.includes('Captain'), 'Officer counsel must formally address the Captain');
+  assert.ok(counsel.includes('Pareto'), 'Officer counsel must reference the Pareto frontier');
+
+  const contractionPattern = /\b(can't|don't|won't|isn't|aren't|haven't|hasn't|didn't|couldn't|shouldn't|wouldn't|it's|they're|we're|i'm|you're)\b/i;
+  assert.equal(contractionPattern.test(counsel), false, 'Officer counsel must NOT contain any contractions');
+
+  console.log('  ✔ Passed: Syran Trade-Off Matrix calculates MAUT utilities, Pareto frontier, pivot sensitivity, and zero-contraction counsel.\n');
 
   console.log('============================================================');
   console.log('🎉 ALL TESTS PASSED SUCCESSFULLY!');

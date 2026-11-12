@@ -43,7 +43,9 @@ export {
   addTeamRepository,
   setTeamRepositoryActive,
   removeTeamRepository,
-  syncTeamRepositories
+  syncTeamRepositories,
+  auditTeamConflicts,
+  resolveTeamConflict
 } from './core/team-sync.js';
 
 export {
@@ -63,3 +65,12 @@ export {
   ingestTeamAdr,
   bootstrapRepoMemories
 } from './audit/bootstrap-scanner.js';
+
+export {
+  dreamMemoryConsolidation
+} from './audit/dream-synthesizer.js';
+
+export {
+  recordMemoryEfficacy,
+  correlateTestExecutionEfficacy
+} from './db/telemetry.js';

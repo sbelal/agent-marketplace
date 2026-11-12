@@ -1,30 +1,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { resolveStoragePaths } from '../core/storage-paths.js';
+import { resolveStoragePaths, GIT_EXEC_ENV } from '../core/storage-paths.js';
 import { serializeYamlFrontmatter } from '../core/yaml-parser.js';
 import { findMarkdownFiles } from '../retrieval/shadow-resolver.js';
-
-const GIT_EXEC_ENV = {
-  ...process.env,
-  GIT_TERMINAL_PROMPT: '0',
-  GIT_SSH_COMMAND: 'ssh -o BatchMode=yes -o ConnectTimeout=3'
-};
-
-function atomicWriteFileSync(filePath, content, encoding = 'utf8') {
-  const dir = path.dirname(filePath);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  const tempPath = path.join(dir, `.${path.basename(filePath)}.tmp.${process.pid}.${Date.now()}`);
-  try {
-    fs.writeFileSync(tempPath, content, encoding);
-    fs.renameSync(tempPath, filePath);
-  } catch (err) {
-    try {
-      if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
-    } catch {}
-    throw err;
-  }
-}
+import { atomicWriteFileSync } from '../core/memory-store.js';
 
 /**
  * Ingests an Architectural Decision Record (ADR) file cleanly into memory.
