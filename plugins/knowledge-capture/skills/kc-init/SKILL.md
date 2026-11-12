@@ -51,24 +51,26 @@ Use the **`ask_question`** tool to present native interactive modal choice dialo
 
 - **Step 3B: Team Memory Layer Question:**
   - If already configured:
-    - `question`: "Your Team Memory Layer is currently connected to `<teamUrl>`. How would you like to configure it?"
+    - `question`: "Your Team Memory Layer is configured with: <summary of active/configured slugs>. How would you like to configure team repositories?"
     - `options`:
-      - "(Recommended) Keep existing team remote (`<teamUrl>`)"
-      - "Change Team Shared Git Repository URL"
-      - "Skip / Remove team repository"
+      - "(Recommended) Keep existing team repositories"
+      - "Add Another Team Git Repository (Auto-derives slug as <org_id>-<repo_slug>)"
+      - "Toggle Active/Inactive Team Repositories"
+      - "Remove a Team Repository"
   - If not configured:
     - `question`: "Do you have a shared Team Git Repository for company-wide engineering guidelines?"
     - `options`:
       - "(Recommended) Skip / Local-Only (Default)"
-      - "Connect Team Shared Git Repository"
+      - "Connect Team Shared Git Repository (Auto-derives slug as <org_id>-<repo_slug>)"
 
 #### Under Claude Code:
 Present the same state-aware multiple-choice options using Claude Code's interactive choice prompts.
 
-#### Repository URL Prompt:
-If the user chooses to connect or change a GitHub repository, prompt them for the URL (the user can enter it directly via the write-in input in the modal or reply):
-- Example: `git@github.com:<your-username>/my-knowledge-memory.git` or `https://github.com/<your-username>/my-knowledge-memory.git`
-
+#### Repository URL Prompt & Auto-Derived Slugs:
+If the user chooses to connect or add a Team Git repository:
+- The slug is **automatically derived** from the repository URL as `<org_id>-<repo_slug>` or `<account_id>-<repo_slug>` (e.g. `git@github.com:acme-corp/platform-rules.git` -> `acme-corp-platform-rules`, `https://github.com/my-org/backend-memory` -> `my-org-backend-memory`).
+- The user can optionally supply a custom slug identifier.
+- Repositories are cloned and partitioned cleanly under `~/.gemini/knowledge-capture/team/<slug>/`.
 
 ### 4. Validate Remote Connectivity
 When the developer provides a repository URL:
@@ -84,7 +86,14 @@ When the developer provides a repository URL:
 ### 5. Persist Configuration & Initial Clone
 Save the validated configuration:
 ```bash
-node "<plugin-root>/bin/setup.js" --private-url "<validatedPrivateUrl>" --team-url "<validatedTeamUrl>"
+# Add or update team repository (slug auto-derived from URL if omitted):
+node "<plugin-root>/bin/setup.js" --private-url "<validatedPrivateUrl>" --team-repo-url "<validatedTeamUrl>" --team-repo-slug "<optionalSlug>"
+
+# Additional multi-team management flags:
+#   --activate-team <slug>    : Activate an existing team repository
+#   --deactivate-team <slug>  : Deactivate an existing team repository
+#   --remove-team <slug>      : Remove a team repository
+#   --embedding-engine <onnx|heuristic> : Configure semantic embedding engine
 ```
 
 If a Team repository was configured, trigger an initial clone:

@@ -70,15 +70,16 @@ Persistent knowledge is partitioned across three distinct tiers with strict prec
 └──────────────────────────────┬──────────────────────────────┘
                                │ Promoted via PR / Overrides Team
 ┌──────────────────────────────▼──────────────────────────────┐
-│ 3. Team Global (~/.gemini/knowledge-capture/team)           │
+│ 3. Team Global (~/.gemini/knowledge-capture/team/<slug>)    │
 │    Shared team standards, platform facts, conventions       │
-│    Synchronized via upstream Git repo (Read-Only local)     │
+│    Multi-team repos partitioned by slug (<org_id>-<repo>)   │
+│    Synchronized via upstream Git remotes (Read-Only local)  │
 └─────────────────────────────────────────────────────────────┘
 ```
 
 1. **Workspace Scoped Layer (`.agents/rules/memory/`):** Highest precedence. Scoped to the active repository.
 2. **Local Global Private Layer (`~/.gemini/knowledge-capture/private/`):** Middle precedence. Machine-local preferences, debugging solutions, and draft patterns. Overrides Team memory on identical topics (`overrides: <slug>`).
-3. **Team Global Layer (`~/.gemini/knowledge-capture/team/`):** Baseline precedence. Verified conventions and architectural decisions shared team-wide. Read-only locally; changes are contributed via branches and Pull Requests.
+3. **Team Global Layer (`~/.gemini/knowledge-capture/team/<slug>/`):** Baseline precedence. Verified conventions and architectural decisions shared team-wide across one or more team repositories (e.g. `core`, `platform`, `infra`). Slugs are auto-derived as `<org_id>-<repo_slug>` or `<account_id>-<repo_slug>` from Git URLs. Read-only locally; changes are contributed via branches and Pull Requests.
 
 ---
 
@@ -88,12 +89,13 @@ The plugin includes a lightweight, zero-dependency Node.js stdio **Model Context
 
 | Tool | Purpose | Parameters |
 | :--- | :--- | :--- |
-| **`get_memory_summary`** | Scans memory files across layers, parses YAML frontmatters, shadows lower-tier overridden rules (`Workspace > Private > Team`), and outputs Markdown tables grouped by `### Domain: <domain>`. | `layer` (*optional*: `"all"`, `"workspace"`, `"private"`, `"team"`), `domain` (*optional*), `query` (*optional*) |
-| **`search_memories`** | Multi-Vector hybrid semantic retrieval combining workspace-partitioned SQLite FTS5 BM25 with multi-facet dense embeddings (fused via Reciprocal Rank Fusion) and zero-dependency file-based fallback. | `query` (*required* string), `limit` (*optional* number, default 5), `mode` (*optional*: `"hybrid"`, `"multi_vector"`, `"lexical"`) |
-| **`get_layer_statistics`** | Returns memory entry counts per layer, active domain breakdown, stale entry counts (`verified` > 180 days or missing), configured Git remotes, and uncommitted changes. | *None* |
+| **`get_memory_summary`** | Scans memory files across layers, parses YAML frontmatters, shadows lower-tier overridden rules (`Workspace > Private > Team`), and outputs Markdown tables or compact index cards (~15 tokens/rule). | `layer` (*optional*: `"all"`, `"workspace"`, `"private"`, `"team"`), `domain` (*optional*), `query` (*optional*), `format` (*optional*: `"standard"`, `"compact"`) |
+| **`search_memories`** | Multi-Vector hybrid semantic retrieval combining workspace-partitioned SQLite FTS5 BM25 with multi-facet dense embeddings (fused via Reciprocal Rank Fusion). Pure read query complying with CQS. Supports compact index cards and full body expansion. | `query` (*required* string), `limit` (*optional* number, default 5), `mode` (*optional*: `"hybrid"`, `"multi_vector"`, `"lexical"`), `format` (*optional*: `"compact"`, `"full"`) |
+| **`get_layer_statistics`** | Returns memory entry counts per layer, active domain breakdown, stale entry counts (`verified` > 180 days or missing), multi-team repository status, and uncommitted changes. | *None* |
 | **`get_memory_content`** | Retrieves full markdown content, frontmatter, and resolved **1-Hop Related Memories Graph** footer for one or more memory slugs across layers. | `layer` (*optional*), `slug` (*optional* string), `slugs` (*optional* `string[]`) |
 | **`get_memory_graph`** | Returns referentially validated node-and-link graph dataset with broken link isolation for D3/SVG canvas rendering. | *None* |
-| **`generate_knowledge_graph_html`** | Generates a complete, interactive standalone HTML canvas visualizer with D3.js force physics, domain clustering, staleness alerts, and inspector drawer. | `workspaceRoot` (*optional*) |
+| **`generate_knowledge_graph_html`** | Generates the Bidirectional Memory Studio: a complete, interactive standalone HTML canvas visualizer with D3.js force physics, Connect Mode (edge drawing), Quick Edit Drawer, and Staged Patch export. Runs 100% client-side in the browser. | `workspaceRoot` (*optional*) |
+| **`manage_team_repositories`** | Manages multi-team knowledge repositories by slug. Supports registering, activating, deactivating, removing, and pulling team repos. | `action` (*required*: `"list"`, `"add"`, `"activate"`, `"deactivate"`, `"remove"`, `"sync"`), `slug` (*optional*), `url` (*optional*), `name` (*optional*), `cleanDisk` (*optional* boolean) |
 | **`bootstrap_workspace_memories`**| Scans repository ADRs, CI workflows, linters, Dockerfiles, and documentation to discover and propose initial Workspace memory rules on day one. | `workspaceRoot` (*optional*) |
 | **`auto_elicit_session_knowledge`**| Audits uncommitted working tree diffs and modified files to detect and propose session-end memory candidates before closing a session or compacting context. | `workspaceRoot` (*optional*) |
 | **`detect_contradictions_and_drift`**| Audits active memories for semantic contradictions (opposing directives on similar tasks) and codebase drift (missing referenced files, runtime engine mismatches, staleness). | `workspaceRoot` (*optional*), `domain` (*optional*), `threshold` (*optional*) |
@@ -103,17 +105,17 @@ The plugin includes a lightweight, zero-dependency Node.js stdio **Model Context
 
 ---
 
-## 🔄 Lifecycle Hooks (`SessionStart` & `SessionEnd` / `Stop`)
+## 🔄 Lifecycle Hooks (`SessionStart` & `SessionEnd`)
 
 1. **`SessionStart` (`bin/session-start.js`):**
    - Reads `settings.json`.
-   - Executes non-blocking `git pull --ff-only` on configured remotes with strict network/SSH guards (`timeout: 3000` ms, `GIT_TERMINAL_PROMPT=0`, `GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=3"`).
-   - Alerts if the Team clone is on a promotion branch or behind upstream, or if entries are stale (`verified` > 180 days).
+   - Executes non-blocking `git pull --ff-only` on configured private and active team remotes with strict network/SSH guards (`timeout: 3000` ms, `GIT_TERMINAL_PROMPT=0`, `GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=3"`).
+   - Alerts if a Team clone is on a promotion branch or behind upstream, or if entries are stale (`verified` > 180 days).
    - Audits the Private layer for uncommitted Git modifications.
    - Injects memory counts per layer, active domain breakdown, and operational recall/capture directives into session context.
 
-2. **`SessionEnd` / `Stop` Sentinel (`bin/session-end.js`):**
-   - Fires upon session wrap-up, agent turn completion, or before context compaction.
+2. **`SessionEnd` Sentinel (`bin/session-end.js`):**
+   - Fires exclusively upon session wrap-up / termination (mapped to `SessionEnd` to eliminate alert fatigue during normal user interrupts).
    - Audits uncommitted workspace modifications.
    - If files were changed without new memory recorded, injects an auto-elicitation reminder prompting the agent to preserve tacit decisions via `/kc-elicit` or `/kc-capture`.
 
@@ -128,17 +130,47 @@ These skills appear directly in the user's slash command palette:
 
 | Slash Command / Skill | Arguments | Description |
 | :--- | :--- | :--- |
-| **`/kc-init`** | None | Scaffolds directory layout, tests remote Git connectivity (`git ls-remote`), and configures `settings.json`. |
+| **`/kc-init`** | None | Scaffolds directory layout, tests remote Git connectivity (`git ls-remote`), and configures multi-team repositories and private stores in `settings.json`. |
 | **`/kc-bootstrap`** | None | Scans project ADRs, CI workflows, linters, Dockerfiles, and contribution guides to auto-discover and bootstrap Workspace memory rules. |
 | **`/kc-elicit`** | None | Audits uncommitted workspace diffs to auto-synthesize and propose session-end memories before closing. |
 | **`/kc-drift`** | `[domain]` | Runs the Semantic Contradiction & Codebase Drift Detection Engine across memories to discover conflicting directives and outdated rules. |
-| **`/kc-graph`** | None | Generates an interactive visual knowledge graph HTML artifact with D3.js force physics, domain clusters, and node inspector. |
-| **`/kc-status`** | None | Prints detailed health, active domain breakdown, stale entry counts (`verified` > 180 days), branch names, uncommitted modifications, and upstream ahead/behind counts across layers. |
-| **`/kc-pull`** | `[team\|private\|all]` | Fast-forwards the local team or private memory clone from its configured Git remote upstream. |
+| **`/kc-graph`** | None | Generates the interactive Bidirectional Memory Studio HTML canvas with D3 force physics, Connect Mode (edge drawing), and Quick Edit Drawer. |
+| **`/kc-status`** | None | Prints detailed health, active domain breakdown, stale entry counts (`verified` > 180 days), multi-team repository status, and uncommitted modifications across layers. |
+| **`/kc-pull`** | `[team\|private\|all\|<slug>]` | Fast-forwards the local private store or configured team memory repositories from their remote upstreams. |
 | **`/kc-commit`** | `[message]` | Audits private memory for sensitive credentials, validates upstream remotes, commits pending changes, and pushes to Git. |
 | **`/kc-promote`** | `[slug]` | Creates an isolated branch (`promote/<date>-<slug>`), scrubs personal context, halts for developer diff inspection, and prepares a GitHub PR. |
 | **`/kc-archeology`** | `[maxCommits]` | Mines Git history, revert commits, and bug fixes to discover undocumented tacit knowledge and workarounds. |
 | **`/kc-consolidate`**| `[scope\|domain]` | Runs a 4-point **"Lint & Dream"** pass: merges fragmented/co-triggered slugs, prunes orphaned overrides or redundant private copies, repairs broken `related` graph links, and refreshes stale (>180d) or conflicting entries. |
+| **`/kc-update`** | None | Audits upstream releases and safely executes autonomous plugin updates across source and copy install modes. |
+
+---
+
+## 🖥️ User-Invokable CLI Scripts & Flags
+
+For automation, headless CI runs, or terminal workflows:
+
+- **`node ./bin/setup.js`**: Setup & initialization utility:
+  - `--private-url <url>`: Configure personal private memory repository URL.
+  - `--team-repo-url <url>`: Configure team shared repository URL (auto-derives slug as `<org_id>-<repo_slug>` if omitted).
+  - `--team-repo-slug <slug>`: Explicit slug identifier for the team repository.
+  - `--activate-team <slug>`: Activate an existing team repository.
+  - `--deactivate-team <slug>`: Deactivate an existing team repository.
+  - `--remove-team <slug>`: Remove a team repository configuration.
+  - `--embedding-engine <onnx|heuristic>`: Configure semantic vector embedding engine (`onnx` 384-d or `heuristic` 128-d).
+  - `--no-install`: Skip automatic dependency installation.
+- **`node ./bin/status.js`**: Prints formatted memory statistics, domain breakdowns, and Git health directly to stdout.
+- **`node ./bin/pull.js [team|private|all|<slug>]`**: Fast-forwards local Git clones from remote upstreams.
+- **`node ./bin/sync-manifests.js [--check]`**: Synchronizes plugin manifests and validates zero configuration drift across Antigravity and Claude Code.
+
+---
+
+## 🎨 Interactive Memory Studio Architecture (How the UI is Loaded)
+
+The **Bidirectional Memory Studio** (`/kc-graph`) is engineered with a **100% self-contained client-side web architecture**:
+- **Zero Local Server Daemon:** The MCP server does **NOT** run an HTTP or WebSocket server. MCP operates strictly over standard stdio JSON-RPC 2.0.
+- **Standalone Artifact Generation:** The MCP tool `generate_knowledge_graph_html` (or skill `/kc-graph`) outputs a self-contained HTML file containing embedded SVG layout styles, inlined graph data JSON, and client-side JavaScript bundle using D3.js.
+- **Direct Browser / Webview Execution:** The generated file (`knowledge-graph.html`) is written to the agent artifact directory (`<appDataDir>/brain/<conversation-id>/knowledge-graph.html`) and bookmarked as a user-facing deliverable. The IDE preview pane or web browser opens the file directly via `file://`.
+- **In-Browser Physics & Interactions:** Draggable node physics, live search filtering, domain cluster pills, the Connect Mode edge drawer, and the Quick Edit inspector drawer run **entirely inside the browser's JavaScript engine alone**. Staged edge additions and metadata updates are exported from the browser as structured JSON patches.
 
 ### Autonomous Agent-Only Skills (`user-invocable: false`)
 These skills are hidden from the user's slash command palette and run autonomously during agent execution:

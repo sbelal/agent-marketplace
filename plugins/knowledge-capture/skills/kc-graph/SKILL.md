@@ -18,16 +18,19 @@ Call the MCP tool **`generate_knowledge_graph_html`** (or **`get_memory_graph`**
 
 ### 2. Output Interactive Canvas Artifact
 Write the generated HTML to a standalone `.html` artifact in `<appDataDir>/brain/<conversation-id>/knowledge-graph.html` with `ArtifactMetadata` (`UserFacing: true`, `RequestFeedback: false`) featuring:
+- **Client-Side Architecture:** The UI is 100% self-contained HTML/SVG/JavaScript executed entirely within the browser/webview alone. It requires zero HTTP server processes or daemons in the MCP server.
 - **D3.js Force Simulation:** Interactive draggable nodes with collision detection and elastic edge links.
 - **Visual Encoding:**
   - **Node Fill Color by Layer:** Workspace = `#a855f7` (Purple), Private = `#3b82f6` (Blue), Team = `#10b981` (Emerald).
   - **Node Size:** Proportional to `applied_count` (higher utility memories appear larger).
   - **Staleness Badge:** Red pulsing border on nodes where `stale: true` (>180 days or unverified).
   - **Edge Style:** Solid line for `overrides`, dashed line for `related`.
-- **Interactive Controls:**
+- **Interactive Controls & Memory Studio:**
+  - **Connect Mode:** Toggle Connect Mode button to draw directed lateral edges (`related:` or `overrides:`) between memory nodes directly on the canvas.
+  - **Quick Edit Inspector Drawer:** Clicking any node reveals its YAML metadata, trigger description, and 1-hop connections. Edit trigger conditions, switch domains, or click "Bump to Today" to refresh verification dates.
+  - **Staged Patch Export:** Click "Export Patches" to copy or download all staged edge additions and metadata updates as a structured JSON patch payload.
   - **Search & Filter:** Live search bar highlighting matching nodes.
   - **Domain Filter Chips:** Clickable domain pills (Kubernetes, Terraform, Go, CI/CD) to isolate clusters.
-  - **Node Inspector Drawer:** Clicking any node reveals its YAML metadata, trigger description, and 1-hop connections.
 
 ### 3. Surface Graph Link in Chat
 Display a summary card in chat with metrics (total nodes, active domains, stale alerts) and point the developer to the newly generated knowledge graph artifact.
