@@ -91,7 +91,7 @@ async function main() {
     }
   }
 
-  const isClaudeCode = Boolean(process.env.CLAUDE_PLUGIN_ROOT);
+  const isClaudeCode = Boolean(process.env.CLAUDE_PLUGIN_ROOT || process.env.CLAUDE_CODE);
   if (isClaudeCode) {
     process.stdout.write(report + '\n');
   } else {

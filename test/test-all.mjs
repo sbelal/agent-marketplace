@@ -1111,6 +1111,16 @@ Always execute tests with timeout guards.
 
   const sampleEntry = layerProvider.findMemoryFile('k8s-delete-guard');
   assert.ok(sampleEntry, 'Layer provider should find sample entry across layers');
+  assert.equal(layerProvider.resolveTeamRepoDir('non-existent-team'), null, 'Resolving invalid team slug must return null');
+
+  let promoErr = null;
+  try {
+    prepareTeamPromotion(ws1Root, { slug: 'k8s-delete-guard', content: '# Test Guard\nSample content', teamSlug: 'non-existent-team' });
+  } catch (err) {
+    promoErr = err;
+  }
+  assert.ok(promoErr, 'Promoting to invalid team slug must throw');
+  assert.ok(promoErr.message.includes("Team repository 'non-existent-team' was not found"));
   console.log('  ✔ Passed: Unified Layer Provider Pattern decouples filesystem from memory store.\n');
 
   // ==========================================
@@ -1123,6 +1133,10 @@ Always execute tests with timeout guards.
   assert.ok(Array.isArray(spanningTree.edges), 'Edges must be an array');
   assert.ok(typeof spanningTree.contextEnvelope === 'string', 'Context envelope must be a string');
   assert.ok(spanningTree.contextEnvelope.includes('GraphRAG Spanning Tree Context Envelope'), 'Envelope title must be present');
+
+  const linkKeys = spanningTree.links.map(l => `${l.source}->${l.target}:${l.type}`);
+  const uniqueLinkKeys = new Set(linkKeys);
+  assert.equal(linkKeys.length, uniqueLinkKeys.size, 'Spanning tree links must be de-duplicated');
 
   const enrichedRes = getMemoryContent(ws1Root, 'all', 'k8s-delete-guard', null, { depth: 2 });
   assert.ok(enrichedRes.spanningTree, 'Spanning tree object should be attached when depth > 1');

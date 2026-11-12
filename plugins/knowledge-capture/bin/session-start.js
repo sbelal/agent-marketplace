@@ -264,6 +264,8 @@ async function main() {
             teamStatuses.push(`${tRepo.slug}: ${status}`);
           })
         );
+      } else {
+        teamStatuses.push(`${tRepo.slug}: Local store active`);
       }
     }
   }
@@ -341,7 +343,7 @@ async function main() {
   // Dual-platform output formatting:
   // Antigravity passes stdin payload with conversationId and expects JSON injectSteps.
   // Claude Code executes the hook command and injects raw stdout plain text.
-  const isClaudeCode = Boolean(process.env.CLAUDE_PLUGIN_ROOT);
+  const isClaudeCode = Boolean(process.env.CLAUDE_PLUGIN_ROOT || process.env.CLAUDE_CODE);
   const isAntigravity = !isClaudeCode || Boolean(payload && payload.conversationId);
 
   if (isAntigravity) {
@@ -369,7 +371,7 @@ main()
   })
   .catch((err) => {
     // Ensure hook never crashes the agent startup
-    if (process.env.CLAUDE_PLUGIN_ROOT) {
+    if (process.env.CLAUDE_PLUGIN_ROOT || process.env.CLAUDE_CODE) {
       process.stdout.write(`[knowledge-capture] Startup check completed.\n`);
     } else {
       process.stdout.write(JSON.stringify({ injectSteps: [] }) + '\n');

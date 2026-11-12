@@ -713,8 +713,16 @@ export function syncMemoryLayer(workspaceRoot, params = {}) {
   if (layer === 'all' || layer === 'private') {
     results.private = { attempted: true, ...syncRepo(paths.privateDir) };
   }
-  if (layer === 'all' || layer === 'team') {
-    if (paths.activeTeamDirs && paths.activeTeamDirs.length > 0) {
+  const specificTeam = paths.activeTeamDirs ? paths.activeTeamDirs.find(t => t.slug.toLowerCase() === layer.toLowerCase()) : null;
+  if (layer === 'all' || layer === 'team' || specificTeam) {
+    if (specificTeam) {
+      const res = syncRepo(specificTeam.dir);
+      results.team = {
+        attempted: true,
+        success: res.success,
+        repos: [{ slug: specificTeam.slug, name: specificTeam.name, ...res }]
+      };
+    } else if (paths.activeTeamDirs && paths.activeTeamDirs.length > 0) {
       const repoResults = [];
       for (const tRepo of paths.activeTeamDirs) {
         repoResults.push({ slug: tRepo.slug, name: tRepo.name, ...syncRepo(tRepo.dir) });
@@ -751,12 +759,16 @@ export function prepareTeamPromotion(workspaceRoot, params = {}) {
     let matchedRepo = null;
     if (teamSlug) {
       matchedRepo = paths.activeTeamDirs.find(r => r.slug.toLowerCase() === teamSlug.toLowerCase());
-    }
-    if (!matchedRepo) {
+      if (!matchedRepo) {
+        throw new Error(`Team repository '${teamSlug}' was not found in settings or is not active.`);
+      }
+    } else {
       matchedRepo = paths.activeTeamDirs[0];
     }
     targetTeamDir = matchedRepo.dir;
     targetTeamSlug = matchedRepo.slug;
+  } else if (teamSlug && teamSlug !== 'default') {
+    throw new Error(`Team repository '${teamSlug}' was not found in settings or is not active.`);
   }
 
   const teamGit = path.join(targetTeamDir, '.git');

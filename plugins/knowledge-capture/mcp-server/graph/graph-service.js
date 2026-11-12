@@ -357,6 +357,7 @@ export function getMemorySpanningTree(workspaceRoot, rootSlug, options = {}) {
   const visitedSlugs = new Set([cleanRoot]);
   const discoveredNodes = [{ ...rootNode, hop: 0, pathFromRoot: [cleanRoot] }];
   const discoveredLinks = [];
+  const seenLinkKeys = new Set();
 
   let currentLevel = [cleanRoot];
 
@@ -369,7 +370,11 @@ export function getMemorySpanningTree(workspaceRoot, rootSlug, options = {}) {
       const outgoing = graph.links.filter(l => l.source.toLowerCase() === currentSlug);
       for (const link of outgoing) {
         const targetSlug = link.target.toLowerCase();
-        discoveredLinks.push({ source: link.source, target: link.target, type: link.type, hop, direction: 'outgoing' });
+        const linkKey = `${link.source.toLowerCase()}->${link.target.toLowerCase()}:${link.type}`;
+        if (!seenLinkKeys.has(linkKey)) {
+          seenLinkKeys.add(linkKey);
+          discoveredLinks.push({ source: link.source, target: link.target, type: link.type, hop, direction: 'outgoing' });
+        }
         if (!visitedSlugs.has(targetSlug)) {
           visitedSlugs.add(targetSlug);
           const targetNode = nodeLookup.get(targetSlug);
@@ -385,7 +390,11 @@ export function getMemorySpanningTree(workspaceRoot, rootSlug, options = {}) {
       const incoming = graph.links.filter(l => l.target.toLowerCase() === currentSlug);
       for (const link of incoming) {
         const sourceSlug = link.source.toLowerCase();
-        discoveredLinks.push({ source: link.source, target: link.target, type: link.type, hop, direction: 'incoming' });
+        const backlinkKey = `${link.source.toLowerCase()}->${link.target.toLowerCase()}:${link.type}`;
+        if (!seenLinkKeys.has(backlinkKey)) {
+          seenLinkKeys.add(backlinkKey);
+          discoveredLinks.push({ source: link.source, target: link.target, type: link.type, hop, direction: 'incoming' });
+        }
         if (!visitedSlugs.has(sourceSlug)) {
           visitedSlugs.add(sourceSlug);
           const sourceNode = nodeLookup.get(sourceSlug);

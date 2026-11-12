@@ -89,17 +89,17 @@ export class LayerProvider {
     if (this.paths.activeTeamDirs && this.paths.activeTeamDirs.length > 0) {
       if (teamSlug) {
         const match = this.paths.activeTeamDirs.find(r => r.slug.toLowerCase() === teamSlug.toLowerCase());
-        if (match) return match.dir;
+        return match ? match.dir : null;
       }
       return this.paths.activeTeamDirs[0].dir;
     }
-    return this.paths.teamDir;
+    return teamSlug ? null : this.paths.teamDir;
   }
 
   /**
    * Finds a memory file on disk given slug and optional layer filter.
    * If layer is 'all', resolves according to precedence: Workspace > Private > Team.
-   * In multi-team setups, scans all active team repository directories.
+   * In multi-team setups, scans all active team repository directories, or a specific team slug.
    */
   findMemoryFile(slug, targetLayer = 'all') {
     if (!slug) return null;
@@ -123,19 +123,26 @@ export class LayerProvider {
       }
     }
 
-    // 3. Team
-    if (normLayer === 'all' || normLayer === 'team') {
+    // 3. Team (or specific team repository slug)
+    const targetTeamSlug = normLayer.startsWith('team/')
+      ? normLayer.slice(5)
+      : (normLayer !== 'all' && normLayer !== 'team' && normLayer !== 'workspace' && normLayer !== 'private' ? normLayer : null);
+
+    if (normLayer === 'all' || normLayer === 'team' || targetTeamSlug) {
       if (this.paths.activeTeamDirs && this.paths.activeTeamDirs.length > 0) {
         for (const tRepo of this.paths.activeTeamDirs) {
+          if (targetTeamSlug && tRepo.slug.toLowerCase() !== targetTeamSlug) continue;
           const p = path.join(tRepo.dir, fileName);
           if (fs.existsSync(p)) {
             return { layer: 'team', teamSlug: tRepo.slug, path: p, slug: cleanSlug };
           }
         }
       }
-      const flatTeamPath = path.join(this.paths.teamDir, fileName);
-      if (fs.existsSync(flatTeamPath)) {
-        return { layer: 'team', teamSlug: 'default', path: flatTeamPath, slug: cleanSlug };
+      if (!targetTeamSlug || targetTeamSlug === 'default') {
+        const flatTeamPath = path.join(this.paths.teamDir, fileName);
+        if (fs.existsSync(flatTeamPath)) {
+          return { layer: 'team', teamSlug: 'default', path: flatTeamPath, slug: cleanSlug };
+        }
       }
     }
 
