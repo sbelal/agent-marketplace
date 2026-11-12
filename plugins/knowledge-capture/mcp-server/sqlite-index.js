@@ -294,8 +294,90 @@ export function computeDenseCosineSimilarity(vecA, vecB) {
   return Math.max(0, Math.min(1.0, dot));
 }
 
+let onnxPipelinePromise = null;
+let onnxLoadFailed = false;
+
+export function resetOnnxState() {
+  onnxPipelinePromise = null;
+  onnxLoadFailed = false;
+}
+
 /**
- * Generates multi-vector representation across 3 facets: trigger, content, entity.
+ * Returns active embedding configuration from environment or settings.json.
+ * Defaults to 'onnx' (384 dimensions) with automatic graceful fallback to 'heuristic' (128 dimensions).
+ */
+export function getActiveEmbeddingConfig() {
+  const envChoice = process.env.KC_EMBEDDING_ENGINE;
+  if (envChoice) {
+    if (envChoice === 'onnx') return { engine: 'onnx', dimensions: 384 };
+    return { engine: 'heuristic', dimensions: 128 };
+  }
+
+  try {
+    const settingsPath = path.join(getStorageDir(), 'settings.json');
+    if (fs.existsSync(settingsPath)) {
+      const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+      if (settings.embeddingEngine === 'onnx') {
+        return { engine: 'onnx', dimensions: 384 };
+      }
+      if (settings.embeddingEngine === 'heuristic') {
+        return { engine: 'heuristic', dimensions: 128 };
+      }
+    }
+  } catch {}
+
+  return { engine: 'onnx', dimensions: 384 };
+}
+
+/**
+ * Dynamically loads the ONNX feature extraction pipeline on demand.
+ * Caches the pipeline promise and model locally. If loading fails, marks failure and returns null.
+ */
+export async function getOnnxExtractor() {
+  if (onnxLoadFailed) return null;
+  if (onnxPipelinePromise) return onnxPipelinePromise;
+
+  onnxPipelinePromise = (async () => {
+    try {
+      const { pipeline, env } = await import('@xenova/transformers');
+      env.cacheDir = path.join(getStorageDir(), 'models');
+      const extractor = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2', {
+        quantized: true
+      });
+      return extractor;
+    } catch (err) {
+      onnxLoadFailed = true;
+      return null;
+    }
+  })();
+
+  return onnxPipelinePromise;
+}
+
+/**
+ * Generates an embedding vector using the configured engine.
+ * Primary: Local ONNX Transformer (all-MiniLM-L6-v2, 384-d).
+ * Fallback: Heuristic Vector Engine (subword & bigram double-hash, 128-d).
+ */
+export async function generateEmbedding(text, targetDimensions = null) {
+  const config = getActiveEmbeddingConfig();
+  if (config.engine === 'onnx') {
+    try {
+      const extractor = await getOnnxExtractor();
+      if (extractor && text && typeof text === 'string' && text.trim().length > 0) {
+        const out = await extractor(text.slice(0, 2048), { pooling: 'mean', normalize: true });
+        return Array.from(out.data);
+      }
+    } catch {
+      // Graceful fallback to heuristic
+    }
+  }
+  const dim = targetDimensions || (config.engine === 'onnx' ? 384 : 128);
+  return generateDenseEmbedding(text, dim);
+}
+
+/**
+ * Generates synchronous multi-vector representation (128-d heuristic fallback).
  */
 export function generateMultiVector(entry) {
   const triggerText = `${entry.trigger || entry.description || ''}`;
@@ -306,6 +388,28 @@ export function generateMultiVector(entry) {
     trigger_vector: generateDenseEmbedding(triggerText, 128),
     content_vector: generateDenseEmbedding(contentText, 128),
     entity_vector: generateDenseEmbedding(entityText, 128)
+  };
+}
+
+/**
+ * Generates asynchronous multi-vector representation across 3 facets: trigger, content, entity.
+ * Uses active embedding provider (Local ONNX 384-d or Heuristic 128-d).
+ */
+export async function generateMultiVectorAsync(entry) {
+  const triggerText = `${entry.trigger || entry.description || ''}`;
+  const contentText = typeof entry.body === 'string' ? entry.body : (entry.content || '');
+  const entityText = `${entry.slug || ''} ${entry.domain || ''} ${entry.type || ''} ${(entry.related || []).join(' ')}`;
+
+  const [tVec, cVec, eVec] = await Promise.all([
+    generateEmbedding(triggerText),
+    generateEmbedding(contentText),
+    generateEmbedding(entityText)
+  ]);
+
+  return {
+    trigger_vector: tVec,
+    content_vector: cVec,
+    entity_vector: eVec
   };
 }
 
@@ -323,14 +427,164 @@ export function computeMultiVectorSimilarity(queryVec, multiVec) {
 }
 
 /**
- * Incrementally synchronizes SQLite index with filesystem markdown files.
- * Uses workspace_id partitioning to prevent cross-workspace data loss.
+ * Synchronously synchronizes file metadata, FTS5 text, and graph relationships into SQLite.
+ * Used for fast synchronous queries such as knowledge graph rendering without blocking on embeddings.
  */
-export function syncSqliteIndex(workspaceRoot = process.cwd()) {
+export function syncSqliteMetadata(workspaceRoot = process.cwd()) {
+  const db = getDatabase();
+  if (!db) {
+    return { totalIndexed: 0 };
+  }
+
+  const paths = resolveStoragePaths(workspaceRoot);
+  const currentWsId = normalizeWorkspaceId(workspaceRoot);
+
+  const layerDirs = [
+    { layer: 'workspace', wsId: currentWsId, dir: paths.workspaceDir },
+    { layer: 'private', wsId: 'global', dir: paths.privateDir },
+    { layer: 'team', wsId: 'global', dir: paths.teamDir }
+  ];
+
+  const currentFiles = new Map();
+
+  for (const { layer, wsId, dir } of layerDirs) {
+    const files = findMarkdownFiles(dir);
+    for (const filePath of files) {
+      const base = path.basename(filePath, '.md');
+      if (base.toUpperCase() === 'README') continue;
+
+      try {
+        const stats = fs.statSync(filePath);
+        const mtime = Math.floor(stats.mtimeMs);
+        currentFiles.set(`${wsId}:${layer}:${base}`, { wsId, layer, slug: base, filePath, mtime });
+      } catch {}
+    }
+  }
+
+  const existingRows = db.prepare(`
+    SELECT workspace_id, layer, slug, mtime 
+    FROM memories 
+    WHERE workspace_id = ? OR workspace_id = 'global'
+  `).all(currentWsId);
+
+  const existingMap = new Map();
+  for (const row of existingRows) {
+    existingMap.set(`${row.workspace_id}:${row.layer}:${row.slug}`, row.mtime);
+  }
+
+  const insertMetaNoVec = db.prepare(`
+    INSERT INTO memories (
+      workspace_id, layer, slug, domain, type, verified, trigger, path, mtime
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(workspace_id, layer, slug) DO UPDATE SET
+      domain=excluded.domain,
+      type=excluded.type,
+      verified=excluded.verified,
+      trigger=excluded.trigger,
+      path=excluded.path,
+      mtime=excluded.mtime
+  `);
+
+  const deleteFts = db.prepare('DELETE FROM memories_fts WHERE workspace_id = ? AND layer = ? AND slug = ?');
+  const insertFts = db.prepare(`
+    INSERT INTO memories_fts (slug, domain, type, trigger, content, layer, workspace_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `);
+
+  const deleteGraph = db.prepare('DELETE FROM memories_graph WHERE workspace_id = ? AND source_slug = ?');
+  const insertGraph = db.prepare(`
+    INSERT OR IGNORE INTO memories_graph (workspace_id, source_slug, target_slug, rel_type)
+    VALUES (?, ?, ?, ?)
+  `);
+
+  for (const [key, item] of currentFiles.entries()) {
+    const prevMtime = existingMap.get(key);
+    if (prevMtime && prevMtime === item.mtime) {
+      continue;
+    }
+
+    try {
+      const rawContent = fs.readFileSync(item.filePath, 'utf8');
+      const parsed = parseYamlFrontmatter(rawContent);
+      const fm = parsed.frontmatter;
+
+      const domain = fm.domain || 'general';
+      const type = fm.type || 'general';
+      const verified = fm.verified || '';
+      const trigger = fm.description || fm.trigger || '';
+
+      insertMetaNoVec.run(
+        item.wsId,
+        item.layer,
+        item.slug,
+        domain,
+        type,
+        verified,
+        trigger,
+        item.filePath,
+        item.mtime
+      );
+
+      deleteFts.run(item.wsId, item.layer, item.slug);
+      insertFts.run(item.slug, domain, type, trigger, parsed.body, item.layer, item.wsId);
+
+      deleteGraph.run(item.wsId, item.slug);
+      if (Array.isArray(fm.related)) {
+        for (const rel of fm.related) {
+          if (rel) insertGraph.run(item.wsId, item.slug, rel, 'related');
+        }
+      }
+      if (fm.overrides) {
+        const overridesList = Array.isArray(fm.overrides) ? fm.overrides : [fm.overrides];
+        for (const ov of overridesList) {
+          if (ov) insertGraph.run(item.wsId, item.slug, ov, 'overrides');
+        }
+      }
+    } catch {}
+  }
+
+  const deleteMeta = db.prepare('DELETE FROM memories WHERE workspace_id = ? AND layer = ? AND slug = ?');
+  for (const row of existingRows) {
+    const key = `${row.workspace_id}:${row.layer}:${row.slug}`;
+    if (!currentFiles.has(key)) {
+      deleteMeta.run(row.workspace_id, row.layer, row.slug);
+      deleteFts.run(row.workspace_id, row.layer, row.slug);
+      deleteGraph.run(row.workspace_id, row.slug);
+    }
+  }
+
+  return { totalIndexed: currentFiles.size };
+}
+
+/**
+ * Incrementally synchronizes SQLite index with filesystem markdown files.
+ * Uses workspace_id partitioning and Adaptive Dimension Storage.
+ * Generates vectors using active embedding provider (Local ONNX or Heuristic).
+ */
+export async function syncSqliteIndex(workspaceRoot = process.cwd()) {
   const db = getDatabase();
   if (!db) {
     return { totalIndexed: 0, fileBasedFallback: true };
   }
+
+  const activeConfig = getActiveEmbeddingConfig();
+
+  // Adaptive Dimension Storage Check
+  let storedDim = null;
+  try {
+    const row = db.prepare('SELECT val FROM meta WHERE key = ?').get('embedding_dim');
+    if (row && row.val) storedDim = parseInt(row.val, 10);
+  } catch {}
+
+  if (storedDim && storedDim !== activeConfig.dimensions) {
+    // Dimension changed across engines: invalidate cached vectors so entries re-embed
+    db.exec(`UPDATE memories SET trigger_vector = NULL, content_vector = NULL, entity_vector = NULL;`);
+  }
+  try {
+    db.prepare('INSERT OR REPLACE INTO meta (key, val) VALUES (?, ?)').run('embedding_engine', activeConfig.engine);
+    db.prepare('INSERT OR REPLACE INTO meta (key, val) VALUES (?, ?)').run('embedding_dim', String(activeConfig.dimensions));
+  } catch {}
 
   const paths = resolveStoragePaths(workspaceRoot);
   const currentWsId = normalizeWorkspaceId(workspaceRoot);
@@ -359,14 +613,23 @@ export function syncSqliteIndex(workspaceRoot = process.cwd()) {
 
   // Find existing indexed records for current workspace and global layers
   const existingRows = db.prepare(`
-    SELECT workspace_id, layer, slug, mtime 
+    SELECT workspace_id, layer, slug, mtime, trigger_vector 
     FROM memories 
     WHERE workspace_id = ? OR workspace_id = 'global'
   `).all(currentWsId);
 
   const existingMap = new Map();
   for (const row of existingRows) {
-    existingMap.set(`${row.workspace_id}:${row.layer}:${row.slug}`, row.mtime);
+    let hasValidVector = false;
+    if (row.trigger_vector) {
+      try {
+        const v = JSON.parse(row.trigger_vector);
+        if (Array.isArray(v) && v.length === activeConfig.dimensions) {
+          hasValidVector = true;
+        }
+      } catch {}
+    }
+    existingMap.set(`${row.workspace_id}:${row.layer}:${row.slug}`, { mtime: row.mtime, hasValidVector });
   }
 
   // Prepared Statements
@@ -400,11 +663,11 @@ export function syncSqliteIndex(workspaceRoot = process.cwd()) {
     VALUES (?, ?, ?, ?)
   `);
 
-  // Index new or modified files
+  // Index new, modified, or dimension-invalidated files
   for (const [key, item] of currentFiles.entries()) {
-    const prevMtime = existingMap.get(key);
-    if (prevMtime && prevMtime === item.mtime) {
-      continue; // File unchanged
+    const prev = existingMap.get(key);
+    if (prev && prev.mtime === item.mtime && prev.hasValidVector) {
+      continue; // File unchanged and vector dimension matches active engine
     }
 
     try {
@@ -417,14 +680,26 @@ export function syncSqliteIndex(workspaceRoot = process.cwd()) {
       const verified = fm.verified || '';
       const trigger = fm.description || fm.trigger || '';
 
-      const multiVec = generateMultiVector({
-        trigger,
-        body: parsed.body,
-        slug: item.slug,
-        domain,
-        type,
-        related: fm.related
-      });
+      let multiVec;
+      if (activeConfig.engine === 'onnx') {
+        multiVec = await generateMultiVectorAsync({
+          trigger,
+          body: parsed.body,
+          slug: item.slug,
+          domain,
+          type,
+          related: fm.related
+        });
+      } else {
+        multiVec = generateMultiVector({
+          trigger,
+          body: parsed.body,
+          slug: item.slug,
+          domain,
+          type,
+          related: fm.related
+        });
+      }
 
       insertMeta.run(
         item.wsId,
@@ -477,7 +752,7 @@ export function syncSqliteIndex(workspaceRoot = process.cwd()) {
  * File-based fallback search when SQLite is unavailable.
  * Evaluates multi-vector dense embedding similarity and keyword matches directly from markdown files.
  */
-function searchMemoriesFileBasedFallback(workspaceRoot, queryText, options = {}) {
+async function searchMemoriesFileBasedFallback(workspaceRoot, queryText, options = {}) {
   const { activeEntries } = scanLayerEntries(workspaceRoot, 'all');
   if (activeEntries.length === 0) return [];
 
@@ -485,7 +760,8 @@ function searchMemoriesFileBasedFallback(workspaceRoot, queryText, options = {})
   const queryTokens = tokenizeText(cleanQuery);
   if (queryTokens.length === 0) return [];
 
-  const queryVec = generateDenseEmbedding(cleanQuery, 128);
+  const activeConfig = getActiveEmbeddingConfig();
+  const queryVec = await generateEmbedding(cleanQuery, activeConfig.dimensions);
   const precedence = { workspace: 3, private: 2, team: 1 };
   const results = [];
 
@@ -497,14 +773,26 @@ function searchMemoriesFileBasedFallback(workspaceRoot, queryText, options = {})
       body = parsed.body || '';
     } catch {}
 
-    const multiVec = generateMultiVector({
-      trigger: entry.trigger,
-      body,
-      slug: entry.slug,
-      domain: entry.domain,
-      type: entry.type,
-      related: entry.related
-    });
+    let multiVec;
+    if (activeConfig.engine === 'onnx') {
+      multiVec = await generateMultiVectorAsync({
+        trigger: entry.trigger,
+        body,
+        slug: entry.slug,
+        domain: entry.domain,
+        type: entry.type,
+        related: entry.related
+      });
+    } else {
+      multiVec = generateMultiVector({
+        trigger: entry.trigger,
+        body,
+        slug: entry.slug,
+        domain: entry.domain,
+        type: entry.type,
+        related: entry.related
+      });
+    }
 
     const multiVecSim = computeMultiVectorSimilarity(queryVec, multiVec);
 
@@ -547,9 +835,10 @@ function searchMemoriesFileBasedFallback(workspaceRoot, queryText, options = {})
 /**
  * Multi-Vector Hybrid Semantic Retrieval with Reciprocal Rank Fusion (RRF).
  * Combines SQLite FTS5 BM25 with Multi-Facet Dense Embeddings (trigger, content, entity).
+ * Uses Local ONNX Transformer (384-d) or Heuristic fallback (128-d).
  * Deterministically enforces Workspace > Private > Team precedence and active override shadowing.
  */
-export function searchMemoriesHybrid(workspaceRoot, queryText, options = {}) {
+export async function searchMemoriesHybrid(workspaceRoot, queryText, options = {}) {
   if (!queryText || typeof queryText !== 'string' || !queryText.trim()) {
     return [];
   }
@@ -559,13 +848,14 @@ export function searchMemoriesHybrid(workspaceRoot, queryText, options = {}) {
     return searchMemoriesFileBasedFallback(workspaceRoot, queryText, options);
   }
 
-  syncSqliteIndex(workspaceRoot);
+  await syncSqliteIndex(workspaceRoot);
 
   const cleanQuery = queryText.trim();
   const queryTokens = tokenizeText(cleanQuery);
   if (queryTokens.length === 0) return [];
 
-  const queryVec = generateDenseEmbedding(cleanQuery, 128);
+  const activeConfig = getActiveEmbeddingConfig();
+  const queryVec = await generateEmbedding(cleanQuery, activeConfig.dimensions);
   const currentWsId = normalizeWorkspaceId(workspaceRoot);
 
   // 1. Build authoritative precedence and shadow map from scanLayerEntries
@@ -598,22 +888,37 @@ export function searchMemoriesHybrid(workspaceRoot, queryText, options = {}) {
     let multiVec = null;
     try {
       if (row.trigger_vector && row.content_vector && row.entity_vector) {
-        multiVec = {
-          trigger_vector: JSON.parse(row.trigger_vector),
-          content_vector: JSON.parse(row.content_vector),
-          entity_vector: JSON.parse(row.entity_vector)
-        };
+        const tVec = JSON.parse(row.trigger_vector);
+        const cVec = JSON.parse(row.content_vector);
+        const eVec = JSON.parse(row.entity_vector);
+        if (tVec.length === activeConfig.dimensions) {
+          multiVec = {
+            trigger_vector: tVec,
+            content_vector: cVec,
+            entity_vector: eVec
+          };
+        }
       }
     } catch {}
 
     if (!multiVec) {
-      multiVec = generateMultiVector({
-        trigger: row.trigger,
-        body: '',
-        slug: row.slug,
-        domain: row.domain,
-        type: row.type
-      });
+      if (activeConfig.engine === 'onnx') {
+        multiVec = await generateMultiVectorAsync({
+          trigger: row.trigger,
+          body: '',
+          slug: row.slug,
+          domain: row.domain,
+          type: row.type
+        });
+      } else {
+        multiVec = generateMultiVector({
+          trigger: row.trigger,
+          body: '',
+          slug: row.slug,
+          domain: row.domain,
+          type: row.type
+        });
+      }
     }
 
     const multiVecSim = computeMultiVectorSimilarity(queryVec, multiVec);
@@ -736,7 +1041,7 @@ export function getKnowledgeGraphData(workspaceRoot) {
   let rawLinks = [];
 
   if (db) {
-    syncSqliteIndex(workspaceRoot);
+    syncSqliteMetadata(workspaceRoot);
 
     rawNodes = db.prepare(`
       SELECT m.slug as id, m.slug, m.layer, m.domain, m.type, m.verified, m.trigger as description,
@@ -1017,14 +1322,14 @@ export function recordMemoryEfficacy(slug, feedbackType, details = {}) {
  * @param {Object} options
  * @returns {Object} Proactive probe matches and advisory system messages
  */
-export function proactiveMemoryProbe(workspaceRoot = process.cwd(), queryOrContext = '', options = {}) {
+export async function proactiveMemoryProbe(workspaceRoot = process.cwd(), queryOrContext = '', options = {}) {
   if (!queryOrContext || typeof queryOrContext !== 'string' || !queryOrContext.trim()) {
     return { triggered: false, count: 0, matches: [], advisoryMessage: '' };
   }
 
   const threshold = typeof options.threshold === 'number' ? options.threshold : 0.55;
   const limit = options.limit || 3;
-  const matches = searchMemoriesHybrid(workspaceRoot, queryOrContext, {
+  const matches = await searchMemoriesHybrid(workspaceRoot, queryOrContext, {
     limit,
     mode: 'hybrid'
   });

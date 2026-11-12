@@ -532,7 +532,7 @@ function handleRequest(message) {
             break;
 
           case 'search_memories':
-            resultData = searchMemoriesHybrid(workspaceRoot, args.query, {
+            resultData = await searchMemoriesHybrid(workspaceRoot, args.query, {
               limit: args.limit || 5,
               mode: args.mode || 'hybrid'
             });
@@ -578,7 +578,7 @@ function handleRequest(message) {
             break;
 
           case 'proactive_memory_probe':
-            resultData = proactiveMemoryProbe(workspaceRoot, args.query, {
+            resultData = await proactiveMemoryProbe(workspaceRoot, args.query, {
               threshold: args.threshold,
               limit: args.limit
             });
@@ -591,32 +591,32 @@ function handleRequest(message) {
           // --- Commands ---
           case 'save_memory_entry':
             resultData = saveMemoryEntry(workspaceRoot, args);
-            syncSqliteIndex(workspaceRoot);
+            await syncSqliteIndex(workspaceRoot);
             break;
 
           case 'merge_memory_entries':
             resultData = mergeMemoryEntries(workspaceRoot, args);
-            syncSqliteIndex(workspaceRoot);
+            await syncSqliteIndex(workspaceRoot);
             break;
 
           case 'delete_memory_entry':
             resultData = deleteMemoryEntry(workspaceRoot, args);
-            syncSqliteIndex(workspaceRoot);
+            await syncSqliteIndex(workspaceRoot);
             break;
 
           case 'sync_memory_layer':
             resultData = syncMemoryLayer(workspaceRoot, args);
-            syncSqliteIndex(workspaceRoot);
+            await syncSqliteIndex(workspaceRoot);
             break;
 
           case 'prepare_team_promotion':
             resultData = prepareTeamPromotion(workspaceRoot, args);
-            syncSqliteIndex(workspaceRoot);
+            await syncSqliteIndex(workspaceRoot);
             break;
 
           case 'ingest_team_adr':
             resultData = ingestTeamAdr(workspaceRoot, args.adrPath, { targetLayer: args.targetLayer || 'workspace' });
-            syncSqliteIndex(workspaceRoot);
+            await syncSqliteIndex(workspaceRoot);
             break;
 
           case 'record_memory_efficacy':

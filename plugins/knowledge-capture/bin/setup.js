@@ -41,7 +41,8 @@ export function setupEnvironment(options = {}) {
   // Load or create settings.json
   let settings = {
     privateRepoUrl: '',
-    teamRepoUrl: ''
+    teamRepoUrl: '',
+    embeddingEngine: 'onnx'
   };
 
   if (fs.existsSync(settingsPath)) {
@@ -59,8 +60,34 @@ export function setupEnvironment(options = {}) {
   if (options.teamRepoUrl !== undefined) {
     settings.teamRepoUrl = options.teamRepoUrl.trim();
   }
+  if (options.embeddingEngine !== undefined) {
+    settings.embeddingEngine = options.embeddingEngine.toLowerCase().trim() === 'heuristic' ? 'heuristic' : 'onnx';
+  }
 
   fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf8');
+
+  // If ONNX engine chosen and installation requested, ensure @xenova/transformers is ready
+  if (settings.embeddingEngine === 'onnx' && options.installDependencies !== false) {
+    try {
+      const currentDir = path.dirname(new URL(import.meta.url).pathname);
+      const mcpServerDir = path.resolve(currentDir, '..', 'mcp-server');
+      const nodeModulesDir = path.join(mcpServerDir, 'node_modules', '@xenova', 'transformers');
+      if (!fs.existsSync(nodeModulesDir)) {
+        if (!options.silent) {
+          console.log('\n\x1b[36mInstalling @xenova/transformers in MCP server for Local ONNX...\x1b[0m');
+        }
+        execFileSync('npm', ['install', '--no-audit', '--no-fund', '@xenova/transformers'], {
+          cwd: mcpServerDir,
+          stdio: options.silent ? 'ignore' : 'inherit'
+        });
+      }
+    } catch (err) {
+      if (!options.silent) {
+        console.warn(`\x1b[33mNotice: Could not automatically install @xenova/transformers: ${err.message}\x1b[0m`);
+        console.warn('\x1b[33mKnowledge Capture will use the fast Heuristic Vector Engine fallback.\x1b[0m');
+      }
+    }
+  }
 
   // Helper to initialize or clone git repository cleanly
   function ensureRepoInitialized(targetDir, remoteUrl) {
@@ -216,7 +243,7 @@ async function runInteractiveWizard() {
   }
 
   // Step 2: Team Memory
-  console.log('\n\x1b[1m\x1b[34m[Step 2/2] Team Memory Layer (Shared Standards & Conventions)\x1b[0m');
+  console.log('\n\x1b[1m\x1b[34m[Step 2/3] Team Memory Layer (Shared Standards & Conventions)\x1b[0m');
   console.log('Do you have a shared repository for organization-wide engineering rules?');
   console.log('  \x1b[32m[1] Team Shared Git Repository\x1b[0m');
   console.log('      Pulls shared team standards and enables /kc-promote Pull Requests.');
@@ -255,6 +282,22 @@ async function runInteractiveWizard() {
     console.log('\x1b[90mTeam memory skipped / unconfigured.\x1b[0m');
   }
 
+  // Step 3: Semantic Embedding Engine
+  console.log('\n\x1b[1m\x1b[34m[Step 3/3] Semantic Embedding Engine\x1b[0m');
+  console.log('Choose how Knowledge Capture indexes and searches memories:');
+  console.log('  \x1b[32m[1] Local ONNX Transformer (all-MiniLM-L6-v2) (Recommended)\x1b[0m');
+  console.log('      True semantic search & synonym matching (100% local CPU inference, 384-d).');
+  console.log('  \x1b[90m[2] Heuristic Vector Engine (Built-in)\x1b[0m');
+  console.log('      Subword n-gram & bigram hash. Zero downloads, zero dependencies (128-d).');
+
+  const engineChoice = (await promptQuestion(rl, '\nSelect option [1-2] (default: 1): ')).trim() || '1';
+  options.embeddingEngine = (engineChoice === '2') ? 'heuristic' : 'onnx';
+  if (options.embeddingEngine === 'onnx') {
+    console.log('\x1b[32mSelected Local ONNX Transformer (all-MiniLM-L6-v2).\x1b[0m');
+  } else {
+    console.log('\x1b[90mSelected Heuristic Vector Engine.\x1b[0m');
+  }
+
   rl.close();
 
   // Execute persistence
@@ -265,6 +308,7 @@ async function runInteractiveWizard() {
   console.log(`    Private: ${res.privateDir}`);
   console.log(`    Team:    ${res.teamDir}`);
   console.log(`\x1b[32m✔ Settings written to:\x1b[0m ${res.settingsPath}`);
+  console.log(`\x1b[32m✔ Embedding Engine:\x1b[0m ${res.settings.embeddingEngine}`);
 
   if (options.teamRepoUrl) {
     console.log('\n\x1b[36mPerforming initial Team memory clone/pull...\x1b[0m');
@@ -298,6 +342,15 @@ for (let i = 0; i < args.length; i++) {
     hasFlags = true;
   } else if (args[i] === '--team-url' && args[i + 1]) {
     options.teamRepoUrl = args[++i];
+    hasFlags = true;
+  } else if (args[i] === '--embedding-engine' && args[i + 1]) {
+    options.embeddingEngine = args[++i];
+    hasFlags = true;
+  } else if (args[i].startsWith('--embedding-engine=')) {
+    options.embeddingEngine = args[i].split('=')[1];
+    hasFlags = true;
+  } else if (args[i] === '--no-install') {
+    options.installDependencies = false;
     hasFlags = true;
   }
 }
