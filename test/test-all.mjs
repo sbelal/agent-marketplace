@@ -35,7 +35,10 @@ import {
   deriveTeamRepoSlug,
   applyMemoryPatch,
   auditTeamConflicts,
-  resolveTeamConflict
+  resolveTeamConflict,
+  resolveStoragePaths,
+  syncMemoryLayer,
+  ingestTeamAdr
 } from '../plugins/knowledge-capture/mcp-server/memory-service.js';
 
 import { mergeMemoryEntries } from '../plugins/knowledge-capture/mcp-server/core/memory-store.js';
@@ -2100,6 +2103,230 @@ Ensures vector indexing runs after metadata-only graph sync.
   assert.equal(health2.workspace, path.resolve(bugFixWs2), 'renderVisualMemoryStudio must restart/rebind HTTP server when workspaceRoot changes');
   await stopStudioService();
   console.log('  ✔ Passed: Deactivated team isolation, nested subdir ops, YAML round-trip, dirty-vector detection & studio switching verified.\n');
+
+  // ==========================================
+  // TEST 45: Sentinel Subdir Captures, Path Traversal Guard, & Complete Deactivated-Team Isolation
+  // ==========================================
+  console.log('Test 45: Sentinel Subdir Captures, Slug Traversal Guard & All-Surface Deactivated-Team Isolation...');
+  const isoWs = path.join(tempRoot, 'iso-audit-ws');
+  const isoMemNested = path.join(isoWs, '.agents', 'rules', 'memory', 'k8s');
+  fs.mkdirSync(isoMemNested, { recursive: true });
+  fs.writeFileSync(path.join(isoMemNested, 'nested-recent-capture.md'), `---
+name: nested-recent-capture
+domain: devops
+type: convention
+description: Recently captured rule stored in nested subdirectory
+verified: 2026-11-12
+---
+# Nested Recent Capture
+Stored inside a nested domain subdirectory.
+`, 'utf8');
+
+  const sentinelNested = autoElicitSessionKnowledge(isoWs, { modified_files: [] });
+  assert.ok(sentinelNested.recent_memory_captures >= 1, 'autoElicitSessionKnowledge must count recent captures inside nested subdirectories');
+
+  // deriveTeamRepoSlug & addTeamRepository slug guards
+  assert.equal(deriveTeamRepoSlug('https://example.com/@@@/!!!'), 'team-repo', 'deriveTeamRepoSlug must never return empty string on punctuation-only URLs');
+  assert.throws(() => addTeamRepository('---', '', 'Bad Slug', isoWs), /Team repository slug is required/, 'addTeamRepository must reject punctuation-only slugs');
+
+  // Craft malicious traversal slug in settings.json directly
+  const evilSettingsPath = path.join(process.env.KC_STORAGE_DIR, 'settings.json');
+  const prevSettingsRaw = fs.existsSync(evilSettingsPath) ? fs.readFileSync(evilSettingsPath, 'utf8') : null;
+  fs.writeFileSync(evilSettingsPath, JSON.stringify({
+    privateRepoUrl: '',
+    teamRepoUrl: '',
+    teamRepos: [{ slug: '../../evil-escape', name: 'Evil', url: '', active: true }]
+  }, null, 2), 'utf8');
+  const safePaths = resolveStoragePaths(isoWs);
+  assert.equal(safePaths.activeTeamDirs.length, 0, 'resolveStoragePaths must skip unsafe traversal team slugs');
+  assert.equal(getTeamRepositories(isoWs).length, 0, 'getTeamRepositories must skip unsafe traversal team slugs');
+  if (prevSettingsRaw !== null) fs.writeFileSync(evilSettingsPath, prevSettingsRaw, 'utf8');
+  else fs.unlinkSync(evilSettingsPath);
+
+  // Setup a team repo with both active search index and private conflict, then deactivate it
+  const hiddenAuditTeam = addTeamRepository('audit-hidden-team', '', 'Hidden Audit Team', isoWs);
+  const hiddenRulePath = path.join(hiddenAuditTeam.targetDir, 'secret-deactivated-rule.md');
+  fs.writeFileSync(hiddenRulePath, `---
+name: secret-deactivated-rule
+domain: security
+type: convention
+description: Secret deactivated team rule that must never leak after deactivation
+verified: 2026-11-01
+---
+# Secret Deactivated Rule
+Only exists in hidden team repo.
+`, 'utf8');
+  saveMemoryEntry(isoWs, {
+    layer: 'private',
+    slug: 'secret-deactivated-rule',
+    domain: 'security',
+    description: 'Diverged private copy',
+    body: '# Private override'
+  });
+  await syncSqliteIndex(isoWs);
+
+  setTeamRepositoryActive('audit-hidden-team', false, isoWs);
+  // Remove local workspace/private files for an empty active set search check
+  fs.rmSync(path.join(isoWs, '.agents', 'rules', 'memory'), { recursive: true, force: true });
+  fs.mkdirSync(path.join(isoWs, '.agents', 'rules', 'memory'), { recursive: true });
+  deleteMemoryEntry(isoWs, { layer: 'private', slug: 'secret-deactivated-rule' });
+  // Re-add private rule ONLY to test auditTeamConflicts stays silent when team repo is inactive
+  saveMemoryEntry(isoWs, {
+    layer: 'private',
+    slug: 'secret-deactivated-rule',
+    domain: 'security',
+    description: 'Diverged private copy',
+    body: '# Private override'
+  });
+
+  const statsDeactivated = getLayerStatistics(isoWs);
+  assert.equal(statsDeactivated.counts.team, 0, 'getLayerStatistics must report 0 team files when all configured teamRepos are inactive');
+  assert.equal(statsDeactivated.syncStatus.teamGit.isGit, false, 'getLayerStatistics must not leak root teamDir git status when teamRepos are inactive');
+
+  const conflictsDeactivated = auditTeamConflicts(isoWs);
+  assert.equal(conflictsDeactivated.conflictsCount, 0, 'auditTeamConflicts must not scan deactivated team repos via root teamDir fallback');
+
+  const syncDeactivated = syncMemoryLayer(isoWs, { layer: 'team' });
+  assert.equal(syncDeactivated.team.status, 'no-active-team-repos', 'syncMemoryLayer must not fall back to root teamDir when all teamRepos are inactive');
+
+  const adrTmpFile = path.join(tempRoot, 'adr-test.md');
+  fs.writeFileSync(adrTmpFile, '# ADR 999: Test Decision\nUse strict boundaries.\n', 'utf8');
+  assert.throws(
+    () => ingestTeamAdr(isoWs, adrTmpFile, { targetLayer: 'team' }),
+    /No active team repositories/,
+    'ingestTeamAdr must reject targetLayer="team" when all configured teamRepos are inactive'
+  );
+
+  // Re-activate temporarily to test unknown slug rejection
+  setTeamRepositoryActive('audit-hidden-team', true, isoWs);
+  assert.throws(
+    () => ingestTeamAdr(isoWs, adrTmpFile, { targetLayer: 'team/does-not-exist' }),
+    /was not found in settings or is not active/,
+    'ingestTeamAdr must throw for nonexistent or inactive team/<slug> instead of falling back to root teamDir'
+  );
+
+  // Deactivate again and remove private file so activeKeySet is empty, then search SQLite directly
+  setTeamRepositoryActive('audit-hidden-team', false, isoWs);
+  deleteMemoryEntry(isoWs, { layer: 'private', slug: 'secret-deactivated-rule' });
+  const leakedSearch = await searchMemoriesHybrid(isoWs, 'secret deactivated team rule', { sync: false });
+  assert.equal(leakedSearch.some(r => r.slug === 'secret-deactivated-rule'), false, 'searchMemoriesHybrid must never return deactivated/deleted rows even with sync:false');
+
+  removeTeamRepository('audit-hidden-team', true, isoWs);
+  console.log('  ✔ Passed: Nested sentinel captures, slug traversal guards, and complete deactivated-team isolation verified.\n');
+
+  // ==========================================
+  // TEST 46: Mixed-Case Slugs, In-Place FTS Rename Cleanup, & Setup KC_STORAGE_DIR Honor
+  // ==========================================
+  console.log('Test 46: Mixed-Case Graph/Content/Rewire Resolution, Indexer Rename Cleanup & Setup Storage Honor...');
+  const caseWs = path.join(tempRoot, 'mixed-case-ws');
+  const caseMemDir = path.join(caseWs, '.agents', 'rules', 'memory');
+  fs.mkdirSync(caseMemDir, { recursive: true });
+
+  fs.writeFileSync(path.join(caseMemDir, 'MixedCaseTarget.md'), `---
+name: MixedCaseTarget
+domain: testing
+type: convention
+description: Mixed case memory target
+verified: 2026-11-12
+---
+# Mixed Case Target
+Target body.
+`, 'utf8');
+
+  fs.writeFileSync(path.join(caseMemDir, 'MixedCaseReferrer.md'), `---
+name: MixedCaseReferrer
+domain: testing
+type: convention
+description: References mixed case target using lowercase
+verified: 2026-11-12
+related:
+  - mixedcasetarget
+---
+# Mixed Case Referrer
+Referrer body.
+`, 'utf8');
+
+  const mixedContent = getMemoryContent(caseWs, 'all', 'mixedcasetarget');
+  assert.ok(mixedContent.backlinks.some(b => b.slug === 'MixedCaseReferrer'), 'getMemoryContent must resolve mixed-case backlinks case-insensitively');
+  const mixedRefContent = getMemoryContent(caseWs, 'all', 'MixedCaseReferrer');
+  assert.equal(mixedRefContent.relatedMemories[0]?.resolved, true, 'getMemoryContent must resolve mixed-case related targets via lowercase activeIndex');
+
+  await syncSqliteIndex(caseWs);
+  const mixedGraph = getKnowledgeGraphData(caseWs);
+  assert.equal(mixedGraph.links.length, 1, 'getKnowledgeGraphData must match mixed-case link endpoints case-insensitively instead of classifying them as brokenLinks');
+  assert.equal(mixedGraph.brokenLinks.length, 0);
+  const mixedNeighbors = getMemoryGraphNeighbors(caseWs, 'mixedcasetarget');
+  assert.equal(mixedNeighbors.incoming.length, 1, 'getMemoryGraphNeighbors(depth=1) must resolve mixed-case slugs case-insensitively');
+
+  // Case-insensitive rewire & cleanDanglingReferences
+  const rewiredCase = rewireMemoryReferences(caseWs, 'mixedcasetarget', 'RenamedCaseTarget');
+  assert.equal(rewiredCase, 1, 'rewireMemoryReferences must match related references case-insensitively');
+  const cleanedCase = cleanDanglingReferences(caseWs, 'renamedcasetarget');
+  assert.equal(cleanedCase, 1, 'cleanDanglingReferences must remove dangling references case-insensitively');
+
+  // applyMemoryPatch guards empty source/target and array overrides removal
+  fs.writeFileSync(path.join(caseMemDir, 'PatchOverrideSource.md'), `---
+name: PatchOverrideSource
+domain: testing
+type: convention
+description: Tests array overrides patch removal
+verified: 2026-11-12
+overrides:
+  - MixedCaseTarget
+  - OtherRule
+---
+# Patch Override Source
+`, 'utf8');
+  const patchRes = applyMemoryPatch(caseWs, {
+    added_links: [{ source: 'PatchOverrideSource', target: '   ', type: 'related' }],
+    removed_links: [{ source: 'PatchOverrideSource', target: 'mixedcasetarget', type: 'overrides' }]
+  });
+  assert.equal(patchRes.linksAdded, 0, 'applyMemoryPatch must ignore empty target links');
+  assert.equal(patchRes.linksRemoved, 1, 'applyMemoryPatch must remove specific override from array overrides');
+  const patchedRaw = parseYamlFrontmatter(fs.readFileSync(path.join(caseMemDir, 'PatchOverrideSource.md'), 'utf8'));
+  assert.deepEqual(patchedRaw.frontmatter.overrides, ['OtherRule'], 'Remaining override must be preserved cleanly');
+
+  // Indexer in-place frontmatter name: rename must purge orphan FTS5/graph rows
+  const renameFilePath = path.join(caseMemDir, 'inplace-rename.md');
+  fs.writeFileSync(renameFilePath, `---
+name: unique-before-rename-token
+domain: testing
+type: convention
+description: Entry before in-place frontmatter rename
+verified: 2026-11-12
+---
+# Before Rename
+Body before rename.
+`, 'utf8');
+  await syncSqliteIndex(caseWs);
+
+  fs.writeFileSync(renameFilePath, `---
+name: unique-after-rename-token
+domain: testing
+type: convention
+description: Entry after in-place frontmatter rename
+verified: 2026-11-12
+---
+# After Rename
+Body after rename.
+`, 'utf8');
+  // Advance mtime by 1s to guarantee change detection on coarse filesystems
+  const futureTime = new Date(Date.now() + 2000);
+  fs.utimesSync(renameFilePath, futureTime, futureTime);
+  await syncSqliteIndex(caseWs);
+
+  const orphanSearch = await searchMemoriesHybrid(caseWs, 'unique-before-rename-token');
+  assert.equal(orphanSearch.some(r => r.slug === 'unique-before-rename-token'), false, 'Indexer must delete orphan FTS5 rows when frontmatter name changes in place');
+
+  // setup.js must honor KC_STORAGE_DIR
+  const customSetupStorage = path.join(tempRoot, 'setup-custom-storage');
+  const prevKcDir = process.env.KC_STORAGE_DIR;
+  process.env.KC_STORAGE_DIR = customSetupStorage;
+  const setupRes = setupEnvironment({ embeddingEngine: 'heuristic', installDependencies: false, silent: true });
+  process.env.KC_STORAGE_DIR = prevKcDir;
+  assert.equal(path.resolve(setupRes.baseDir), path.resolve(customSetupStorage), 'setupEnvironment must honor KC_STORAGE_DIR');
+  assert.ok(fs.existsSync(path.join(customSetupStorage, 'settings.json')), 'setupEnvironment must write settings.json inside KC_STORAGE_DIR');
+  console.log('  ✔ Passed: Mixed-case graph/rewire, indexer FTS orphan cleanup & setup storage honor verified.\n');
 
   console.log('============================================================');
   console.log('🎉 ALL TESTS PASSED SUCCESSFULLY!');

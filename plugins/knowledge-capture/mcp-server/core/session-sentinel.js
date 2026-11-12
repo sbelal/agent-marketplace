@@ -3,6 +3,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { resolveStoragePaths, GIT_EXEC_ENV } from './storage-paths.js';
 import { parsePorcelainZ } from './memory-store.js';
+import { findMarkdownFiles } from '../retrieval/shadow-resolver.js';
 import { searchMemoriesHybrid } from '../retrieval/hybrid-search.js';
 
 function readTranscriptFromPath(transcriptPath) {
@@ -151,18 +152,16 @@ export function autoElicitSessionKnowledge(workspaceRoot = process.cwd(), option
 
   const checkRecentFiles = (dir) => {
     let count = 0;
-    if (fs.existsSync(dir)) {
-      try {
-        const files = fs.readdirSync(dir);
-        for (const f of files) {
-          if (!f.endsWith('.md') || f.toUpperCase() === 'README.MD') continue;
-          const stat = fs.statSync(path.join(dir, f));
-          if (stat.mtimeMs >= threeHoursAgo) {
-            count++;
-          }
+    try {
+      const files = findMarkdownFiles(dir);
+      for (const filePath of files) {
+        if (path.basename(filePath, '.md').toUpperCase() === 'README') continue;
+        const stat = fs.statSync(filePath);
+        if (stat.mtimeMs >= threeHoursAgo) {
+          count++;
         }
-      } catch {}
-    }
+      }
+    } catch {}
     return count;
   };
 

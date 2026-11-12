@@ -109,17 +109,17 @@ export function deriveTeamRepoSlug(url) {
   if (scpMatch) {
     const org = scpMatch[1].replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
     const repo = scpMatch[2].replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
-    return `${org}-${repo}`.replace(/--+/g, '-').replace(/^-|-$/g, '');
+    return `${org}-${repo}`.replace(/--+/g, '-').replace(/^-|-$/g, '') || 'team-repo';
   }
 
   const parts = clean.split(/[/:\\\\]/).filter(Boolean);
   if (parts.length >= 2) {
     const org = parts[parts.length - 2].replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
     const repo = parts[parts.length - 1].replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
-    return `${org}-${repo}`.replace(/--+/g, '-').replace(/^-|-$/g, '');
+    return `${org}-${repo}`.replace(/--+/g, '-').replace(/^-|-$/g, '') || 'team-repo';
   }
 
-  return clean.replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase() || 'team-repo';
+  return clean.replace(/[^a-zA-Z0-9_-]/g, '-').replace(/--+/g, '-').replace(/^-|-$/g, '').toLowerCase() || 'team-repo';
 }
 
 /**
@@ -135,11 +135,12 @@ export function resolveStoragePaths(workspaceRoot = process.cwd()) {
   // 1. Scan configured teamRepos
   if (Array.isArray(settings.teamRepos) && settings.teamRepos.length > 0) {
     for (const repo of settings.teamRepos) {
-      if (repo && repo.slug && repo.active !== false) {
+      const slug = repo && typeof repo.slug === 'string' ? repo.slug.trim() : '';
+      if (repo && slug && /^[a-z0-9_-]+$/i.test(slug) && repo.active !== false) {
         activeTeamDirs.push({
-          slug: repo.slug,
-          name: repo.name || repo.slug,
-          dir: path.join(teamBaseDir, repo.slug),
+          slug,
+          name: repo.name || slug,
+          dir: path.join(teamBaseDir, slug),
           url: repo.url || ''
         });
       }

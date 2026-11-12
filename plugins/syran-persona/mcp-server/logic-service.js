@@ -87,6 +87,14 @@ export function getPersonaDirectives() {
   return '# Persona: Syran, The Logic Officer\n\nAdhere strictly to pure logic, formal precision, and probability-driven counsel. Do not use contractions.';
 }
 
+function resolvePluginVersion() {
+  try {
+    const pluginJson = JSON.parse(fs.readFileSync(path.join(pluginRoot, 'plugin.json'), 'utf8'));
+    if (pluginJson && pluginJson.version) return pluginJson.version;
+  } catch {}
+  return '1.1.0';
+}
+
 /**
  * Pure query: Retrieves operational status of the Logic Officer.
  * 
@@ -104,7 +112,7 @@ export function getPersonaStatus() {
       first_principles_reasoning: true,
       probability_analysis: true
     },
-    version: '1.1.0'
+    version: resolvePluginVersion()
   };
 }
 

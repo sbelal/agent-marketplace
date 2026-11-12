@@ -182,7 +182,7 @@ function checkPluginUpdateNotice(pluginRoot, pluginName, homeDir) {
   }
 }
 
-async function main() {
+async function main(hookState = {}) {
   // Read stdin context if piped (with 150ms fallback to prevent hangs)
   let payload = {};
   try {
@@ -190,6 +190,7 @@ async function main() {
   } catch {
     // Stdin reading fallback to process.cwd()
   }
+  hookState.payload = payload;
   const workspaceRoot = resolveHookWorkspace(payload);
 
   const paths = resolveStoragePaths(workspaceRoot);
@@ -238,6 +239,8 @@ async function main() {
 
   if (teamStatuses.length > 0) {
     teamSyncStatus = teamStatuses.join(', ');
+  } else if (settings?.teamRepos && settings.teamRepos.length > 0) {
+    teamSyncStatus = 'Inactive (all configured team repositories disabled)';
   } else if (settings?.teamRepoUrl) {
     teamSyncStatus = 'Offline / Remote unavailable';
   }
@@ -279,9 +282,10 @@ async function main() {
   }
 
   if (team.isGit && team.isPromoteBranch) {
+    const baseBranch = team.defaultBranch || 'main';
     report += `\n> [!NOTE]\n`;
     report += `> Team clone is currently on promotion branch \`${team.branch}\`.\n`;
-    report += `> Once your Pull Request is merged, check out \`main\` via \`git checkout main\` and run \`/kc-pull\`.\n`;
+    report += `> Once your Pull Request is merged, check out \`${baseBranch}\` via \`git checkout ${baseBranch}\` and run \`/kc-pull\`.\n`;
   }
 
   if (team.isGit && team.upstreamBehind > 0) {
@@ -310,13 +314,14 @@ async function main() {
   emitHookMessage(report, { isAntigravity });
 }
 
-main()
+const hookState = { payload: {} };
+main(hookState)
   .then(() => {
     process.exit(0);
   })
   .catch(() => {
     // Ensure hook never crashes the agent startup
-    const { isAntigravity } = detectHookPlatform();
+    const { isAntigravity } = detectHookPlatform(hookState.payload);
     emitHookMessage(isAntigravity ? '' : '[knowledge-capture] Startup check completed.', { isAntigravity });
     process.exit(0);
   });

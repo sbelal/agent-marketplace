@@ -48,7 +48,10 @@ export function getTeamRepositories(workspaceRoot = process.cwd()) {
   const results = [];
 
   for (const repo of settings.teamRepos) {
-    const repoDir = path.join(teamBaseDir, repo.slug);
+    const slug = repo && typeof repo.slug === 'string' ? repo.slug.trim() : '';
+    if (!slug || !/^[a-z0-9_-]+$/i.test(slug)) continue;
+
+    const repoDir = path.join(teamBaseDir, slug);
     const gitDir = path.join(repoDir, '.git');
     const isGit = fs.existsSync(gitDir);
 
@@ -82,8 +85,8 @@ export function getTeamRepositories(workspaceRoot = process.cwd()) {
     }
 
     results.push({
-      slug: repo.slug,
-      name: repo.name || repo.slug,
+      slug,
+      name: repo.name || slug,
       url: repo.url || '',
       active: repo.active !== false,
       path: repoDir,
@@ -133,8 +136,13 @@ export function addTeamRepository(arg1 = process.cwd(), arg2 = {}, arg3 = null, 
     options.slug = deriveTeamRepoSlug(options.url);
   }
 
-  const rawSlug = String(options.slug || '').trim().toLowerCase().replace(/[^a-z0-9_-]/g, '-');
-  if (!rawSlug) {
+  const rawSlug = String(options.slug || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]/g, '-')
+    .replace(/--+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  if (!rawSlug || !/^[a-z0-9_-]+$/.test(rawSlug)) {
     throw new Error('Team repository slug is required or must be derivable from Git URL (<org_id>-<repo_slug>).');
   }
 
@@ -144,7 +152,7 @@ export function addTeamRepository(arg1 = process.cwd(), arg2 = {}, arg3 = null, 
   const paths = resolveStoragePaths(workspaceRoot);
   const settings = getSettings(paths.baseDir);
   const teamBaseDir = paths.teamDir;
-  const targetDir = path.join(teamBaseDir, rawSlug);
+  const targetDir = assertContainment(path.join(teamBaseDir, rawSlug), teamBaseDir, 'team directory');
 
   if (!fs.existsSync(targetDir)) {
     fs.mkdirSync(targetDir, { recursive: true });
@@ -384,7 +392,9 @@ export function auditTeamConflicts(workspaceRoot = process.cwd()) {
 
   const teamRepos = paths.activeTeamDirs && paths.activeTeamDirs.length > 0
     ? paths.activeTeamDirs
-    : [{ slug: 'default', name: 'Default Team', dir: paths.teamDir }];
+    : ((!paths.settings?.teamRepos || paths.settings.teamRepos.length === 0)
+        ? [{ slug: 'default', name: 'Default Team', dir: paths.teamDir }]
+        : []);
 
   for (const tRepo of teamRepos) {
     const teamFiles = findMarkdownFiles(tRepo.dir);
@@ -414,11 +424,14 @@ export function auditTeamConflicts(workspaceRoot = process.cwd()) {
 
             const teamVerified = Date.parse(teamFm.verified || '') || 0;
             const privVerified = Date.parse(privFm.verified || '') || 0;
+            const privOverrides = Array.isArray(privFm.overrides)
+              ? privFm.overrides.map(o => String(o).trim().toLowerCase())
+              : String(privFm.overrides || '').split(',').map(o => o.trim().toLowerCase()).filter(Boolean);
 
             if (teamVerified > privVerified && (teamVerified - privVerified) > 14 * 24 * 3600 * 1000) {
               divergenceType = 'upstream_updated_ahead';
               recommendedResolution = 'adopt_team';
-            } else if (privFm.overrides === slug) {
+            } else if (privOverrides.includes(slugKey)) {
               divergenceType = 'intentional_private_override';
               recommendedResolution = 'keep_private';
             } else {

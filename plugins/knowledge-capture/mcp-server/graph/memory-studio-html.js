@@ -1,4 +1,17 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { getKnowledgeGraphData } from './graph-service.js';
+
+function resolveKcPluginVersion() {
+  try {
+    const pluginJsonPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'plugin.json');
+    const data = JSON.parse(fs.readFileSync(pluginJsonPath, 'utf8'));
+    if (data && data.version) return data.version;
+  } catch {}
+  return '2.2.0';
+}
+const KC_PLUGIN_VERSION = resolveKcPluginVersion();
 
 function safeJsonForHtmlScript(value) {
   return JSON.stringify(value)
@@ -19,6 +32,7 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd(), option
   const isCompact = Boolean(options.compact);
   const serverUrlJson = safeJsonForHtmlScript(options.serverUrl || '');
   const studioTokenJson = safeJsonForHtmlScript(options.studioToken || '');
+  const versionJson = safeJsonForHtmlScript(KC_PLUGIN_VERSION);
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -1132,7 +1146,7 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd(), option
 
       const patchData = {
         generated_at: new Date().toISOString(),
-        version: "2.2.0",
+        version: ${versionJson},
         patch: staged
       };
 

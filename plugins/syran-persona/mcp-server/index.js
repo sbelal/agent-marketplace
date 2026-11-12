@@ -167,7 +167,7 @@ function handleRequest(message) {
           },
           serverInfo: {
             name: 'syran-logic',
-            version: '1.1.0'
+            version: getPersonaStatus().version
           }
         }
       });

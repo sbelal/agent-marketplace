@@ -17,7 +17,7 @@ export function ingestTeamAdr(workspaceRoot, adrFilePath, options = {}) {
   const targetLayer = (options.targetLayer || 'workspace').toLowerCase();
   const content = fs.readFileSync(adrFilePath, 'utf8');
   const baseName = path.basename(adrFilePath, path.extname(adrFilePath));
-  const slug = `adr-${baseName.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`.replace(/^-|-$/g, '');
+  const slug = `adr-${baseName.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`.replace(/--+/g, '-').replace(/^-|-$/g, '') || 'adr-entry';
 
   const paths = resolveStoragePaths(workspaceRoot);
   let targetDir = paths.workspaceDir;
@@ -26,8 +26,17 @@ export function ingestTeamAdr(workspaceRoot, adrFilePath, options = {}) {
   } else if (targetLayer === 'team' || targetLayer.startsWith('team/')) {
     const specifiedSlug = options.teamSlug || (targetLayer.startsWith('team/') ? targetLayer.slice(5) : null);
     if (paths.activeTeamDirs && paths.activeTeamDirs.length > 0) {
-      const match = specifiedSlug ? paths.activeTeamDirs.find(r => r.slug.toLowerCase() === specifiedSlug.toLowerCase()) : paths.activeTeamDirs[0];
-      targetDir = match ? match.dir : paths.teamDir;
+      const match = specifiedSlug
+        ? paths.activeTeamDirs.find(r => r.slug.toLowerCase() === specifiedSlug.toLowerCase())
+        : paths.activeTeamDirs[0];
+      if (!match) {
+        throw new Error(`Team repository '${specifiedSlug}' was not found in settings or is not active.`);
+      }
+      targetDir = match.dir;
+    } else if (paths.settings?.teamRepos && paths.settings.teamRepos.length > 0) {
+      throw new Error('No active team repositories are configured in settings.');
+    } else if (specifiedSlug && specifiedSlug.toLowerCase() !== 'default') {
+      throw new Error(`Team repository '${specifiedSlug}' was not found in settings or is not active.`);
     } else {
       targetDir = paths.teamDir;
     }

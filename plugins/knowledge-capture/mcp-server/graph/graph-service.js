@@ -115,7 +115,7 @@ export function getKnowledgeGraphData(workspaceRoot) {
   }
 
   const nodes = Array.from(nodeMap.values());
-  const validNodeIds = new Set(nodes.map(n => n.id));
+  const validNodeIdLookup = new Map(nodes.map(n => [n.id.toLowerCase(), n.id]));
   const activeNodeKeys = new Set(nodes.map(n => `${n.layer}:${n.team_slug || ''}:${n.slug.toLowerCase()}`));
 
   const now = Date.now();
@@ -136,11 +136,12 @@ export function getKnowledgeGraphData(workspaceRoot) {
     if (l.source_layer && !activeNodeKeys.has(`${l.source_layer}:${l.source_team_slug || ''}:${l.source.toLowerCase()}`)) {
       continue;
     }
-    const cleanLink = { source: l.source, target: l.target, type: l.type };
-    if (validNodeIds.has(l.source) && validNodeIds.has(l.target)) {
-      validLinks.push(cleanLink);
+    const canonicalSource = validNodeIdLookup.get(String(l.source || '').toLowerCase());
+    const canonicalTarget = validNodeIdLookup.get(String(l.target || '').toLowerCase());
+    if (canonicalSource && canonicalTarget) {
+      validLinks.push({ source: canonicalSource, target: canonicalTarget, type: l.type });
     } else {
-      brokenLinks.push(cleanLink);
+      brokenLinks.push({ source: canonicalSource || l.source, target: canonicalTarget || l.target, type: l.type });
     }
   }
 
@@ -193,6 +194,7 @@ export function getKnowledgeGraphData(workspaceRoot) {
 export function getMemoryGraphNeighbors(workspaceRoot, slug, options = {}) {
   if (!slug) return { slug: '', outgoing: [], incoming: [] };
   const cleanSlug = path.basename(slug.trim()).replace(/\.md$/i, '');
+  const cleanKey = cleanSlug.toLowerCase();
   const depth = typeof options === 'number' ? options : (options.depth || 1);
 
   if (depth > 1) {
@@ -200,14 +202,14 @@ export function getMemoryGraphNeighbors(workspaceRoot, slug, options = {}) {
   }
 
   const graph = getKnowledgeGraphData(workspaceRoot);
-  const targetNode = graph.nodes.find(n => n.id === cleanSlug || n.slug === cleanSlug);
+  const targetNode = graph.nodes.find(n => n.id.toLowerCase() === cleanKey || n.slug.toLowerCase() === cleanKey);
 
   const outgoing = graph.links
-    .filter(l => l.source === cleanSlug)
+    .filter(l => l.source.toLowerCase() === cleanKey)
     .map(l => ({ target_slug: l.target, rel_type: l.type }));
 
   const incoming = graph.links
-    .filter(l => l.target === cleanSlug)
+    .filter(l => l.target.toLowerCase() === cleanKey)
     .map(l => ({ source_slug: l.source, rel_type: l.type }));
 
   return {

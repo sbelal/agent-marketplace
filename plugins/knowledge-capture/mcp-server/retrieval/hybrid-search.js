@@ -196,10 +196,7 @@ export async function searchMemoriesHybrid(workspaceRoot, queryText, options = {
   for (const r of allRows) {
     const teamSlug = r.team_slug || '';
     const fileKey = `${r.layer}:${teamSlug}:${r.path}`;
-    const isActiveFile = activeKeySet.size > 0
-      ? activeKeySet.has(fileKey)
-      : !shadowedSet.has(`${r.layer}:${r.slug.toLowerCase()}`);
-    if (!isActiveFile) {
+    if (!activeKeySet.has(fileKey)) {
       continue;
     }
     activeRows.push(r);
@@ -283,8 +280,8 @@ export async function searchMemoriesHybrid(workspaceRoot, queryText, options = {
     const slugLower = row.slug.toLowerCase();
     const teamSlug = row.team_slug || '';
     const activeRow = allRowsMap.get(slugLower);
-    const isShadowed = activeRow && (activeRow.layer !== row.layer || (activeRow.team_slug || '') !== teamSlug);
-    if (!isShadowed && !ftsRankMap.has(slugLower)) {
+    const isActiveMatch = activeRow && activeRow.layer === row.layer && (activeRow.team_slug || '') === teamSlug;
+    if (isActiveMatch && !ftsRankMap.has(slugLower)) {
       ftsRankMap.set(slugLower, { rank: idx + 1, bm25_score: row.bm25_score, row });
     }
   });

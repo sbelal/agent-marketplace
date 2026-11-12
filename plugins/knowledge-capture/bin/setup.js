@@ -21,13 +21,12 @@ const GIT_EXEC_ENV = {
  * 2. Interactive step-by-step TUI wizard when run without flags in an interactive terminal.
  */
 
-import { deriveTeamRepoSlug } from '../mcp-server/core/storage-paths.js';
+import { deriveTeamRepoSlug, getStorageDir } from '../mcp-server/core/storage-paths.js';
 
 export { deriveTeamRepoSlug };
 
 export function setupEnvironment(options = {}) {
-  const home = os.homedir();
-  const baseDir = path.join(home, '.gemini', 'knowledge-capture');
+  const baseDir = getStorageDir();
   const privateDir = path.join(baseDir, 'private');
   const teamDir = path.join(baseDir, 'team');
   const settingsPath = path.join(baseDir, 'settings.json');
@@ -394,19 +393,6 @@ async function runInteractiveWizard() {
   console.log(`    Team:    ${res.teamDir}`);
   console.log(`\x1b[32m✔ Settings written to:\x1b[0m ${res.settingsPath}`);
   console.log(`\x1b[32m✔ Embedding Engine:\x1b[0m ${res.settings.embeddingEngine}`);
-
-  if (options.teamRepoUrl) {
-    console.log('\n\x1b[36mPerforming initial Team memory clone/pull...\x1b[0m');
-    try {
-      execFileSync('git', ['clone', '--', options.teamRepoUrl, res.teamDir], {
-        env: GIT_EXEC_ENV,
-        stdio: 'inherit'
-      });
-      console.log('\x1b[32m✔ Team memory cloned successfully.\x1b[0m');
-    } catch {
-      console.log('\x1b[33mNotice: Initial clone will be retried on next session start or via /kc-pull.\x1b[0m');
-    }
-  }
 
   console.log('\n\x1b[1m\x1b[32m🎉 Knowledge Capture Initialization Complete!\x1b[0m');
   console.log('Commands to remember:');

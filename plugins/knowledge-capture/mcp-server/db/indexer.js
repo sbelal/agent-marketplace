@@ -141,7 +141,7 @@ function collectPendingDiskState(db, workspaceRoot, activeConfig, checkVectors) 
   }
 
   const existingRows = db.prepare(`
-    SELECT workspace_id, layer, team_slug, path, slug, mtime, trigger_vector
+    SELECT workspace_id, layer, team_slug, path, slug, mtime, trigger_vector, content_vector, entity_vector
     FROM memories
     WHERE workspace_id = ? OR workspace_id = 'global'
   `).all(currentWsId);
@@ -149,14 +149,20 @@ function collectPendingDiskState(db, workspaceRoot, activeConfig, checkVectors) 
   const existingMap = new Map();
   for (const row of existingRows) {
     let hasValidVector = false;
-    if (checkVectors && row.trigger_vector) {
-      const v = bufferOrJsonToArray(row.trigger_vector);
-      if (Array.isArray(v) && v.length === activeConfig.dimensions) {
+    if (checkVectors && row.trigger_vector && row.content_vector && row.entity_vector) {
+      const tv = bufferOrJsonToArray(row.trigger_vector);
+      const cv = bufferOrJsonToArray(row.content_vector);
+      const ev = bufferOrJsonToArray(row.entity_vector);
+      if (
+        Array.isArray(tv) && tv.length === activeConfig.dimensions &&
+        Array.isArray(cv) && cv.length === activeConfig.dimensions &&
+        Array.isArray(ev) && ev.length === activeConfig.dimensions
+      ) {
         hasValidVector = true;
       }
     }
     const key = `${row.workspace_id}:${row.layer}:${row.team_slug || ''}:${row.path}`;
-    existingMap.set(key, { mtime: row.mtime, hasValidVector });
+    existingMap.set(key, { slug: row.slug, mtime: row.mtime, hasValidVector });
   }
 
   return { currentFiles, existingRows, existingMap };
@@ -258,6 +264,10 @@ function flushSyncToDatabase(db, currentFiles, existingRows, pendingUpdates, wri
         );
       }
 
+      if (u.prevSlug && u.prevSlug !== u.slug) {
+        deleteFts.run(u.item.wsId, u.item.layer, u.item.teamSlug, u.prevSlug);
+        deleteGraph.run(u.item.wsId, u.item.layer, u.item.teamSlug, u.prevSlug);
+      }
       deleteFts.run(u.item.wsId, u.item.layer, u.item.teamSlug, u.slug);
       insertFts.run(u.slug, u.domain, u.type, u.trigger, u.body, u.item.layer, u.item.wsId, u.item.teamSlug);
 
@@ -309,7 +319,9 @@ export function syncSqliteMetadataSync(workspaceRoot = process.cwd()) {
     const prev = existingMap.get(key);
     if (prev && prev.mtime === item.mtime) continue;
     try {
-      pendingUpdates.push(parseEntryForSync(item));
+      const entryData = parseEntryForSync(item);
+      entryData.prevSlug = prev ? prev.slug : null;
+      pendingUpdates.push(entryData);
     } catch {}
   }
   return flushSyncToDatabase(db, currentFiles, existingRows, pendingUpdates, false);
@@ -354,6 +366,7 @@ export async function syncSqliteCore(workspaceRoot = process.cwd(), { computeVec
     }
     try {
       const entryData = parseEntryForSync(item);
+      entryData.prevSlug = prev ? prev.slug : null;
       if (activeConfig.engine === 'onnx') {
         entryData.multiVec = await generateMultiVectorAsync({
           trigger: entryData.trigger,

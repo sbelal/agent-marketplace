@@ -1,7 +1,19 @@
 #!/usr/bin/env node
 
+import fs from 'node:fs';
+import path from 'node:path';
 import readline from 'node:readline';
 import { fileURLToPath } from 'node:url';
+
+function resolveKcPluginVersion() {
+  try {
+    const pluginJsonPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'plugin.json');
+    const data = JSON.parse(fs.readFileSync(pluginJsonPath, 'utf8'));
+    if (data && data.version) return data.version;
+  } catch {}
+  return '2.2.0';
+}
+const KC_PLUGIN_VERSION = resolveKcPluginVersion();
 import {
   getMemorySummary,
   getLayerStatistics,
@@ -834,7 +846,7 @@ async function handleRequest(message) {
           },
           serverInfo: {
             name: 'knowledge-capture',
-            version: '2.2.0'
+            version: KC_PLUGIN_VERSION
           }
         }
       });
