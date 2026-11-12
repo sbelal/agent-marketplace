@@ -181,7 +181,8 @@ export function evaluateProbability(hypotheses = [], prior = 0.5) {
     };
   }
 
-  const sanitizedPrior = Math.max(0.01, Math.min(0.99, Number(prior) || 0.5));
+  const numPrior = (typeof prior === 'number' && !isNaN(prior)) ? prior : (Number(prior) || 0.5);
+  const sanitizedPrior = Math.max(0.01, Math.min(0.99, numPrior));
   let totalLikelihood = 0;
 
   // Compute empirical likelihoods scaled by prior distribution

@@ -223,6 +223,9 @@ description: Lower tier private rule that should be shadowed
   const alphaHighProb = highPriorRes.evaluations.find(e => e.label === 'Course Alpha').probability;
   const alphaLowProb = lowPriorRes.evaluations.find(e => e.label === 'Course Alpha').probability;
   assert.notEqual(alphaHighProb, alphaLowProb, 'Alpha probability must change based on prior');
+
+  const zeroPriorRes = evaluateProbability(hypotheses, 0.0);
+  assert.equal(zeroPriorRes.prior_probability, 0.01, '0.0 prior should be safely clamped to 0.01');
   console.log('  ✔ Passed: Bayesian updating actively incorporates prior probability.\n');
 
   // ==========================================

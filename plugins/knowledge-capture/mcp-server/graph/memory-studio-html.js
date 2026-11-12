@@ -1045,7 +1045,23 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd(), option
     document.getElementById('modal-close').onclick = () => patchModal.classList.remove('open');
     document.getElementById('btn-copy-patch').onclick = () => {
       const text = document.getElementById('patch-code').textContent;
-      navigator.clipboard.writeText(text).then(() => alert('Patch JSON copied to clipboard!'));
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(() => alert('Patch JSON copied to clipboard!')).catch(() => {
+          fallbackCopy(text);
+        });
+      } else {
+        fallbackCopy(text);
+      }
+      function fallbackCopy(val) {
+        const ta = document.createElement('textarea');
+        ta.value = val;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        try { document.execCommand('copy'); alert('Patch JSON copied to clipboard!'); } catch {}
+        document.body.removeChild(ta);
+      }
     };
 
     document.getElementById('btn-download-patch').onclick = () => {
@@ -1054,7 +1070,7 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd(), option
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = \`memory-patch-\${new Date().toISOString().slice(0, 10)}.json\`;
+      a.download = "memory-patch-" + new Date().toISOString().slice(0, 10) + ".json";
       a.click();
       URL.revokeObjectURL(url);
     };
@@ -1065,7 +1081,8 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd(), option
       const activeChips = Array.from(document.querySelectorAll('.chip.active')).map(c => c.textContent);
 
       nodeElements.style("opacity", d => {
-        const matchesQuery = !q || d.slug.toLowerCase().includes(q) || (d.description && d.description.toLowerCase().includes(q));
+        const dSlug = d.slug || d.id || '';
+        const matchesQuery = !q || dSlug.toLowerCase().includes(q) || (d.description && d.description.toLowerCase().includes(q));
         const matchesDomain = activeChips.length === 0 || activeChips.includes(d.domain);
         return (matchesQuery && matchesDomain) ? 1.0 : 0.15;
       });
@@ -1073,8 +1090,12 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd(), option
       linkElements.style("opacity", d => {
         const s = d.source;
         const t = d.target;
-        const sMatch = (!q || s.slug.toLowerCase().includes(q)) && (activeChips.length === 0 || activeChips.includes(s.domain));
-        const tMatch = (!q || t.slug.toLowerCase().includes(q)) && (activeChips.length === 0 || activeChips.includes(t.domain));
+        const sSlug = typeof s === 'object' ? (s.slug || s.id || '') : String(s || '');
+        const sDomain = typeof s === 'object' ? (s.domain || '') : '';
+        const tSlug = typeof t === 'object' ? (t.slug || t.id || '') : String(t || '');
+        const tDomain = typeof t === 'object' ? (t.domain || '') : '';
+        const sMatch = (!q || sSlug.toLowerCase().includes(q)) && (activeChips.length === 0 || activeChips.includes(sDomain));
+        const tMatch = (!q || tSlug.toLowerCase().includes(q)) && (activeChips.length === 0 || activeChips.includes(tDomain));
         return (sMatch && tMatch) ? 0.8 : 0.05;
       });
     }
