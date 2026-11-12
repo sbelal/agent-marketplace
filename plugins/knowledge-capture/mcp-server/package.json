@@ -1,10 +1,13 @@
 {
   "name": "knowledge-capture-mcp",
-  "version": "2.1.0",
-  "description": "Zero-dependency Stdio MCP Server for Knowledge Capture multi-layered memory (Full CQS)",
+  "version": "2.2.0",
+  "description": "Stdio MCP Server for Knowledge Capture multi-layered memory with Local ONNX and Heuristic fallback (Full CQS)",
   "type": "module",
   "main": "index.js",
   "engines": {
-    "node": ">=26.0.0"
+    "node": ">=20.0.0"
+  },
+  "optionalDependencies": {
+    "@xenova/transformers": "^2.17.2"
   }
 }

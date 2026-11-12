@@ -10,7 +10,7 @@
 const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
-const { execSync } = require('child_process');
+const { execSync, execFileSync } = require('child_process');
 
 const {
   normalizePath,
@@ -87,7 +87,7 @@ function ensurePermanentSourceClone(targetPluginsPath) {
   if (fs.existsSync(cloneDir)) {
     try {
       console.log(`\x1b[36mSynchronizing permanent source repository in ${cloneDir}...\x1b[0m`);
-      execSync('git pull --ff-only', { cwd: cloneDir, stdio: 'inherit' });
+      execFileSync('git', ['pull', '--ff-only'], { cwd: cloneDir, stdio: 'inherit' });
       return true;
     } catch (err) {
       console.warn(`\x1b[33mWarning: git pull failed in ${cloneDir}: ${err.message}\x1b[0m`);
@@ -98,7 +98,7 @@ function ensurePermanentSourceClone(targetPluginsPath) {
   console.log(`\x1b[36mCloning permanent source repository to ${cloneDir}...\x1b[0m`);
   try {
     fs.mkdirSync(path.dirname(cloneDir), { recursive: true });
-    execSync(`git clone --depth 1 ${REMOTE_REPO_URL} "${cloneDir}"`, { stdio: 'inherit' });
+    execFileSync('git', ['clone', '--depth', '1', REMOTE_REPO_URL, cloneDir], { stdio: 'inherit' });
     return true;
   } catch (err) {
     console.error(`\x1b[31mError cloning repository: ${err.message}\x1b[0m`);

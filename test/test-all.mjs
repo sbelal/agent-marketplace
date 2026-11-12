@@ -10,6 +10,8 @@ fs.mkdirSync(tempRoot, { recursive: true });
 process.env.KC_STORAGE_DIR = path.join(tempRoot, 'kc-storage');
 fs.mkdirSync(process.env.KC_STORAGE_DIR, { recursive: true });
 
+import { execFileSync } from 'node:child_process';
+
 import {
   parseYamlFrontmatter,
   serializeYamlFrontmatter,
@@ -19,7 +21,10 @@ import {
   cleanDanglingReferences,
   bootstrapRepoMemories,
   mineGitHistoryMemories,
-  autoElicitSessionKnowledge
+  autoElicitSessionKnowledge,
+  atomicWriteFileSync,
+  getMemoryContent,
+  prepareTeamPromotion
 } from '../plugins/knowledge-capture/mcp-server/memory-service.js';
 
 import {
@@ -35,7 +40,11 @@ import {
   computeMultiVectorSimilarity,
   detectContradictionsAndDrift,
   proactiveMemoryProbe,
-  recordMemoryEfficacy
+  recordMemoryEfficacy,
+  getMemoryGraphNeighbors,
+  generateEmbedding,
+  getActiveEmbeddingConfig,
+  resetOnnxState
 } from '../plugins/knowledge-capture/mcp-server/sqlite-index.js';
 
 import {
@@ -81,9 +90,9 @@ Never delete namespaces directly in production without cluster-admin verificatio
   fs.mkdirSync(wsDir, { recursive: true });
   fs.writeFileSync(path.join(wsDir, 'k8s-delete-guard.md'), testYaml, 'utf8');
 
-  syncSqliteIndex(path.join(tempRoot, 'ws1'));
+  await syncSqliteIndex(path.join(tempRoot, 'ws1'));
 
-  const probeResult = proactiveMemoryProbe(
+  const probeResult = await proactiveMemoryProbe(
     path.join(tempRoot, 'ws1'),
     'I want to delete production namespace',
     { threshold: 0.20 }
@@ -113,20 +122,20 @@ description: Lock timeout governance
   fs.writeFileSync(path.join(ws2Dir, 'ws2-unique-rule.md'), testYaml2, 'utf8');
 
   // Sync WS1
-  syncSqliteIndex(ws1Root);
+  await syncSqliteIndex(ws1Root);
   // Sync WS2
-  syncSqliteIndex(ws2Root);
+  await syncSqliteIndex(ws2Root);
 
   // Search WS1: should find k8s-delete-guard, NOT ws2-unique-rule
-  const ws1Results = searchMemoriesHybrid(ws1Root, 'delete namespace');
+  const ws1Results = await searchMemoriesHybrid(ws1Root, 'delete namespace');
   assert.ok(ws1Results.some(r => r.slug === 'k8s-delete-guard'), 'WS1 should find its own workspace memory');
 
   // Verify WS2 search finds its own memory and does not delete WS1
-  const ws2Results = searchMemoriesHybrid(ws2Root, 'lock timeout');
+  const ws2Results = await searchMemoriesHybrid(ws2Root, 'lock timeout');
   assert.ok(ws2Results.some(r => r.slug === 'ws2-unique-rule'), 'WS2 should find its own unique rule');
 
   // Re-verify WS1 still has its memory (not purged by WS2 sync)
-  const ws1ResultsAgain = searchMemoriesHybrid(ws1Root, 'delete namespace');
+  const ws1ResultsAgain = await searchMemoriesHybrid(ws1Root, 'delete namespace');
   assert.ok(ws1ResultsAgain.some(r => r.slug === 'k8s-delete-guard'), 'WS1 records must NOT be deleted by WS2 sync!');
   console.log('  ✔ Passed: Workspace partitioning isolates caches across independent repositories.\n');
 
@@ -149,7 +158,7 @@ description: Lower tier private rule that should be shadowed
   fs.writeFileSync(privShadowFile, privYaml, 'utf8');
 
   try {
-    const searchRes = searchMemoriesHybrid(ws1Root, 'k8s-delete-guard');
+    const searchRes = await searchMemoriesHybrid(ws1Root, 'k8s-delete-guard');
     assert.ok(searchRes.length > 0, 'Should return matching rule');
     assert.equal(searchRes[0].layer, 'workspace', 'Workspace tier must win over Private tier');
   } finally {
@@ -267,7 +276,7 @@ description: Lower tier private rule that should be shadowed
   assert.ok(facetScore > 0.25, 'Composite multi-vector score should capture intent and content facets');
 
   // Hybrid search execution with RRF
-  const hybridMatches = searchMemoriesHybrid(ws1Root, 'docker', { mode: 'hybrid' });
+  const hybridMatches = await searchMemoriesHybrid(ws1Root, 'docker', { mode: 'hybrid' });
   assert.ok(Array.isArray(hybridMatches), 'Hybrid search must return array');
   assert.ok(hybridMatches.length > 0, 'Should find matching memories in test workspace');
   assert.ok(hybridMatches[0].confidence > 0, 'Match confidence must be positive');
@@ -377,6 +386,139 @@ Never use pnpm, always enforce npm install with package-lock.json.
   const graphDataAfter = getKnowledgeGraphData(ws1Root);
   assert.ok(typeof graphDataAfter.summary.avgEfficacyScore === 'number', 'Summary must include avgEfficacyScore');
   console.log('  ✔ Passed: Memory efficacy telemetry accurately tracks verification feedback.\n');
+
+  // ==========================================
+  // TEST 13: Atomic File Persistence Pattern
+  // ==========================================
+  console.log('Test 13: Atomic File Persistence Pattern (Write-Temp-and-Rename)...');
+  const atomicTarget = path.join(tempRoot, 'atomic-test.md');
+  atomicWriteFileSync(atomicTarget, '# Atomic Content\nWritten safely.\n');
+  assert.ok(fs.existsSync(atomicTarget), 'Target file must exist after atomic write');
+  assert.equal(fs.readFileSync(atomicTarget, 'utf8'), '# Atomic Content\nWritten safely.\n');
+  const tempFiles = fs.readdirSync(tempRoot).filter(f => f.includes('.tmp.'));
+  assert.equal(tempFiles.length, 0, 'No temporary staging files should linger after write');
+  console.log('  ✔ Passed: atomicWriteFileSync guarantees POSIX atomic persistence without lingering temp files.\n');
+
+  // ==========================================
+  // TEST 14: Bi-Directional Knowledge Graph with Backlink Traversal
+  // ==========================================
+  console.log('Test 14: Bi-Directional Knowledge Graph with Backlink Traversal...');
+  const podGovYaml = `---
+name: k8s-pod-governance
+domain: kubernetes
+type: convention
+description: Pod scheduling and governance
+---
+# Pod Governance
+`;
+  fs.writeFileSync(path.join(wsDir, 'k8s-pod-governance.md'), podGovYaml, 'utf8');
+  await syncSqliteIndex(ws1Root);
+
+  const neighbors = getMemoryGraphNeighbors(ws1Root, 'k8s-pod-governance');
+  assert.equal(neighbors.slug, 'k8s-pod-governance');
+  assert.ok(neighbors.incoming.some(l => l.source_slug === 'k8s-delete-guard'), 'k8s-pod-governance must have k8s-delete-guard as incoming backlink');
+
+  const contentWithBacklinks = getMemoryContent(ws1Root, 'workspace', 'k8s-pod-governance');
+  assert.ok(contentWithBacklinks.backlinks.some(b => b.slug === 'k8s-delete-guard'), 'getMemoryContent must return backlinks array');
+  assert.ok(contentWithBacklinks.content.includes('Incoming Backlinks (Referenced By)'), 'Enriched content must render Incoming Backlinks footer');
+  console.log('  ✔ Passed: Bi-directional knowledge graph resolves both forward references and incoming backlinks.\n');
+
+  // ==========================================
+  // TEST 15: LLM-Driven Team Promotion Architecture
+  // ==========================================
+  console.log('Test 15: LLM-Driven Team Promotion Architecture...');
+  const teamRepoDir = path.join(process.env.KC_STORAGE_DIR, 'team');
+  fs.mkdirSync(teamRepoDir, { recursive: true });
+  execFileSync('git', ['init', '-b', 'main'], { cwd: teamRepoDir, stdio: 'ignore' });
+  execFileSync('git', ['config', 'user.name', 'Test Agent'], { cwd: teamRepoDir, stdio: 'ignore' });
+  execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: teamRepoDir, stdio: 'ignore' });
+  fs.writeFileSync(path.join(teamRepoDir, 'README.md'), '# Team Memory\n', 'utf8');
+  execFileSync('git', ['add', '.'], { cwd: teamRepoDir, stdio: 'ignore' });
+  execFileSync('git', ['commit', '-m', 'Initial commit'], { cwd: teamRepoDir, stdio: 'ignore' });
+
+  const llmSanitizedBody = `## Why\nIn containerized environments, pod memory limits must align with cgroup thresholds.\n\n## How to apply\nConfigure resources.limits.memory equal to or greater than requests.memory.\n`;
+  const promotionRes = prepareTeamPromotion(ws1Root, {
+    slug: 'k8s-pod-governance',
+    content: llmSanitizedBody,
+    frontmatter: {
+      domain: 'kubernetes',
+      type: 'convention',
+      description: 'When defining pod container memory limits and cgroup allocations'
+    }
+  });
+
+  assert.equal(promotionRes.success, true);
+  assert.ok(promotionRes.branch.startsWith('promote/'));
+  assert.ok(fs.existsSync(promotionRes.stagedFile));
+  const promotedContent = fs.readFileSync(promotionRes.stagedFile, 'utf8');
+  assert.ok(promotedContent.includes('When defining pod container memory limits'), 'Must use LLM-refined trigger');
+  assert.ok(promotedContent.includes('cgroup thresholds'), 'Must persist LLM-sanitized content');
+  console.log('  ✔ Passed: prepareTeamPromotion successfully stages LLM-sanitized memory content.\n');
+
+  // ==========================================
+  // TEST 16: Single-Source Manifest Build & Sync
+  // ==========================================
+  console.log('Test 16: Single-Source Manifest Build & Sync Validation...');
+  const syncScript = path.resolve('bin/sync-manifests.js');
+  assert.ok(fs.existsSync(syncScript), 'bin/sync-manifests.js must exist');
+  const checkOut = execFileSync(process.execPath, [syncScript, '--check'], { encoding: 'utf8' });
+  assert.ok(checkOut.includes('in sync'), 'All derived plugin configuration files must be synchronized');
+  console.log('  ✔ Passed: Single-source manifest generator validates zero configuration drift.\n');
+
+  // ==========================================
+  // TEST 17: Local ONNX Semantic Embeddings & Heuristic Fallback
+  // ==========================================
+  console.log('Test 17: Local ONNX Transformer, Adaptive Dimension Storage & Graceful Fallback...');
+  
+  // 17.1 Verify ONNX primary engine generates 384-dimensional dense semantic vectors
+  process.env.KC_EMBEDDING_ENGINE = 'onnx';
+  resetOnnxState();
+  const onnxConfig = getActiveEmbeddingConfig();
+  assert.equal(onnxConfig.engine, 'onnx');
+  assert.equal(onnxConfig.dimensions, 384);
+
+  const onnxVec1 = await generateEmbedding('docker container orchestrator');
+  assert.equal(onnxVec1.length, 384, 'Local ONNX embedding must produce 384-dimensional dense vector');
+
+  // Verify semantic synonym similarity: 'docker container orchestrator' vs 'kubernetes cluster management'
+  const onnxVecSynonym = await generateEmbedding('kubernetes cluster management');
+  const onnxVecUnrelated = await generateEmbedding('chocolate cake baking recipe');
+  const simOnnxSynonym = computeDenseCosineSimilarity(onnxVec1, onnxVecSynonym);
+  const simOnnxUnrelated = computeDenseCosineSimilarity(onnxVec1, onnxVecUnrelated);
+  assert.ok(simOnnxSynonym > simOnnxUnrelated, 'Semantic synonym similarity must exceed unrelated text similarity');
+
+  // 17.2 Verify Adaptive Dimension Storage in SQLite:
+  // Syncing with ONNX should record 384 dimensions in SQLite meta table
+  await syncSqliteIndex(ws1Root);
+  const { getDatabase } = await import('../plugins/knowledge-capture/mcp-server/sqlite-index.js');
+  const db = getDatabase();
+  const metaOnnx = db.prepare('SELECT val FROM meta WHERE key = ?').get('embedding_dim');
+  assert.equal(metaOnnx?.val, '384', 'SQLite meta table must record 384-d when ONNX engine is active');
+
+  // 17.3 Switch to Heuristic Vector Engine:
+  // Must adaptively transition to 128 dimensions without error
+  process.env.KC_EMBEDDING_ENGINE = 'heuristic';
+  const heuristicConfig = getActiveEmbeddingConfig();
+  assert.equal(heuristicConfig.engine, 'heuristic');
+  assert.equal(heuristicConfig.dimensions, 128);
+
+  const heuristicVec = await generateEmbedding('docker container orchestrator');
+  assert.equal(heuristicVec.length, 128, 'Heuristic embedding must produce 128-dimensional dense vector');
+
+  await syncSqliteIndex(ws1Root);
+  const metaHeuristic = db.prepare('SELECT val FROM meta WHERE key = ?').get('embedding_dim');
+  assert.equal(metaHeuristic?.val, '128', 'Adaptive Dimension Storage must update SQLite meta table to 128-d');
+
+  // 17.4 Graceful Fallback:
+  // If an unsupported or invalid engine is set, must default to 128-d heuristic without crashing
+  process.env.KC_EMBEDDING_ENGINE = 'unsupported_test_provider';
+  const fallbackVec = await generateEmbedding('testing resilient fallback');
+  assert.ok(Array.isArray(fallbackVec), 'Fallback must return a valid array');
+  assert.equal(fallbackVec.length, 128, 'Unsupported engine must safely fall back to 128-d heuristic');
+
+  // Reset environment
+  delete process.env.KC_EMBEDDING_ENGINE;
+  console.log('  ✔ Passed: Local ONNX transformer, adaptive dimensions (384/128-d), and heuristic fallback verified.\n');
 
   console.log('============================================================');
   console.log('🎉 ALL TESTS PASSED SUCCESSFULLY!');

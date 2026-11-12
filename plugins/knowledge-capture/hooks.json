@@ -3,21 +3,25 @@
     "SessionStart": [
       {
         "type": "command",
-        "command": "node ./bin/session-start.js",
+        "command": "node \"${CLAUDE_PLUGIN_ROOT}/bin/session-start.js\"",
         "timeout": 15
+      },
+      {
+        "type": "command",
+        "command": "node \"${CLAUDE_PLUGIN_ROOT}/bin/claude-rules.js\""
       }
     ],
     "Stop": [
       {
         "type": "command",
-        "command": "node ./bin/session-end.js",
+        "command": "node \"${CLAUDE_PLUGIN_ROOT}/bin/session-end.js\"",
         "timeout": 10
       }
     ],
     "SessionEnd": [
       {
         "type": "command",
-        "command": "node ./bin/session-end.js",
+        "command": "node \"${CLAUDE_PLUGIN_ROOT}/bin/session-end.js\"",
         "timeout": 10
       }
     ]

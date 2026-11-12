@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import readline from 'node:readline';
-import { execSync } from 'node:child_process';
+import { execSync, execFileSync } from 'node:child_process';
 
 const GIT_EXEC_ENV = {
   ...process.env,
@@ -41,7 +41,8 @@ export function setupEnvironment(options = {}) {
   // Load or create settings.json
   let settings = {
     privateRepoUrl: '',
-    teamRepoUrl: ''
+    teamRepoUrl: '',
+    embeddingEngine: 'onnx'
   };
 
   if (fs.existsSync(settingsPath)) {
@@ -59,8 +60,34 @@ export function setupEnvironment(options = {}) {
   if (options.teamRepoUrl !== undefined) {
     settings.teamRepoUrl = options.teamRepoUrl.trim();
   }
+  if (options.embeddingEngine !== undefined) {
+    settings.embeddingEngine = options.embeddingEngine.toLowerCase().trim() === 'heuristic' ? 'heuristic' : 'onnx';
+  }
 
   fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf8');
+
+  // If ONNX engine chosen and installation requested, ensure @xenova/transformers is ready
+  if (settings.embeddingEngine === 'onnx' && options.installDependencies !== false) {
+    try {
+      const currentDir = path.dirname(new URL(import.meta.url).pathname);
+      const mcpServerDir = path.resolve(currentDir, '..', 'mcp-server');
+      const nodeModulesDir = path.join(mcpServerDir, 'node_modules', '@xenova', 'transformers');
+      if (!fs.existsSync(nodeModulesDir)) {
+        if (!options.silent) {
+          console.log('\n\x1b[36mInstalling @xenova/transformers in MCP server for Local ONNX...\x1b[0m');
+        }
+        execFileSync('npm', ['install', '--no-audit', '--no-fund', '@xenova/transformers'], {
+          cwd: mcpServerDir,
+          stdio: options.silent ? 'ignore' : 'inherit'
+        });
+      }
+    } catch (err) {
+      if (!options.silent) {
+        console.warn(`\x1b[33mNotice: Could not automatically install @xenova/transformers: ${err.message}\x1b[0m`);
+        console.warn('\x1b[33mKnowledge Capture will use the fast Heuristic Vector Engine fallback.\x1b[0m');
+      }
+    }
+  }
 
   // Helper to initialize or clone git repository cleanly
   function ensureRepoInitialized(targetDir, remoteUrl) {
@@ -68,10 +95,10 @@ export function setupEnvironment(options = {}) {
     const gitDir = path.join(targetDir, '.git');
     if (fs.existsSync(gitDir)) {
       try {
-        execSync(`git remote set-url origin "${remoteUrl}"`, { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
+        execFileSync('git', ['remote', 'set-url', 'origin', remoteUrl], { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
       } catch {
         try {
-          execSync(`git remote add origin "${remoteUrl}"`, { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
+          execFileSync('git', ['remote', 'add', 'origin', remoteUrl], { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
         } catch {}
       }
       return;
@@ -79,7 +106,7 @@ export function setupEnvironment(options = {}) {
 
     let hasRemoteBranches = false;
     try {
-      const lsOut = execSync(`git ls-remote --heads "${remoteUrl}"`, {
+      const lsOut = execFileSync('git', ['ls-remote', '--heads', remoteUrl], {
         encoding: 'utf8',
         timeout: 5000,
         env: GIT_EXEC_ENV,
@@ -92,15 +119,15 @@ export function setupEnvironment(options = {}) {
       try {
         const hasExistingFiles = fs.existsSync(targetDir) && fs.readdirSync(targetDir).length > 0;
         if (hasExistingFiles) {
-          execSync('git init -b main', { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
-          execSync(`git remote add origin "${remoteUrl}"`, { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
-          execSync('git fetch origin', { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
+          execFileSync('git', ['init', '-b', 'main'], { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
+          execFileSync('git', ['remote', 'add', 'origin', remoteUrl], { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
+          execFileSync('git', ['fetch', 'origin'], { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
           try {
-            execSync('git branch --set-upstream-to=origin/main main', { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
+            execFileSync('git', ['branch', '--set-upstream-to=origin/main', 'main'], { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
           } catch {}
         } else {
           fs.rmSync(targetDir, { recursive: true, force: true });
-          execSync(`git clone "${remoteUrl}" "${targetDir}"`, { env: GIT_EXEC_ENV, stdio: 'ignore' });
+          execFileSync('git', ['clone', remoteUrl, targetDir], { env: GIT_EXEC_ENV, stdio: 'ignore' });
         }
         return;
       } catch {}
@@ -110,8 +137,8 @@ export function setupEnvironment(options = {}) {
       if (!fs.existsSync(targetDir)) {
         fs.mkdirSync(targetDir, { recursive: true });
       }
-      execSync('git init -b main', { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
-      execSync(`git remote add origin "${remoteUrl}"`, { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
+      execFileSync('git', ['init', '-b', 'main'], { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
+      execFileSync('git', ['remote', 'add', 'origin', remoteUrl], { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
     } catch {}
   }
 
@@ -139,7 +166,7 @@ export function testRemoteConnectivity(url) {
     return { ok: false, error: 'Empty URL' };
   }
   try {
-    execSync(`git ls-remote "${url.trim()}" HEAD`, {
+    execFileSync('git', ['ls-remote', url.trim(), 'HEAD'], {
       encoding: 'utf8',
       timeout: 5000,
       env: GIT_EXEC_ENV,
@@ -216,7 +243,7 @@ async function runInteractiveWizard() {
   }
 
   // Step 2: Team Memory
-  console.log('\n\x1b[1m\x1b[34m[Step 2/2] Team Memory Layer (Shared Standards & Conventions)\x1b[0m');
+  console.log('\n\x1b[1m\x1b[34m[Step 2/3] Team Memory Layer (Shared Standards & Conventions)\x1b[0m');
   console.log('Do you have a shared repository for organization-wide engineering rules?');
   console.log('  \x1b[32m[1] Team Shared Git Repository\x1b[0m');
   console.log('      Pulls shared team standards and enables /kc-promote Pull Requests.');
@@ -255,6 +282,22 @@ async function runInteractiveWizard() {
     console.log('\x1b[90mTeam memory skipped / unconfigured.\x1b[0m');
   }
 
+  // Step 3: Semantic Embedding Engine
+  console.log('\n\x1b[1m\x1b[34m[Step 3/3] Semantic Embedding Engine\x1b[0m');
+  console.log('Choose how Knowledge Capture indexes and searches memories:');
+  console.log('  \x1b[32m[1] Local ONNX Transformer (all-MiniLM-L6-v2) (Recommended)\x1b[0m');
+  console.log('      True semantic search & synonym matching (100% local CPU inference, 384-d).');
+  console.log('  \x1b[90m[2] Heuristic Vector Engine (Built-in)\x1b[0m');
+  console.log('      Subword n-gram & bigram hash. Zero downloads, zero dependencies (128-d).');
+
+  const engineChoice = (await promptQuestion(rl, '\nSelect option [1-2] (default: 1): ')).trim() || '1';
+  options.embeddingEngine = (engineChoice === '2') ? 'heuristic' : 'onnx';
+  if (options.embeddingEngine === 'onnx') {
+    console.log('\x1b[32mSelected Local ONNX Transformer (all-MiniLM-L6-v2).\x1b[0m');
+  } else {
+    console.log('\x1b[90mSelected Heuristic Vector Engine.\x1b[0m');
+  }
+
   rl.close();
 
   // Execute persistence
@@ -265,11 +308,12 @@ async function runInteractiveWizard() {
   console.log(`    Private: ${res.privateDir}`);
   console.log(`    Team:    ${res.teamDir}`);
   console.log(`\x1b[32m✔ Settings written to:\x1b[0m ${res.settingsPath}`);
+  console.log(`\x1b[32m✔ Embedding Engine:\x1b[0m ${res.settings.embeddingEngine}`);
 
   if (options.teamRepoUrl) {
     console.log('\n\x1b[36mPerforming initial Team memory clone/pull...\x1b[0m');
     try {
-      execSync(`git clone "${options.teamRepoUrl}" "${res.teamDir}"`, {
+      execFileSync('git', ['clone', options.teamRepoUrl, res.teamDir], {
         env: GIT_EXEC_ENV,
         stdio: 'inherit'
       });
@@ -298,6 +342,15 @@ for (let i = 0; i < args.length; i++) {
     hasFlags = true;
   } else if (args[i] === '--team-url' && args[i + 1]) {
     options.teamRepoUrl = args[++i];
+    hasFlags = true;
+  } else if (args[i] === '--embedding-engine' && args[i + 1]) {
+    options.embeddingEngine = args[++i];
+    hasFlags = true;
+  } else if (args[i].startsWith('--embedding-engine=')) {
+    options.embeddingEngine = args[i].split('=')[1];
+    hasFlags = true;
+  } else if (args[i] === '--no-install') {
+    options.installDependencies = false;
     hasFlags = true;
   }
 }

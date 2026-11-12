@@ -1,0 +1,43 @@
+{
+  "name": "knowledge-capture",
+  "displayName": "Knowledge Capture",
+  "version": "2.1.0",
+  "description": "Multi-layered persistent memory system with full CQS stdio MCP server, local SQLite FTS5 hybrid search, Memory Studio, proactive recall, and Git synchronization.",
+  "author": "Sal Belal",
+  "repository": "https://github.com/sbelal/agent-marketplace",
+  "mcpServers": {
+    "knowledge-capture": {
+      "command": "node",
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/mcp-server/index.js"
+      ]
+    }
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "node \"${CLAUDE_PLUGIN_ROOT}/bin/session-start.js\"",
+        "timeout": 15
+      },
+      {
+        "type": "command",
+        "command": "node \"${CLAUDE_PLUGIN_ROOT}/bin/claude-rules.js\""
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "node \"${CLAUDE_PLUGIN_ROOT}/bin/session-end.js\"",
+        "timeout": 10
+      }
+    ],
+    "SessionEnd": [
+      {
+        "type": "command",
+        "command": "node \"${CLAUDE_PLUGIN_ROOT}/bin/session-end.js\"",
+        "timeout": 10
+      }
+    ]
+  }
+}
