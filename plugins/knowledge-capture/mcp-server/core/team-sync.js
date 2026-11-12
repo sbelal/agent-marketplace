@@ -439,7 +439,49 @@ export function resolveTeamConflict(workspaceRoot = process.cwd(), options = {})
 
   const paths = resolveStoragePaths(workspaceRoot);
   const cleanSlug = path.basename(slug.trim()).replace(/\.md$/i, '');
-  const privateFile = path.join(paths.privateDir, `${cleanSlug}.md`);
+  let resolvedPrivateSlug = cleanSlug;
+  let privateFile = path.join(paths.privateDir, `${cleanSlug}.md`);
+
+  if (!fs.existsSync(privateFile) && options.privateSlug) {
+    const cleanPriv = path.basename(options.privateSlug.trim()).replace(/\.md$/i, '');
+    const altFile = path.join(paths.privateDir, `${cleanPriv}.md`);
+    if (fs.existsSync(altFile)) {
+      privateFile = altFile;
+      resolvedPrivateSlug = cleanPriv;
+    }
+  }
+
+  if (!fs.existsSync(privateFile) && options.privatePath && fs.existsSync(options.privatePath)) {
+    privateFile = options.privatePath;
+    resolvedPrivateSlug = path.basename(privateFile, '.md');
+  }
+
+  if (!fs.existsSync(privateFile)) {
+    // Scan private directory for any entry overriding or matching cleanSlug
+    const pFiles = findMarkdownFiles(paths.privateDir);
+    for (const pf of pFiles) {
+      try {
+        const raw = fs.readFileSync(pf, 'utf8');
+        const parsed = parseYamlFrontmatter(raw);
+        const pSlug = parsed.frontmatter.name || path.basename(pf, '.md');
+        if (pSlug.toLowerCase() === cleanSlug.toLowerCase()) {
+          privateFile = pf;
+          resolvedPrivateSlug = pSlug;
+          break;
+        }
+        if (parsed.frontmatter.overrides) {
+          const ovs = Array.isArray(parsed.frontmatter.overrides)
+            ? parsed.frontmatter.overrides
+            : String(parsed.frontmatter.overrides).split(',').map(s => s.trim());
+          if (ovs.map(s => s.toLowerCase()).includes(cleanSlug.toLowerCase())) {
+            privateFile = pf;
+            resolvedPrivateSlug = pSlug;
+            break;
+          }
+        }
+      } catch {}
+    }
+  }
 
   if (!fs.existsSync(privateFile)) {
     throw new Error(`Private memory file not found: ${privateFile}`);
@@ -451,10 +493,12 @@ export function resolveTeamConflict(workspaceRoot = process.cwd(), options = {})
       ok: true,
       success: true,
       slug: cleanSlug,
+      resolvedPrivateSlug,
       action: 'adopted_team_standard',
       removedPrivateFile: privateFile
     };
   }
+
 
   if (resolution === 'keep_private') {
     const raw = fs.readFileSync(privateFile, 'utf8');

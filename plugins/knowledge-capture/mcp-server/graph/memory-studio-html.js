@@ -4,9 +4,11 @@ import { getKnowledgeGraphData } from './graph-service.js';
  * Generates a self-contained, interactive HTML canvas artifact
  * featuring D3 force simulation, domain clusters, staleness alerts, and bidirectional inspector drawer.
  */
-export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd()) {
+export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd(), options = {}) {
   const graphData = getKnowledgeGraphData(workspaceRoot);
   const dataJson = JSON.stringify(graphData);
+  const isCompact = Boolean(options.compact);
+  const serverUrl = options.serverUrl || '';
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -14,19 +16,21 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd()) {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Knowledge Capture Graph Visualizer & Memory Studio</title>
+  <script src="https://www.gstatic.com/antigravity/web/dev/tailwindcss.min.js"></script>
   <script src="https://d3js.org/d3.v7.min.js"></script>
   <style>
     :root {
-      --bg: #0f172a;
-      --card-bg: #1e293b;
-      --border: #334155;
-      --text: #f8fafc;
-      --text-muted: #94a3b8;
+      --bg: var(--background, #0f172a);
+      --card-bg: var(--card, #1e293b);
+      --border: var(--border, #334155);
+      --card-border: var(--card-border, #334155);
+      --text: var(--foreground, #f8fafc);
+      --text-muted: var(--muted-foreground, #94a3b8);
       --workspace-color: #a855f7;
       --private-color: #3b82f6;
       --team-color: #10b981;
       --stale-color: #ef4444;
-      --accent: #38bdf8;
+      --accent: var(--primary, #38bdf8);
     }
 
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -35,7 +39,8 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd()) {
       background: var(--bg);
       color: var(--text);
       overflow: hidden;
-      height: 100vh;
+      height: ${isCompact ? '420px' : '100vh'};
+      max-height: ${isCompact ? '420px' : '100vh'};
       width: 100vw;
       display: flex;
     }
@@ -51,6 +56,8 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd()) {
       border-radius: 12px;
       padding: 16px;
       width: 340px;
+      max-height: ${isCompact ? '388px' : 'calc(100vh - 32px)'};
+      overflow-y: auto;
       display: flex;
       flex-direction: column;
       gap: 12px;
@@ -161,7 +168,7 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd()) {
       border-radius: 12px;
       padding: 20px;
       width: 360px;
-      max-height: calc(100vh - 32px);
+      max-height: ${isCompact ? '388px' : 'calc(100vh - 32px)'};
       overflow-y: auto;
       box-shadow: -10px 0 25px -5px rgba(0, 0, 0, 0.5);
       transition: right 0.3s ease;
@@ -376,6 +383,337 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd()) {
   </div>
 
   <script>
+    // MiniD3: Resilient Fallback Engine for CSP-restricted or offline environments (Antigravity Generative UI)
+    if (typeof d3 === 'undefined') {
+      window.__MINI_D3__ = true;
+      window.d3 = (function() {
+        class MiniSelection {
+          constructor(elements) {
+            this._elements = Array.isArray(elements) ? elements : (elements ? [elements] : []);
+          }
+          select(sel) {
+            const el = this._elements[0]?.querySelector(sel);
+            return new MiniSelection(el ? [el] : []);
+          }
+          selectAll(sel) {
+            const list = [];
+            this._elements.forEach(el => list.push(...Array.from(el.querySelectorAll(sel))));
+            return new MiniDataSelection(list, this);
+          }
+          append(tag) {
+            const created = [];
+            this._elements.forEach(parent => {
+              const el = document.createElementNS("http://www.w3.org/2000/svg", tag);
+              parent.appendChild(el);
+              created.push(el);
+            });
+            return new MiniSelection(created);
+          }
+          attr(name, val) {
+            this._elements.forEach(el => {
+              const v = typeof val === 'function' ? val(el.__data__) : val;
+              if (v !== undefined) el.setAttribute(name, v);
+            });
+            return this;
+          }
+          style(prop, val) {
+            this._elements.forEach(el => {
+              const v = typeof val === 'function' ? val(el.__data__) : val;
+              if (v !== undefined) el.style[prop] = v;
+            });
+            return this;
+          }
+          classed(cls, val) {
+            this._elements.forEach(el => {
+              const isAdd = typeof val === 'function' ? val(el.__data__) : Boolean(val);
+              if (isAdd) el.classList.add(cls);
+              else el.classList.remove(cls);
+            });
+            return this;
+          }
+          text(val) {
+            this._elements.forEach(el => {
+              const v = typeof val === 'function' ? val(el.__data__) : val;
+              el.textContent = v;
+            });
+            return this;
+          }
+          on(event, fn) {
+            this._elements.forEach(el => {
+              el.addEventListener(event, (e) => fn(e, el.__data__));
+            });
+            return this;
+          }
+          call(fn) {
+            if (typeof fn === 'function') fn(this);
+            return this;
+          }
+        }
+
+        class MiniDataSelection extends MiniSelection {
+          constructor(elements, parent) {
+            super(elements);
+            this._parent = parent;
+            this._enterItems = [];
+            this._exitEls = [];
+          }
+          data(dataset, keyFn) {
+            const key = keyFn || ((d, i) => i);
+            const existingMap = new Map();
+            this._elements.forEach(el => {
+              if (el.__data__) existingMap.set(key(el.__data__), el);
+            });
+            const matched = [];
+            const enterItems = [];
+            const usedKeys = new Set();
+            dataset.forEach(d => {
+              const k = key(d);
+              usedKeys.add(k);
+              const existing = existingMap.get(k);
+              if (existing) {
+                existing.__data__ = d;
+                matched.push(existing);
+              } else {
+                enterItems.push(d);
+              }
+            });
+            const exitEls = [];
+            this._elements.forEach(el => {
+              if (el.__data__ && !usedKeys.has(key(el.__data__))) {
+                exitEls.push(el);
+              }
+            });
+            this._elements = matched;
+            this._enterItems = enterItems;
+            this._exitEls = exitEls;
+            return this;
+          }
+          enter() {
+            const parentEl = this._parent?._elements[0] || document.querySelector("#canvas g");
+            const self = this;
+            return {
+              append: (tag) => {
+                const created = [];
+                self._enterItems.forEach(d => {
+                  const el = document.createElementNS("http://www.w3.org/2000/svg", tag);
+                  el.__data__ = d;
+                  if (parentEl) parentEl.appendChild(el);
+                  created.push(el);
+                });
+                return new MiniSelection(created);
+              }
+            };
+          }
+          exit() {
+            const els = this._exitEls || [];
+            return {
+              remove: () => {
+                els.forEach(el => el.parentNode?.removeChild(el));
+              }
+            };
+          }
+          merge(other) {
+            return new MiniSelection([...this._elements, ...(other._elements || [])]);
+          }
+        }
+
+        class MiniForceSimulation {
+          constructor(nodes) {
+            this._nodes = nodes;
+            this._forces = new Map();
+            this._alpha = 1.0;
+            this._alphaTarget = 0;
+            this._listeners = {};
+            this._initPositions();
+            this._startLoop();
+          }
+          _initPositions() {
+            const cx = (window.innerWidth || 800) / 2;
+            const cy = (window.innerHeight || 600) / 2;
+            this._nodes.forEach((n, idx) => {
+              if (n.x === undefined) n.x = cx + Math.sin(idx * 1.5) * 140 + (Math.random() - 0.5) * 50;
+              if (n.y === undefined) n.y = cy + Math.cos(idx * 1.5) * 140 + (Math.random() - 0.5) * 50;
+              n.vx = 0;
+              n.vy = 0;
+            });
+          }
+          force(name, f) {
+            if (arguments.length === 1) return this._forces.get(name);
+            this._forces.set(name, f);
+            return this;
+          }
+          nodes(n) {
+            if (!arguments.length) return this._nodes;
+            this._nodes = n;
+            this._initPositions();
+            return this;
+          }
+          alpha(a) {
+            if (!arguments.length) return this._alpha;
+            this._alpha = a;
+            return this;
+          }
+          alphaTarget(t) {
+            if (!arguments.length) return this._alphaTarget;
+            this._alphaTarget = t;
+            return this;
+          }
+          restart() {
+            this._alpha = Math.max(this._alpha, 0.3);
+            return this;
+          }
+          on(event, cb) {
+            this._listeners[event] = cb;
+            return this;
+          }
+          _startLoop() {
+            const tick = () => {
+              if (this._alpha > 0.005 || this._alphaTarget > 0) {
+                this._step();
+                if (this._listeners["tick"]) this._listeners["tick"]();
+                this._alpha += (this._alphaTarget - this._alpha) * 0.02;
+              }
+              requestAnimationFrame(tick);
+            };
+            requestAnimationFrame(tick);
+          }
+          _step() {
+            const cx = (window.innerWidth || 800) / 2;
+            const cy = (window.innerHeight || 600) / 2;
+            for (let i = 0; i < this._nodes.length; i++) {
+              const a = this._nodes[i];
+              for (let j = i + 1; j < this._nodes.length; j++) {
+                const b = this._nodes[j];
+                let dx = b.x - a.x;
+                let dy = b.y - a.y;
+                let dist = Math.sqrt(dx * dx + dy * dy) || 1;
+                if (dist > 350) continue;
+                let force = (280 / (dist * dist)) * this._alpha;
+                let fx = (dx / dist) * force;
+                let fy = (dy / dist) * force;
+                if (a.fx === undefined || a.fx === null) { a.vx -= fx; a.vy -= fy; }
+                if (b.fx === undefined || b.fx === null) { b.vx += fx; b.vy += fy; }
+              }
+            }
+            const linkForce = this._forces.get("link");
+            const links = linkForce?._links || [];
+            const idMap = new Map(this._nodes.map(n => [n.id, n]));
+            links.forEach(l => {
+              const s = typeof l.source === 'object' ? l.source : idMap.get(l.source);
+              const t = typeof l.target === 'object' ? l.target : idMap.get(l.target);
+              if (!s || !t) return;
+              l.source = s;
+              l.target = t;
+              let dx = t.x - s.x;
+              let dy = t.y - s.y;
+              let dist = Math.sqrt(dx * dx + dy * dy) || 1;
+              let displacement = dist - (linkForce?._dist || 100);
+              let force = displacement * 0.04 * this._alpha;
+              let fx = (dx / dist) * force;
+              let fy = (dy / dist) * force;
+              if (s.fx === undefined || s.fx === null) { s.vx += fx; s.vy += fy; }
+              if (t.fx === undefined || t.fx === null) { t.vx -= fx; t.vy -= fy; }
+            });
+            this._nodes.forEach(n => {
+              if (n.fx !== undefined && n.fx !== null) {
+                n.x = n.fx;
+                n.y = n.fy;
+              } else {
+                n.vx += (cx - n.x) * 0.015 * this._alpha;
+                n.vy += (cy - n.y) * 0.015 * this._alpha;
+                n.x += n.vx;
+                n.y += n.vy;
+                n.vx *= 0.85;
+                n.vy *= 0.85;
+              }
+            });
+          }
+        }
+
+        return {
+          select: (sel) => new MiniSelection(typeof sel === 'string' ? document.querySelector(sel) : sel),
+          forceSimulation: (nodes) => new MiniForceSimulation(nodes),
+          forceLink: (links) => {
+            const obj = {
+              _links: links,
+              _dist: 100,
+              links: (l) => { obj._links = l; return obj; },
+              id: () => obj,
+              distance: (d) => { obj._dist = d; return obj; }
+            };
+            return obj;
+          },
+          forceManyBody: () => ({ strength: () => ({}) }),
+          forceCenter: () => ({}),
+          forceCollide: () => ({ radius: () => ({}) }),
+          zoom: () => {
+            let zoomHandler = () => {};
+            const zoomObj = {
+              scaleExtent: () => zoomObj,
+              on: (ev, cb) => { zoomHandler = cb; return zoomObj; }
+            };
+            return (selection) => {
+              const svg = selection._elements[0];
+              if (!svg) return;
+              let scale = 1, tx = 0, ty = 0;
+              let isPanning = false, startX = 0, startY = 0;
+              svg.addEventListener("wheel", (e) => {
+                e.preventDefault();
+                scale = Math.max(0.2, Math.min(3, scale * (e.deltaY < 0 ? 1.1 : 0.9)));
+                zoomHandler({ transform: "translate(" + tx + "," + ty + ") scale(" + scale + ")" });
+              }, { passive: false });
+              svg.addEventListener("mousedown", (e) => {
+                if (e.target.tagName === 'circle' || e.target.closest('#controls') || e.target.closest('#inspector')) return;
+                isPanning = true;
+                startX = e.clientX - tx;
+                startY = e.clientY - ty;
+              });
+              window.addEventListener("mousemove", (e) => {
+                if (!isPanning) return;
+                tx = e.clientX - startX;
+                ty = e.clientY - startY;
+                zoomHandler({ transform: "translate(" + tx + "," + ty + ") scale(" + scale + ")" });
+              });
+              window.addEventListener("mouseup", () => { isPanning = false; });
+            };
+          },
+          drag: () => {
+            let startCb = () => {}, dragCb = () => {}, endCb = () => {};
+            const dragObj = {
+              on: (ev, cb) => {
+                if (ev === "start") startCb = cb;
+                if (ev === "drag") dragCb = cb;
+                if (ev === "end") endCb = cb;
+                return dragObj;
+              }
+            };
+            return (selection) => {
+              selection._elements.forEach(el => {
+                el.addEventListener("mousedown", (e) => {
+                  e.stopPropagation();
+                  const d = el.__data__;
+                  if (!d) return;
+                  startCb(e, d);
+                  const onMove = (me) => {
+                    const svg = document.getElementById("canvas");
+                    const rect = svg.getBoundingClientRect();
+                    dragCb({ x: me.clientX - rect.left, y: me.clientY - rect.top }, d);
+                  };
+                  const onUp = (ue) => {
+                    window.removeEventListener("mousemove", onMove);
+                    window.removeEventListener("mouseup", onUp);
+                    endCb(ue, d);
+                  };
+                  window.addEventListener("mousemove", onMove);
+                  window.addEventListener("mouseup", onUp);
+                });
+              });
+            };
+          }
+        };
+      })();
+    }
+
     const graphData = ${dataJson};
     let activeNodes = [...graphData.nodes];
     let activeLinks = [...graphData.links];
@@ -429,7 +767,11 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd()) {
     let labelElements = g.append("g").attr("class", "labels").selectAll("text");
 
     function updateSimulation() {
-      linkElements = linkElements.data(activeLinks, d => \`\${d.source.id || d.source}-\${d.target.id || d.target}-\${d.type}\`);
+      linkElements = linkElements.data(activeLinks, d => {
+        const s = typeof d.source === 'object' ? (d.source.id || d.source.slug || '') : d.source;
+        const t = typeof d.target === 'object' ? (d.target.id || d.target.slug || '') : d.target;
+        return s + "-" + t + "-" + d.type;
+      });
       linkElements.exit().remove();
       const linkEnter = linkElements.enter().append("line")
         .attr("class", d => d.staged ? "link link-staged" : (d.type === "overrides" ? "link link-overrides" : "link link-related"));
@@ -472,11 +814,12 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd()) {
     }
 
     simulation.on("tick", () => {
+      const nodeMap = new Map(activeNodes.map(n => [n.id, n]));
       linkElements
-        .attr("x1", d => d.source.x)
-        .attr("y1", d => d.source.y)
-        .attr("x2", d => d.target.x)
-        .attr("y2", d => d.target.y);
+        .attr("x1", d => (typeof d.source === 'object' && d.source.x !== undefined) ? d.source.x : (nodeMap.get(d.source)?.x || 0))
+        .attr("y1", d => (typeof d.source === 'object' && d.source.y !== undefined) ? d.source.y : (nodeMap.get(d.source)?.y || 0))
+        .attr("x2", d => (typeof d.target === 'object' && d.target.x !== undefined) ? d.target.x : (nodeMap.get(d.target)?.x || 0))
+        .attr("y2", d => (typeof d.target === 'object' && d.target.y !== undefined) ? d.target.y : (nodeMap.get(d.target)?.y || 0));
 
       nodeElements
         .attr("cx", d => d.x)
@@ -535,19 +878,27 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd()) {
       const linksDiv = document.getElementById('ins-links');
       linksDiv.innerHTML = '';
       
-      const outgoing = activeLinks.filter(l => (l.source.id || l.source) === node.id);
-      const incoming = activeLinks.filter(l => (l.target.id || l.target) === node.id);
+      const outgoing = activeLinks.filter(l => {
+        const s = typeof l.source === 'object' ? (l.source.id || l.source.slug) : l.source;
+        return s === node.id || s === node.slug;
+      });
+      const incoming = activeLinks.filter(l => {
+        const t = typeof l.target === 'object' ? (l.target.id || l.target.slug) : l.target;
+        return t === node.id || t === node.slug;
+      });
 
       if (outgoing.length) {
         linksDiv.innerHTML += '<div style="color:var(--accent);">Outgoing:</div>';
         outgoing.forEach(l => {
-          linksDiv.innerHTML += \`<div style="padding-left:8px;">↳ \${l.target.id || l.target} <span style="color:var(--text-muted)">(\${l.type})</span></div>\`;
+          const tId = typeof l.target === 'object' ? (l.target.slug || l.target.id) : l.target;
+          linksDiv.innerHTML += '<div style="padding-left:8px;">↳ ' + tId + ' <span style="color:var(--text-muted)">(' + l.type + ')</span></div>';
         });
       }
       if (incoming.length) {
         linksDiv.innerHTML += '<div style="color:#22c55e; margin-top:4px;">Incoming (Backlinks):</div>';
         incoming.forEach(l => {
-          linksDiv.innerHTML += \`<div style="padding-left:8px;">↰ \${l.source.id || l.source}</div>\`;
+          const sId = typeof l.source === 'object' ? (l.source.slug || l.source.id) : l.source;
+          linksDiv.innerHTML += '<div style="padding-left:8px;">↰ ' + sId + '</div>';
         });
       }
       if (!outgoing.length && !incoming.length) {
@@ -585,10 +936,10 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd()) {
 
       updatePendingBadge();
       updateSimulation();
-      if (isHttpServer) {
-        showToast(\`Node '\${selectedNode.slug}' staged! Click 'Save to Disk' to persist.\`);
+      if (isHttpServer || configuredServerUrl) {
+        showToast("Node '" + selectedNode.slug + "' staged! Click 'Save to Disk' to persist.");
       } else {
-        alert(\`Node '\${selectedNode.slug}' updated! Click Export Patch to apply.\`);
+        alert("Node '" + selectedNode.slug + "' updated! Click Export Patch to apply.");
       }
     };
 
@@ -605,8 +956,10 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd()) {
 
     // HTTP Server Direct Persistence
     const isHttpServer = window.location.protocol.startsWith('http');
+    const configuredServerUrl = "${serverUrl}";
+    const apiBase = isHttpServer ? '' : configuredServerUrl;
     const saveDiskBtn = document.getElementById('btn-save-disk');
-    if (isHttpServer && saveDiskBtn) {
+    if ((isHttpServer || configuredServerUrl) && saveDiskBtn) {
       saveDiskBtn.style.display = 'flex';
       const exportLabel = document.getElementById('export-btn-label');
       if (exportLabel) exportLabel.textContent = 'Patch JSON';
@@ -641,7 +994,8 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd()) {
         saveDiskBtn.innerHTML = '<span>⏳ Saving...</span>';
 
         try {
-          const res = await fetch('/api/patch', {
+          const targetUrl = (apiBase ? apiBase : '') + '/api/patch';
+          const res = await fetch(targetUrl, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(staged)
@@ -699,7 +1053,7 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd()) {
 
       const patchData = {
         generated_at: new Date().toISOString(),
-        version: "2.1.0",
+        version: "2.2.0",
         patch: staged
       };
 
@@ -710,7 +1064,23 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd()) {
     document.getElementById('modal-close').onclick = () => patchModal.classList.remove('open');
     document.getElementById('btn-copy-patch').onclick = () => {
       const text = document.getElementById('patch-code').textContent;
-      navigator.clipboard.writeText(text).then(() => alert('Patch JSON copied to clipboard!'));
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(() => alert('Patch JSON copied to clipboard!')).catch(() => {
+          fallbackCopy(text);
+        });
+      } else {
+        fallbackCopy(text);
+      }
+      function fallbackCopy(val) {
+        const ta = document.createElement('textarea');
+        ta.value = val;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        try { document.execCommand('copy'); alert('Patch JSON copied to clipboard!'); } catch {}
+        document.body.removeChild(ta);
+      }
     };
 
     document.getElementById('btn-download-patch').onclick = () => {
@@ -719,7 +1089,7 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd()) {
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = \`memory-patch-\${new Date().toISOString().slice(0, 10)}.json\`;
+      a.download = "memory-patch-" + new Date().toISOString().slice(0, 10) + ".json";
       a.click();
       URL.revokeObjectURL(url);
     };
@@ -730,7 +1100,8 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd()) {
       const activeChips = Array.from(document.querySelectorAll('.chip.active')).map(c => c.textContent);
 
       nodeElements.style("opacity", d => {
-        const matchesQuery = !q || d.slug.toLowerCase().includes(q) || (d.description && d.description.toLowerCase().includes(q));
+        const dSlug = d.slug || d.id || '';
+        const matchesQuery = !q || dSlug.toLowerCase().includes(q) || (d.description && d.description.toLowerCase().includes(q));
         const matchesDomain = activeChips.length === 0 || activeChips.includes(d.domain);
         return (matchesQuery && matchesDomain) ? 1.0 : 0.15;
       });
@@ -738,8 +1109,12 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd()) {
       linkElements.style("opacity", d => {
         const s = d.source;
         const t = d.target;
-        const sMatch = (!q || s.slug.toLowerCase().includes(q)) && (activeChips.length === 0 || activeChips.includes(s.domain));
-        const tMatch = (!q || t.slug.toLowerCase().includes(q)) && (activeChips.length === 0 || activeChips.includes(t.domain));
+        const sSlug = typeof s === 'object' ? (s.slug || s.id || '') : String(s || '');
+        const sDomain = typeof s === 'object' ? (s.domain || '') : '';
+        const tSlug = typeof t === 'object' ? (t.slug || t.id || '') : String(t || '');
+        const tDomain = typeof t === 'object' ? (t.domain || '') : '';
+        const sMatch = (!q || sSlug.toLowerCase().includes(q)) && (activeChips.length === 0 || activeChips.includes(sDomain));
+        const tMatch = (!q || tSlug.toLowerCase().includes(q)) && (activeChips.length === 0 || activeChips.includes(tDomain));
         return (sMatch && tMatch) ? 0.8 : 0.05;
       });
     }

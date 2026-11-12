@@ -101,6 +101,19 @@ export function recordTelemetryEvent(slug, eventType = 'recall', details = {}) {
 }
 
 /**
+ * Asynchronous, non-blocking telemetry event emitter.
+ * Dispatches recording on next event loop tick without blocking CQS read queries.
+ */
+export function emitTelemetryEvent(slug, eventType = 'recall', details = {}) {
+  if (!slug) return;
+  setImmediate(() => {
+    try {
+      recordTelemetryEvent(slug, eventType, details);
+    } catch {}
+  });
+}
+
+/**
  * Public command: Explicitly records memory efficacy feedback (test_pass, test_fail, applied).
  */
 export function recordMemoryEfficacy(slug, feedbackType, details = {}) {
@@ -125,6 +138,7 @@ export function correlateTestExecutionEfficacy(workspaceRoot = process.cwd(), op
   const db = getDatabase();
 
   let targetSlugs = Array.isArray(slugs) && slugs.length > 0 ? slugs : [];
+  const explicitSlugsProvided = Array.isArray(slugs) && slugs.length > 0;
 
   if (targetSlugs.length === 0) {
     if (db) {
@@ -148,7 +162,9 @@ export function correlateTestExecutionEfficacy(workspaceRoot = process.cwd(), op
     exitCode,
     outcome: exitCode === 0 ? 'PASSED' : 'FAILED',
     correlatedSlugs: [],
-    updatedScores: {}
+    updatedScores: {},
+    penalized: 0,
+    correlated: false
   };
 
   if (exitCode === 0) {
@@ -157,11 +173,21 @@ export function correlateTestExecutionEfficacy(workspaceRoot = process.cwd(), op
       results.correlatedSlugs.push(s);
       results.updatedScores[s] = updated.efficacy_score;
     }
+    results.correlated = results.correlatedSlugs.length > 0;
   } else {
     const failureText = `${stdout}\n${stderr}`.toLowerCase();
     for (const s of targetSlugs) {
       const slugKey = s.replace(/-/g, ' ');
-      const isCorrelated = failureText.includes(s) || failureText.includes(slugKey) || targetSlugs.length <= 2;
+      const slugTokens = s.split('-').filter(t => t.length > 2);
+      
+      const textCorrelates = failureText.includes(s.toLowerCase()) ||
+        failureText.includes(slugKey.toLowerCase()) ||
+        (slugTokens.length >= 2 && slugTokens.filter(t => failureText.includes(t.toLowerCase())).length >= 2);
+
+      // Avoid false-negative penalties: only penalize if error text correlates,
+      // or if targetSlugs <= 2 and explicit attribution was intended.
+      const isCorrelated = textCorrelates || (explicitSlugsProvided && targetSlugs.length <= 2 && options.explicitAttribution !== false);
+
       if (isCorrelated) {
         const updated = recordMemoryEfficacy(s, 'test_fail', {
           command,
@@ -171,7 +197,10 @@ export function correlateTestExecutionEfficacy(workspaceRoot = process.cwd(), op
         results.updatedScores[s] = updated.efficacy_score;
       }
     }
+    results.penalized = results.correlatedSlugs.length;
+    results.correlated = results.correlatedSlugs.length > 0;
   }
 
   return results;
 }
+

@@ -3,8 +3,11 @@ import path from 'node:path';
 import os from 'node:os';
 import { execSync, execFileSync } from 'node:child_process';
 import { resolveStoragePaths, GIT_EXEC_ENV } from './storage-paths.js';
+import { createLayerProvider } from './layer-provider.js';
 import { parseYamlFrontmatter, serializeYamlFrontmatter, parseInlineArrayOrList } from './yaml-parser.js';
 import { findMarkdownFiles, scanLayerEntries } from '../retrieval/shadow-resolver.js';
+import { getMemorySpanningTree } from '../graph/graph-service.js';
+import { emitTelemetryEvent } from '../db/telemetry.js';
 
 const STALE_THRESHOLD_DAYS = 180;
 
@@ -47,7 +50,16 @@ export function evaluateEntryStaleness(verifiedString, nowMs = Date.now()) {
 
 export function queryGitRepoStatus(repoDir) {
   if (!fs.existsSync(path.join(repoDir, '.git'))) {
-    return { isGit: false };
+    return {
+      isGit: false,
+      isClean: true,
+      branch: null,
+      isPromoteBranch: false,
+      uncommittedCount: 0,
+      uncommittedList: [],
+      upstreamAhead: 0,
+      upstreamBehind: 0
+    };
   }
   try {
     const branch = execSync('git rev-parse --abbrev-ref HEAD', {
@@ -69,8 +81,10 @@ export function queryGitRepoStatus(repoDir) {
     }).trim();
 
     const isClean = porcelain === '';
-    const uncommittedCount = isClean ? 0 : porcelain.split('\n').filter(Boolean).length;
+    const uncommittedList = isClean ? [] : porcelain.split('\n').map(l => l.trim()).filter(Boolean);
+    const uncommittedCount = uncommittedList.length;
 
+    let upstreamAhead = 0;
     let upstreamBehind = 0;
     try {
       const counts = execSync('git rev-list --left-right --count HEAD...@{u}', {
@@ -82,6 +96,7 @@ export function queryGitRepoStatus(repoDir) {
       }).trim();
       const parts = counts.split(/\s+/);
       if (parts.length >= 2) {
+        upstreamAhead = parseInt(parts[0], 10) || 0;
         upstreamBehind = parseInt(parts[1], 10) || 0;
       }
     } catch {}
@@ -92,10 +107,21 @@ export function queryGitRepoStatus(repoDir) {
       isClean,
       isPromoteBranch,
       uncommittedCount,
+      uncommittedList,
+      upstreamAhead,
       upstreamBehind
     };
   } catch {
-    return { isGit: true, branch: 'unknown', isClean: true, isPromoteBranch: false, uncommittedCount: 0, upstreamBehind: 0 };
+    return {
+      isGit: true,
+      branch: 'unknown',
+      isClean: true,
+      isPromoteBranch: false,
+      uncommittedCount: 0,
+      uncommittedList: [],
+      upstreamAhead: 0,
+      upstreamBehind: 0
+    };
   }
 }
 
@@ -235,16 +261,50 @@ export function getLayerStatistics(workspaceRoot) {
   }
 
   const privateGit = queryGitRepoStatus(paths.privateDir);
-  const teamGit = queryGitRepoStatus(paths.teamDir);
+  let teamGit = queryGitRepoStatus(paths.teamDir);
+
+  if (paths.activeTeamDirs && paths.activeTeamDirs.length > 0) {
+    const teamReposGit = [];
+    for (const tRepo of paths.activeTeamDirs) {
+      const gStatus = queryGitRepoStatus(tRepo.dir);
+      if (gStatus.isGit) {
+        teamReposGit.push({ slug: tRepo.slug, name: tRepo.name, ...gStatus });
+      }
+    }
+    if (teamReposGit.length > 0) {
+      const hasUncommitted = teamReposGit.some(r => !r.isClean);
+      const onPromote = teamReposGit.find(r => r.isPromoteBranch);
+      const totalBehind = teamReposGit.reduce((acc, r) => acc + (r.upstreamBehind || 0), 0);
+      const totalAhead = teamReposGit.reduce((acc, r) => acc + (r.upstreamAhead || 0), 0);
+      const totalUncommitted = teamReposGit.reduce((acc, r) => acc + (r.uncommittedCount || 0), 0);
+      const allUncommittedList = teamReposGit.flatMap(r => (r.uncommittedList || []).map(l => `[${r.slug}] ${l}`));
+      teamGit = {
+        isGit: true,
+        isClean: !hasUncommitted,
+        uncommittedCount: totalUncommitted,
+        uncommittedList: allUncommittedList,
+        branch: onPromote ? onPromote.branch : (teamReposGit[0]?.branch || 'main'),
+        isPromoteBranch: Boolean(onPromote),
+        upstreamAhead: totalAhead,
+        upstreamBehind: totalBehind,
+        repos: teamReposGit
+      };
+    }
+  }
+
+  const totalFiles = workspaceFiles.length + privateFiles.length + teamFiles.length;
 
   return {
     counts: {
       workspace: workspaceFiles.length,
       private: privateFiles.length,
       team: teamFiles.length,
+      total: totalFiles,
+      active: activeEntries.length,
       totalActive: activeEntries.length
     },
     paths: {
+      settings: paths.settingsPath,
       workspace: paths.workspaceDir,
       private: paths.privateDir,
       team: paths.teamDir
@@ -253,14 +313,20 @@ export function getLayerStatistics(workspaceRoot) {
     domainSummary,
     staleCount: staleEntries.length,
     staleEntries,
+    staleness: {
+      staleCount: staleEntries.length,
+      staleEntries
+    },
     syncStatus: {
       privateGit,
-      teamGit
+      teamGit,
+      privateRepoConfigured: Boolean(paths.settings?.privateRepoUrl),
+      teamRepoConfigured: Boolean(paths.settings?.teamRepoUrl || (paths.activeTeamDirs && paths.activeTeamDirs.length > 0))
     }
   };
 }
 
-export function resolveSingleMemoryContent(workspaceRoot, layer, slug, activeIndex) {
+export function resolveSingleMemoryContent(workspaceRoot, layer, slug, activeIndex, options = {}) {
   if (!slug || typeof slug !== 'string') {
     throw new Error('A memory slug string is required.');
   }
@@ -269,41 +335,37 @@ export function resolveSingleMemoryContent(workspaceRoot, layer, slug, activeInd
   const slugKey = cleanSlug.toLowerCase();
   const normalizedLayer = (layer || 'all').toLowerCase();
   const paths = resolveStoragePaths(workspaceRoot);
+  const layerProvider = createLayerProvider(workspaceRoot);
 
   let filePath = null;
   let resolvedLayer = normalizedLayer;
 
   if (normalizedLayer === 'all') {
-    const active = activeIndex.get(slugKey);
+    const active = activeIndex ? activeIndex.get(slugKey) : null;
     if (active && fs.existsSync(active.file)) {
       filePath = active.file;
       resolvedLayer = active.layerKey;
     } else {
-      const candidates = [
-        { key: 'workspace', p: path.join(paths.workspaceDir, `${cleanSlug}.md`) },
-        { key: 'private', p: path.join(paths.privateDir, `${cleanSlug}.md`) },
-        { key: 'team', p: path.join(paths.teamDir, `${cleanSlug}.md`) }
-      ];
-      for (const cand of candidates) {
-        if (fs.existsSync(cand.p)) {
-          filePath = cand.p;
-          resolvedLayer = cand.key;
-          break;
-        }
+      const match = layerProvider.findMemoryFile(cleanSlug, 'all');
+      if (match) {
+        filePath = match.path;
+        resolvedLayer = match.layer;
       }
     }
     if (!filePath) {
       throw new Error(`Memory slug '${cleanSlug}' was not found in any active layer.`);
     }
   } else {
-    let layerDir = paths.workspaceDir;
-    if (normalizedLayer === 'private') layerDir = paths.privateDir;
-    if (normalizedLayer === 'team') layerDir = paths.teamDir;
-    filePath = path.join(layerDir, `${cleanSlug}.md`);
-    if (!fs.existsSync(filePath)) {
+    const match = layerProvider.findMemoryFile(cleanSlug, normalizedLayer);
+    if (!match || !fs.existsSync(match.path)) {
       throw new Error(`Memory slug '${cleanSlug}' was not found in layer '${normalizedLayer}'.`);
     }
+    filePath = match.path;
+    resolvedLayer = match.layer;
   }
+
+  // Asynchronous non-blocking telemetry emitter (preserves CQS while recording recall metrics)
+  emitTelemetryEvent(slugKey, 'recall');
 
   const rawContent = fs.readFileSync(filePath, 'utf8');
   const parsed = parseYamlFrontmatter(rawContent);
@@ -315,7 +377,7 @@ export function resolveSingleMemoryContent(workspaceRoot, layer, slug, activeInd
   if (relatedList.length > 0) {
     const graphLines = [];
     for (const relSlug of relatedList) {
-      const target = activeIndex.get(relSlug);
+      const target = activeIndex ? activeIndex.get(relSlug) : null;
       if (target) {
         graphLines.push(`- \`[${target.layerKey}] ${target.slug}\` (${target.type}): ${target.trigger}`);
         resolvedRelated.push({
@@ -337,27 +399,39 @@ export function resolveSingleMemoryContent(workspaceRoot, layer, slug, activeInd
   const backlinks = [];
   const backlinkLines = [];
   const seenBacklinks = new Set();
-  for (const [entrySlug, entry] of activeIndex.entries()) {
-    if (entrySlug === slugKey || !entry || seenBacklinks.has(entry.slug)) continue;
-    const isRelated = Array.isArray(entry.related) && entry.related.includes(slugKey);
-    const isOverridden = Array.isArray(entry.overridesList) && entry.overridesList.includes(slugKey);
-    if (isRelated || isOverridden) {
-      seenBacklinks.add(entry.slug);
-      const relType = isOverridden ? 'overridden_by' : 'related_by';
-      backlinks.push({
-        slug: entry.slug,
-        layer: entry.layerKey,
-        type: entry.type,
-        relation: relType,
-        description: entry.trigger,
-        resolved: true
-      });
-      backlinkLines.push(`- \`[${entry.layerKey}] ${entry.slug}\` (${entry.type}, ${relType}): ${entry.trigger}`);
+  if (activeIndex) {
+    for (const [entrySlug, entry] of activeIndex.entries()) {
+      if (entrySlug === slugKey || !entry || seenBacklinks.has(entry.slug)) continue;
+      const isRelated = Array.isArray(entry.related) && entry.related.includes(slugKey);
+      const isOverridden = Array.isArray(entry.overridesList) && entry.overridesList.includes(slugKey);
+      if (isRelated || isOverridden) {
+        seenBacklinks.add(entry.slug);
+        const relType = isOverridden ? 'overridden_by' : 'related_by';
+        backlinks.push({
+          slug: entry.slug,
+          layer: entry.layerKey,
+          type: entry.type,
+          relation: relType,
+          description: entry.trigger,
+          resolved: true
+        });
+        backlinkLines.push(`- \`[${entry.layerKey}] ${entry.slug}\` (${entry.type}, ${relType}): ${entry.trigger}`);
+      }
     }
   }
 
   if (backlinkLines.length > 0) {
     enrichedContent = enrichedContent.trimEnd() + '\n\n---\n### Incoming Backlinks (Referenced By)\n' + backlinkLines.join('\n') + '\n';
+  }
+
+  // GraphRAG Multi-Hop Spanning Tree Recall (if depth > 1 requested)
+  const depth = typeof options === 'number' ? options : (options.depth || 1);
+  let spanningTree = null;
+  if (depth > 1) {
+    spanningTree = getMemorySpanningTree(workspaceRoot, cleanSlug, { depth, maxDepth: depth });
+    if (spanningTree && spanningTree.contextEnvelope) {
+      enrichedContent = enrichedContent.trimEnd() + '\n\n---\n' + spanningTree.contextEnvelope + '\n';
+    }
   }
 
   return {
@@ -367,11 +441,12 @@ export function resolveSingleMemoryContent(workspaceRoot, layer, slug, activeInd
     frontmatter: parsed.frontmatter,
     relatedMemories: resolvedRelated,
     backlinks,
+    spanningTree,
     content: enrichedContent
   };
 }
 
-export function getMemoryContent(workspaceRoot, layer, slug, slugs) {
+export function getMemoryContent(workspaceRoot, layer, slug, slugs, options = {}) {
   const normalizedLayer = (layer || 'all').toLowerCase();
   const { activeEntries } = scanLayerEntries(workspaceRoot, 'all');
   const activeIndex = new Map();
@@ -386,9 +461,10 @@ export function getMemoryContent(workspaceRoot, layer, slug, slugs) {
     }
   }
 
+  const opts = typeof slugs === 'object' && !Array.isArray(slugs) && slugs !== null ? slugs : options;
   const multiList = Array.isArray(slugs) ? slugs : (Array.isArray(slug) ? slug : null);
   if (multiList && multiList.length > 0) {
-    const items = multiList.map((s) => resolveSingleMemoryContent(workspaceRoot, normalizedLayer, s, activeIndex));
+    const items = multiList.map((s) => resolveSingleMemoryContent(workspaceRoot, normalizedLayer, s, activeIndex, opts));
     return {
       layer: normalizedLayer,
       slugs: items.map((i) => i.slug),
@@ -397,8 +473,9 @@ export function getMemoryContent(workspaceRoot, layer, slug, slugs) {
     };
   }
 
-  return resolveSingleMemoryContent(workspaceRoot, normalizedLayer, slug, activeIndex);
+  return resolveSingleMemoryContent(workspaceRoot, normalizedLayer, slug, activeIndex, opts);
 }
+
 
 export function rewireMemoryReferences(workspaceRoot, oldSlug, newSlug) {
   if (!oldSlug || !newSlug || oldSlug === newSlug) return 0;
@@ -699,15 +776,35 @@ export function syncMemoryLayer(workspaceRoot, params = {}) {
   if (layer === 'all' || layer === 'private') {
     results.private = { attempted: true, ...syncRepo(paths.privateDir) };
   }
-  if (layer === 'all' || layer === 'team') {
-    results.team = { attempted: true, ...syncRepo(paths.teamDir) };
+  const specificTeam = paths.activeTeamDirs ? paths.activeTeamDirs.find(t => t.slug.toLowerCase() === layer.toLowerCase()) : null;
+  if (layer === 'all' || layer === 'team' || specificTeam) {
+    if (specificTeam) {
+      const res = syncRepo(specificTeam.dir);
+      results.team = {
+        attempted: true,
+        success: res.success,
+        repos: [{ slug: specificTeam.slug, name: specificTeam.name, ...res }]
+      };
+    } else if (paths.activeTeamDirs && paths.activeTeamDirs.length > 0) {
+      const repoResults = [];
+      for (const tRepo of paths.activeTeamDirs) {
+        repoResults.push({ slug: tRepo.slug, name: tRepo.name, ...syncRepo(tRepo.dir) });
+      }
+      results.team = {
+        attempted: true,
+        success: repoResults.every(r => r.success),
+        repos: repoResults
+      };
+    } else {
+      results.team = { attempted: true, ...syncRepo(paths.teamDir) };
+    }
   }
 
   return results;
 }
 
 export function prepareTeamPromotion(workspaceRoot, params = {}) {
-  const { slug, content: customContent, frontmatter: customFm } = params;
+  const { slug, content: customContent, frontmatter: customFm, teamSlug } = params;
   if (!slug) throw new Error('A memory slug is required for promotion.');
 
   const cleanSlug = path.basename(slug.trim()).replace(/\.md$/i, '');
@@ -718,30 +815,49 @@ export function prepareTeamPromotion(workspaceRoot, params = {}) {
     throw new Error(`Private memory file '${cleanSlug}.md' does not exist.`);
   }
 
-  const teamGit = path.join(paths.teamDir, '.git');
+  // Resolve target team directory with multi-team repository support
+  let targetTeamDir = paths.teamDir;
+  let targetTeamSlug = teamSlug || 'default';
+  if (paths.activeTeamDirs && paths.activeTeamDirs.length > 0) {
+    let matchedRepo = null;
+    if (teamSlug) {
+      matchedRepo = paths.activeTeamDirs.find(r => r.slug.toLowerCase() === teamSlug.toLowerCase());
+      if (!matchedRepo) {
+        throw new Error(`Team repository '${teamSlug}' was not found in settings or is not active.`);
+      }
+    } else {
+      matchedRepo = paths.activeTeamDirs[0];
+    }
+    targetTeamDir = matchedRepo.dir;
+    targetTeamSlug = matchedRepo.slug;
+  } else if (teamSlug && teamSlug !== 'default') {
+    throw new Error(`Team repository '${teamSlug}' was not found in settings or is not active.`);
+  }
+
+  const teamGit = path.join(targetTeamDir, '.git');
   if (!fs.existsSync(teamGit)) {
     throw new Error('Team memory clone is not initialized with Git. Run /kc-init first.');
   }
 
   let defaultBranch = 'main';
   try {
-    const branchList = execFileSync('git', ['branch', '-a'], { cwd: paths.teamDir, env: GIT_EXEC_ENV, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    const branchList = execFileSync('git', ['branch', '-a'], { cwd: targetTeamDir, env: GIT_EXEC_ENV, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
     if (branchList.includes('master') && !branchList.includes('main')) {
       defaultBranch = 'master';
     }
   } catch {}
 
   try {
-    execFileSync('git', ['checkout', defaultBranch], { cwd: paths.teamDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
-    execFileSync('git', ['pull', '--ff-only'], { cwd: paths.teamDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
+    execFileSync('git', ['checkout', defaultBranch], { cwd: targetTeamDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
+    execFileSync('git', ['pull', '--ff-only'], { cwd: targetTeamDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
   } catch {}
 
   const dateStr = new Date().toISOString().slice(0, 10);
   const branchName = `promote/${dateStr}-${cleanSlug}`;
   try {
-    execFileSync('git', ['checkout', '-b', branchName], { cwd: paths.teamDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
+    execFileSync('git', ['checkout', '-b', branchName], { cwd: targetTeamDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
   } catch {
-    execFileSync('git', ['checkout', branchName], { cwd: paths.teamDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
+    execFileSync('git', ['checkout', branchName], { cwd: targetTeamDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
   }
 
   let teamContent = '';
@@ -794,17 +910,19 @@ export function prepareTeamPromotion(workspaceRoot, params = {}) {
     teamContent = serializeYamlFrontmatter(teamFm, scrubbedBody);
   }
 
-  const targetFile = path.join(paths.teamDir, `${cleanSlug}.md`);
+  const targetFile = path.join(targetTeamDir, `${cleanSlug}.md`);
   atomicWriteFileSync(targetFile, teamContent, 'utf8');
 
   return {
     success: true,
     slug: cleanSlug,
+    teamSlug: targetTeamSlug,
     branch: branchName,
     stagedFile: targetFile,
     prCommand: `gh pr create --base ${defaultBranch} --head "${branchName}" --title "memory: promote ${cleanSlug}" --fill`
   };
 }
+
 
 /**
  * Applies a structured memory patch (such as exported from Bidirectional Memory Studio UI).
@@ -820,6 +938,7 @@ export function applyMemoryPatch(workspaceRoot = process.cwd(), patchData = {}) 
   const entryMap = new Map();
   for (const entry of activeEntries) {
     entryMap.set(entry.slug, entry);
+    entryMap.set(entry.slug.toLowerCase(), entry);
   }
 
   const results = {
@@ -832,7 +951,7 @@ export function applyMemoryPatch(workspaceRoot = process.cwd(), patchData = {}) 
   // 1. Update modified nodes
   for (const mod of modifiedNodes) {
     const slug = mod.slug;
-    const existing = entryMap.get(slug);
+    const existing = entryMap.get(slug) || (slug ? entryMap.get(String(slug).toLowerCase()) : null);
     if (!existing) {
       results.errors.push(`Memory slug '${slug}' not found on disk.`);
       continue;
@@ -860,7 +979,7 @@ export function applyMemoryPatch(workspaceRoot = process.cwd(), patchData = {}) 
     const targetSlug = typeof link.target === 'object' ? link.target.id || link.target.slug : link.target;
     const relType = link.type || 'related';
 
-    const sourceEntry = entryMap.get(sourceSlug);
+    const sourceEntry = entryMap.get(sourceSlug) || (sourceSlug ? entryMap.get(String(sourceSlug).toLowerCase()) : null);
     if (!sourceEntry) {
       results.errors.push(`Source memory '${sourceSlug}' not found.`);
       continue;
@@ -870,12 +989,13 @@ export function applyMemoryPatch(workspaceRoot = process.cwd(), patchData = {}) 
     try {
       const raw = fs.readFileSync(sourceFilePath, 'utf8');
       const parsed = parseYamlFrontmatter(raw);
+      const targetClean = String(targetSlug).trim();
       if (relType === 'overrides') {
-        parsed.frontmatter.overrides = targetSlug;
+        parsed.frontmatter.overrides = targetClean;
       } else {
         const related = Array.isArray(parsed.frontmatter.related) ? [...parsed.frontmatter.related] : [];
-        if (!related.includes(targetSlug)) {
-          related.push(targetSlug);
+        if (!related.some(r => r.toLowerCase() === targetClean.toLowerCase())) {
+          related.push(targetClean);
           parsed.frontmatter.related = related;
         }
       }
@@ -893,17 +1013,18 @@ export function applyMemoryPatch(workspaceRoot = process.cwd(), patchData = {}) 
     const targetSlug = typeof link.target === 'object' ? link.target.id || link.target.slug : link.target;
     const relType = link.type || 'related';
 
-    const sourceEntry = entryMap.get(sourceSlug);
+    const sourceEntry = entryMap.get(sourceSlug) || (sourceSlug ? entryMap.get(String(sourceSlug).toLowerCase()) : null);
     if (!sourceEntry) continue;
 
     const sourceFilePath = sourceEntry.file || sourceEntry.path;
     try {
       const raw = fs.readFileSync(sourceFilePath, 'utf8');
       const parsed = parseYamlFrontmatter(raw);
-      if (relType === 'overrides' && parsed.frontmatter.overrides === targetSlug) {
+      const targetClean = String(targetSlug).trim().toLowerCase();
+      if (relType === 'overrides' && String(parsed.frontmatter.overrides || '').toLowerCase() === targetClean) {
         delete parsed.frontmatter.overrides;
       } else if (Array.isArray(parsed.frontmatter.related)) {
-        parsed.frontmatter.related = parsed.frontmatter.related.filter(s => s !== targetSlug);
+        parsed.frontmatter.related = parsed.frontmatter.related.filter(s => String(s).toLowerCase() !== targetClean);
       }
       const newContent = serializeYamlFrontmatter(parsed.frontmatter, parsed.body);
       atomicWriteFileSync(sourceFilePath, newContent, 'utf8');

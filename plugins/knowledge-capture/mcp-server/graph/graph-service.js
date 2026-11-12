@@ -301,10 +301,17 @@ export function getKnowledgeGraphData(workspaceRoot) {
 
 /**
  * Retrieves bi-directional graph neighbors (both outgoing references and incoming backlinks) for a given slug.
+ * Supports depth (1 to 3) to retrieve full multi-hop spanning tree.
  */
-export function getMemoryGraphNeighbors(workspaceRoot, slug) {
+export function getMemoryGraphNeighbors(workspaceRoot, slug, options = {}) {
   if (!slug) return { slug: '', outgoing: [], incoming: [] };
   const cleanSlug = path.basename(slug.trim()).replace(/\.md$/i, '');
+  const depth = typeof options === 'number' ? options : (options.depth || 1);
+
+  if (depth > 1) {
+    return getMemorySpanningTree(workspaceRoot, cleanSlug, typeof options === 'object' ? options : { depth });
+  }
+
   const graph = getKnowledgeGraphData(workspaceRoot);
   const targetNode = graph.nodes.find(n => n.id === cleanSlug || n.slug === cleanSlug);
 
@@ -325,3 +332,105 @@ export function getMemoryGraphNeighbors(workspaceRoot, slug) {
     outgoingCount: outgoing.length
   };
 }
+
+/**
+ * GraphRAG Multi-Hop Spanning Tree Recall.
+ * Traverses bi-directional relationships (outgoing related/overrides and incoming backlinks)
+ * up to maxDepth (1 to 3) to construct an interconnected sub-graph context envelope.
+ */
+export function getMemorySpanningTree(workspaceRoot, rootSlug, options = {}) {
+  const maxDepth = Math.max(1, Math.min(3, parseInt(options.maxDepth ?? options.depth ?? 2, 10) || 2));
+  const maxNodes = Math.max(1, Math.min(30, parseInt(options.maxNodes || 15, 10) || 15));
+  if (!rootSlug) {
+    return { rootSlug: '', depth: maxDepth, totalDiscovered: 0, nodes: [], links: [], contextEnvelope: '' };
+  }
+
+  const cleanRoot = path.basename(rootSlug.trim()).replace(/\.md$/i, '').toLowerCase();
+  const graph = getKnowledgeGraphData(workspaceRoot);
+  const nodeLookup = new Map(graph.nodes.map(n => [n.id.toLowerCase(), n]));
+
+  const rootNode = nodeLookup.get(cleanRoot);
+  if (!rootNode) {
+    return { rootSlug: cleanRoot, depth: maxDepth, totalDiscovered: 0, nodes: [], links: [], contextEnvelope: '' };
+  }
+
+  const visitedSlugs = new Set([cleanRoot]);
+  const discoveredNodes = [{ ...rootNode, hop: 0, pathFromRoot: [cleanRoot] }];
+  const discoveredLinks = [];
+  const seenLinkKeys = new Set();
+
+  let currentLevel = [cleanRoot];
+
+  for (let hop = 1; hop <= maxDepth; hop++) {
+    const nextLevel = [];
+    for (const currentSlug of currentLevel) {
+      if (discoveredNodes.length >= maxNodes) break;
+
+      // Outgoing links
+      const outgoing = graph.links.filter(l => l.source.toLowerCase() === currentSlug);
+      for (const link of outgoing) {
+        const targetSlug = link.target.toLowerCase();
+        const linkKey = `${link.source.toLowerCase()}->${link.target.toLowerCase()}:${link.type}`;
+        if (!seenLinkKeys.has(linkKey)) {
+          seenLinkKeys.add(linkKey);
+          discoveredLinks.push({ source: link.source, target: link.target, type: link.type, hop, direction: 'outgoing' });
+        }
+        if (!visitedSlugs.has(targetSlug)) {
+          visitedSlugs.add(targetSlug);
+          const targetNode = nodeLookup.get(targetSlug);
+          if (targetNode) {
+            discoveredNodes.push({ ...targetNode, hop, relation: link.type, direction: 'outgoing', parent: currentSlug });
+            nextLevel.push(targetSlug);
+          }
+          if (discoveredNodes.length >= maxNodes) break;
+        }
+      }
+
+      // Incoming backlinks
+      const incoming = graph.links.filter(l => l.target.toLowerCase() === currentSlug);
+      for (const link of incoming) {
+        const sourceSlug = link.source.toLowerCase();
+        const backlinkKey = `${link.source.toLowerCase()}->${link.target.toLowerCase()}:${link.type}`;
+        if (!seenLinkKeys.has(backlinkKey)) {
+          seenLinkKeys.add(backlinkKey);
+          discoveredLinks.push({ source: link.source, target: link.target, type: link.type, hop, direction: 'incoming' });
+        }
+        if (!visitedSlugs.has(sourceSlug)) {
+          visitedSlugs.add(sourceSlug);
+          const sourceNode = nodeLookup.get(sourceSlug);
+          if (sourceNode) {
+            discoveredNodes.push({ ...sourceNode, hop, relation: link.type, direction: 'incoming', parent: currentSlug });
+            nextLevel.push(sourceSlug);
+          }
+          if (discoveredNodes.length >= maxNodes) break;
+        }
+      }
+    }
+    currentLevel = nextLevel;
+    if (currentLevel.length === 0 || discoveredNodes.length >= maxNodes) break;
+  }
+
+  let envelope = `### 🌐 GraphRAG Spanning Tree Context Envelope (Depth: ${maxDepth}, ${discoveredNodes.length} Nodes Connected)\n\n`;
+  envelope += `* **Root Memory:** \`[${rootNode.layer}] ${rootNode.slug}\` (${rootNode.type}) — ${rootNode.description}\n`;
+
+  const hopNodes = discoveredNodes.filter(n => n.hop > 0);
+  if (hopNodes.length > 0) {
+    envelope += `* **Connected Knowledge Graph Sub-Tree:**\n`;
+    for (const n of hopNodes) {
+      const indent = '  '.repeat(n.hop);
+      const relTag = n.direction === 'outgoing' ? `${n.relation}` : `referenced_by (${n.relation})`;
+      envelope += `${indent}- [Hop ${n.hop}: ${relTag}] **[${n.layer}] ${n.slug}** (${n.type}): ${n.description}\n`;
+    }
+  }
+
+  return {
+    rootSlug: cleanRoot,
+    depth: maxDepth,
+    totalDiscovered: discoveredNodes.length,
+    nodes: discoveredNodes,
+    links: discoveredLinks,
+    edges: discoveredLinks,
+    contextEnvelope: envelope.trim()
+  };
+}
+

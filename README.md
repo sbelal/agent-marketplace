@@ -12,7 +12,7 @@ A universal, cross-platform plugin marketplace and monorepo engineered for **Goo
 
 | Plugin | Version | Platforms | Description | Quick Link |
 | :--- | :---: | :---: | :--- | :--- |
-| **`knowledge-capture`** | `2.1.0` | Antigravity, Claude Code | Advanced multi-layered memory system (Workspace, Local Global Private, and Team Global) with full CQS stdio MCP server, workspace-partitioned SQLite FTS5 hybrid search, file fallback, JIT guardrails, `/kc-bootstrap`, and Git sync. | [`plugins/knowledge-capture/`](./plugins/knowledge-capture/) |
+| **`knowledge-capture`** | `2.2.0` | Antigravity, Claude Code | Advanced multi-layered memory system (Workspace, Local Global Private, and Team Global) with full CQS stdio MCP server, workspace-partitioned SQLite FTS5 hybrid search, file fallback, JIT guardrails, `/kc-bootstrap`, and Git sync. | [`plugins/knowledge-capture/`](./plugins/knowledge-capture/) |
 | **`syran-persona`** | `1.1.0` | Antigravity, Claude Code | Adopts the Syran Logic Officer persona globally, providing dispassionate logical analysis, formal precision, and Bayesian probability counsel. | [`plugins/syran-persona/`](./plugins/syran-persona/) |
 
 ---

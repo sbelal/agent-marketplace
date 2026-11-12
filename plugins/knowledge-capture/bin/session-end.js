@@ -19,9 +19,48 @@ const pluginRoot = path.dirname(__dirname);
  * 4. Outputs injectSteps system message (Antigravity) or plaintext (Claude Code)
  */
 
+async function getStdinPayload() {
+  return new Promise((resolve) => {
+    if (process.stdin.isTTY) {
+      return resolve({});
+    }
+    let data = '';
+    const timer = setTimeout(() => {
+      process.stdin.pause();
+      resolve({});
+    }, 150);
+
+    process.stdin.setEncoding('utf8');
+    process.stdin.on('data', (chunk) => {
+      data += chunk;
+    });
+    process.stdin.on('end', () => {
+      clearTimeout(timer);
+      process.stdin.pause();
+      try {
+        resolve(data.trim() ? JSON.parse(data.trim()) : {});
+      } catch {
+        resolve({});
+      }
+    });
+    process.stdin.resume();
+  });
+}
+
 async function main() {
-  const workspaceRoot = process.env.WORKSPACE_DIR || process.cwd();
-  const audit = autoElicitSessionKnowledge(workspaceRoot);
+  let workspaceRoot = process.cwd();
+  let payload = {};
+  try {
+    payload = await getStdinPayload();
+    if (Array.isArray(payload.workspacePaths) && payload.workspacePaths.length > 0) {
+      workspaceRoot = payload.workspacePaths[0];
+    }
+  } catch {}
+  if (process.env.WORKSPACE_DIR) {
+    workspaceRoot = process.env.WORKSPACE_DIR;
+  }
+
+  const audit = autoElicitSessionKnowledge(workspaceRoot, payload);
 
   if (!audit.elicitation_needed) {
     // Nothing to prompt; exit cleanly without polluting output
@@ -34,7 +73,11 @@ async function main() {
 
   let report = `> [!TIP]\n`;
   report += `> **Knowledge Capture Session-End Sentinel**\n`;
-  report += `> You have **${modifiedCount} uncommitted or modified file(s)** (${topFiles}${more}), but no new knowledge was recorded in this session.\n`;
+  if (modifiedCount > 0) {
+    report += `> You have **${modifiedCount} uncommitted or modified file(s)** (${topFiles}${more}), but no new knowledge was recorded in this session.\n`;
+  } else {
+    report += `> Tacit insights (debugging breakthroughs or user working preferences) were identified in this session without code modifications.\n`;
+  }
   report += `>\n`;
   report += `> Before closing this session or compacting context, consider capturing critical decisions:\n`;
   report += `> - Run \`/kc-elicit\` to review automated memory candidate proposals based on your diffs.\n`;
@@ -48,7 +91,7 @@ async function main() {
     }
   }
 
-  const isClaudeCode = Boolean(process.env.CLAUDE_PLUGIN_ROOT);
+  const isClaudeCode = Boolean(process.env.CLAUDE_PLUGIN_ROOT || process.env.CLAUDE_CODE);
   if (isClaudeCode) {
     process.stdout.write(report + '\n');
   } else {

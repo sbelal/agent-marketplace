@@ -7,7 +7,7 @@ import { findMarkdownFiles, scanLayerEntries } from './shadow-resolver.js';
 import { tokenizeText, computeCosineSimilarity, computeDenseCosineSimilarity } from '../embeddings/heuristic-provider.js';
 import { getActiveEmbeddingConfig, generateEmbedding } from '../embeddings/onnx-provider.js';
 import { generateMultiVector, generateMultiVectorAsync, computeMultiVectorSimilarity } from '../embeddings/multi-vector.js';
-import { readTelemetryJson } from '../db/telemetry.js';
+import { readTelemetryJson, emitTelemetryEvent } from '../db/telemetry.js';
 
 /**
  * Checks if the SQLite cache is dirty (files modified, added, deleted, or embedding dimension changed).
@@ -559,5 +559,13 @@ export async function searchMemoriesHybrid(workspaceRoot, queryText, options = {
   });
 
   const limit = options.limit || 5;
-  return results.slice(0, limit);
+  const topResults = results.slice(0, limit);
+
+  // Asynchronous non-blocking telemetry emitter (preserves CQS while recording recall metrics)
+  for (const item of topResults) {
+    if (item.slug) emitTelemetryEvent(item.slug, 'recall');
+  }
+
+  return topResults;
 }
+

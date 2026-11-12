@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { scanLayerEntries } from '../retrieval/shadow-resolver.js';
 
 const GIT_EXEC_ENV = {
@@ -14,7 +14,7 @@ const GIT_EXEC_ENV = {
  * Scans git commit log for past bugs, hotfixes, reverts, and workarounds to extract tacit knowledge candidates.
  */
 export function mineGitHistoryMemories(workspaceRoot = process.cwd(), options = {}) {
-  const maxCommits = options.maxCommits || 100;
+  const maxCommits = Math.max(1, Math.min(500, parseInt(options.maxCommits, 10) || 100));
   const gitDir = path.join(workspaceRoot, '.git');
   if (!fs.existsSync(gitDir)) {
     return {
@@ -26,8 +26,9 @@ export function mineGitHistoryMemories(workspaceRoot = process.cwd(), options = 
 
   let logOutput = '';
   try {
-    logOutput = execSync(
-      `git log -n ${maxCommits} --no-merges --format="COMMIT:%H|%an|%ad|%s%n%b%nEND_COMMIT" --date=short`,
+    logOutput = execFileSync(
+      'git',
+      ['log', '-n', String(maxCommits), '--no-merges', '--format=COMMIT:%H|%an|%ad|%s%n%b%nEND_COMMIT', '--date=short'],
       { cwd: workspaceRoot, encoding: 'utf8', timeout: 5000, env: GIT_EXEC_ENV }
     );
   } catch (err) {

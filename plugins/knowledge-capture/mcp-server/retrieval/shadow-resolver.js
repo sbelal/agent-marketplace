@@ -43,10 +43,15 @@ export function scanLayerEntries(workspaceRoot, targetLayer = 'all') {
   if (normalized === 'all' || normalized === 'private') {
     layersToScan.push({ name: 'Private', key: 'private', dir: paths.privateDir });
   }
-  if (normalized === 'all' || normalized === 'team') {
+  const targetTeamSlug = normalized.startsWith('team/')
+    ? normalized.slice(5)
+    : (normalized !== 'all' && normalized !== 'team' && normalized !== 'workspace' && normalized !== 'private' ? normalized : null);
+
+  if (normalized === 'all' || normalized === 'team' || targetTeamSlug) {
     // Scan active team repositories
     if (paths.activeTeamDirs && paths.activeTeamDirs.length > 0) {
       for (const tRepo of paths.activeTeamDirs) {
+        if (targetTeamSlug && tRepo.slug.toLowerCase() !== targetTeamSlug.toLowerCase()) continue;
         layersToScan.push({
           name: `Team (${tRepo.slug})`,
           key: 'team',
@@ -55,7 +60,9 @@ export function scanLayerEntries(workspaceRoot, targetLayer = 'all') {
         });
       }
     } else if (!paths.settings?.teamRepos || paths.settings.teamRepos.length === 0) {
-      layersToScan.push({ name: 'Team', key: 'team', teamSlug: 'default', dir: paths.teamDir });
+      if (!targetTeamSlug || targetTeamSlug === 'default') {
+        layersToScan.push({ name: 'Team', key: 'team', teamSlug: 'default', dir: paths.teamDir });
+      }
     }
   }
 
@@ -113,8 +120,9 @@ export function scanLayerEntries(workspaceRoot, targetLayer = 'all') {
     }
 
     for (const entry of layerParsed) {
-      const directShadow = seenSlugs.get(entry.slug);
-      const overrideShadow = overriddenSlugs.get(entry.slug);
+      const slugKey = entry.slug.toLowerCase();
+      const directShadow = seenSlugs.get(slugKey);
+      const overrideShadow = overriddenSlugs.get(slugKey);
 
       if (directShadow || overrideShadow) {
         const shadowedBy = directShadow || overrideShadow;
@@ -127,10 +135,11 @@ export function scanLayerEntries(workspaceRoot, targetLayer = 'all') {
       }
 
       activeEntries.push(entry);
-      seenSlugs.set(entry.slug, { byLayer: entry.layer, bySlug: entry.slug });
+      seenSlugs.set(slugKey, { byLayer: entry.layer, bySlug: entry.slug });
       for (const target of entry.overridesList) {
-        if (!overriddenSlugs.has(target)) {
-          overriddenSlugs.set(target, { byLayer: entry.layer, bySlug: entry.slug });
+        const targetKey = target.toLowerCase();
+        if (!overriddenSlugs.has(targetKey)) {
+          overriddenSlugs.set(targetKey, { byLayer: entry.layer, bySlug: entry.slug });
         }
       }
     }

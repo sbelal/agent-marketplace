@@ -31,6 +31,7 @@ import {
   removeTeamRepository,
   syncTeamRepositories,
   getMemorySummary,
+  getLayerStatistics,
   deriveTeamRepoSlug,
   applyMemoryPatch,
   auditTeamConflicts,
@@ -54,13 +55,18 @@ import {
   proactiveMemoryProbe,
   recordMemoryEfficacy,
   getMemoryGraphNeighbors,
+  getMemorySpanningTree,
   generateEmbedding,
   getActiveEmbeddingConfig,
   resetOnnxState,
   isIndexDirty,
   dreamMemoryConsolidation,
-  correlateTestExecutionEfficacy
+  correlateTestExecutionEfficacy,
+  renderVisualMemoryStudio,
+  stopStudioService
 } from '../plugins/knowledge-capture/mcp-server/sqlite-index.js';
+
+import { createLayerProvider } from '../plugins/knowledge-capture/mcp-server/core/layer-provider.js';
 
 import {
   consultLogic,
@@ -69,7 +75,10 @@ import {
   evaluateArchitecturalTradeoffs
 } from '../plugins/syran-persona/mcp-server/logic-service.js';
 
-function teardown() {
+async function teardown() {
+  try {
+    await stopStudioService();
+  } catch {}
   try {
     fs.rmSync(tempRoot, { recursive: true, force: true });
   } catch {}
@@ -215,6 +224,15 @@ description: Lower tier private rule that should be shadowed
   const alphaHighProb = highPriorRes.evaluations.find(e => e.label === 'Course Alpha').probability;
   const alphaLowProb = lowPriorRes.evaluations.find(e => e.label === 'Course Alpha').probability;
   assert.notEqual(alphaHighProb, alphaLowProb, 'Alpha probability must change based on prior');
+
+  const zeroPriorRes = evaluateProbability(hypotheses, 0.0);
+  assert.equal(zeroPriorRes.prior_probability, 0.01, '0.0 prior should be safely clamped to 0.01');
+
+  const zeroHypoPriorRes = evaluateProbability([
+    { label: 'Hypo 1', weight: 1.0, prior: 0.0 },
+    { label: 'Hypo 2', weight: 1.0 }
+  ]);
+  assert.ok(zeroHypoPriorRes.evaluations, 'Hypothesis-level prior 0.0 must evaluate cleanly');
   console.log('  ✔ Passed: Bayesian updating actively incorporates prior probability.\n');
 
   // ==========================================
@@ -377,6 +395,11 @@ Never use pnpm, always enforce npm install with package-lock.json.
   assert.ok(driftAudit.drifts.some(d => d.type === 'staleness_drift'), 'Must detect staleness drift (> 180 days)');
   assert.ok(driftAudit.drifts.some(d => d.type === 'referenced_file_missing'), 'Must detect missing .eslintrc.json');
   assert.ok(driftAudit.drifts.some(d => d.type === 'runtime_engine_drift'), 'Must detect Node 18 vs >=26.0.0 engine mismatch');
+  assert.equal(
+    driftAudit.drifts.some(d => d.type === 'dangling_override_drift' && d.slug === 'pkg-pnpm-standards'),
+    false,
+    'Valid rules must not trigger false dangling override drift'
+  );
   console.log('  ✔ Passed: Semantic Contradiction and Drift Engine accurately detects rule conflicts and codebase divergence.\n');
 
   // ==========================================
@@ -594,6 +617,9 @@ Always specify runs-on: [self-hosted, linux, x64].
   assert.ok(foundTeamMem, 'Team memory under platform-eng must be discoverable in hybrid search');
   assert.equal(foundTeamMem.layer, 'team');
 
+  const teamSummary = getMemorySummary(ws1Root, { layer: 'platform-eng' });
+  assert.ok(teamSummary.includes('platform-ci-standard'), 'getMemorySummary with team slug should discover team entries');
+
   // 18.3 Deactivate platform-eng
   const deactRes = setTeamRepositoryActive('platform-eng', false, ws1Root);
   assert.equal(deactRes.ok, true);
@@ -615,7 +641,23 @@ Always specify runs-on: [self-hosted, linux, x64].
   await syncSqliteIndex(ws1Root);
   reposList = getTeamRepositories(ws1Root);
   assert.equal(reposList.find(r => r.slug === 'platform-eng'), undefined, 'Removed repo must not be in list');
-  console.log('  ✔ Passed: Multi-team repository addition, scoping, activation toggling, and removal verified.\n');
+
+  // 18.6 Verify bin/pull.js handles invalid team slug gracefully with error code 1
+  let pullErr = null;
+  try {
+    const pullBinPath = path.resolve('plugins/knowledge-capture/bin/pull.js');
+    execFileSync(process.execPath, [pullBinPath, 'invalid-slug'], {
+      cwd: ws1Root,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+  } catch (err) {
+    pullErr = err;
+  }
+  assert.ok(pullErr, 'Pulling an invalid team slug must exit with non-zero status');
+  assert.equal(pullErr.status, 1);
+  assert.ok(pullErr.stderr.includes("Team repository with slug 'invalid-slug' not found"));
+  console.log('  ✔ Passed: Multi-team repository addition, scoping, activation toggling, invalid-slug validation, and removal verified.\n');
 
   // ==========================================
   // TEST 19: Command-Query Separation (CQS) in Hybrid Search
@@ -721,6 +763,12 @@ Test only.
   assert.equal(patchResult.nodesUpdated, 1, 'Should update 1 node');
   assert.equal(patchResult.linksAdded, 1, 'Should add 1 link');
   assert.equal(patchResult.linksRemoved, 1, 'Should remove 1 link');
+
+  // Verify case-insensitive patch update
+  const casePatchResult = applyMemoryPatch(ws1Root, {
+    modified_nodes: [{ slug: 'K8S-DELETE-GUARD', domain: 'security' }]
+  });
+  assert.equal(casePatchResult.ok, true, 'Case-insensitive patch should succeed');
 
   // Verify on-disk file content
   const updatedFile = fs.readFileSync(path.join(ws1Root, '.agents', 'rules', 'memory', 'k8s-delete-guard.md'), 'utf8');
@@ -1075,9 +1123,196 @@ Always execute tests with timeout guards.
 
   console.log('  ✔ Passed: Syran Trade-Off Matrix calculates MAUT utilities, Pareto frontier, pivot sensitivity, and zero-contraction counsel.\n');
 
+  // ==========================================
+  // TEST 27: Unified Layer Provider Pattern & Multi-Team Routing (Apply A, Fix 1, Fix 2, Fix 3)
+  // ==========================================
+  console.log('Test 27: Unified Layer Provider Pattern & Multi-Team Routing...');
+  const layerProvider = createLayerProvider(ws1Root);
+  const activeLayers = layerProvider.getActiveLayers();
+  assert.ok(Array.isArray(activeLayers), 'activeLayers must be an array');
+  assert.ok(activeLayers.some(l => l.key === 'workspace'), 'Must include workspace layer');
+  assert.ok(activeLayers.some(l => l.key === 'private'), 'Must include private layer');
+
+  const sampleEntry = layerProvider.findMemoryFile('k8s-delete-guard');
+  assert.ok(sampleEntry, 'Layer provider should find sample entry across layers');
+  assert.equal(layerProvider.resolveTeamRepoDir('non-existent-team'), null, 'Resolving invalid team slug must return null');
+  assert.ok(layerProvider.resolveTeamRepoDir('default'), 'Resolving default team slug should return team dir');
+
+  let promoErr = null;
+  try {
+    prepareTeamPromotion(ws1Root, { slug: 'k8s-delete-guard', content: '# Test Guard\nSample content', teamSlug: 'non-existent-team' });
+  } catch (err) {
+    promoErr = err;
+  }
+  assert.ok(promoErr, 'Promoting to invalid team slug must throw');
+  assert.ok(promoErr.message.includes("Team repository 'non-existent-team' was not found"));
+  console.log('  ✔ Passed: Unified Layer Provider Pattern decouples filesystem from memory store.\n');
+
+  // ==========================================
+  // TEST 28: GraphRAG Multi-Hop Spanning Tree Recall (Apply 💡 4)
+  // ==========================================
+  console.log('Test 28: GraphRAG Multi-Hop Spanning Tree Recall...');
+  const spanningTree = getMemorySpanningTree(ws1Root, 'k8s-delete-guard', { depth: 2 });
+  assert.equal(spanningTree.rootSlug, 'k8s-delete-guard');
+  assert.ok(Array.isArray(spanningTree.nodes), 'Nodes must be an array');
+  assert.ok(Array.isArray(spanningTree.edges), 'Edges must be an array');
+  assert.ok(typeof spanningTree.contextEnvelope === 'string', 'Context envelope must be a string');
+  assert.ok(spanningTree.contextEnvelope.includes('GraphRAG Spanning Tree Context Envelope'), 'Envelope title must be present');
+
+  const linkKeys = spanningTree.links.map(l => `${l.source}->${l.target}:${l.type}`);
+  const uniqueLinkKeys = new Set(linkKeys);
+  assert.equal(linkKeys.length, uniqueLinkKeys.size, 'Spanning tree links must be de-duplicated');
+
+  const enrichedRes = getMemoryContent(ws1Root, 'all', 'k8s-delete-guard', null, { depth: 2 });
+  assert.ok(enrichedRes.spanningTree, 'Spanning tree object should be attached when depth > 1');
+  assert.ok(enrichedRes.content.includes('GraphRAG Spanning Tree Context Envelope'), 'Context envelope should be in content');
+  console.log('  ✔ Passed: GraphRAG Multi-Hop Spanning Tree traversed reference graph with cycle safety.\n');
+
+  // ==========================================
+  // TEST 29: Trajectory-Based Zero-Code Debugging & User Preference Elicitation (Apply 💡 5)
+  // ==========================================
+  console.log('Test 29: Trajectory-Based Zero-Code Debugging & User Preference Elicitation...');
+  const proseElicitation = autoElicitSessionKnowledge(ws1Root, {
+    transcript: [
+      { role: 'user', content: 'I would rewrite that prose in this way that follows: focus on conclusions instead of detailed analysis, keep it concise.' }
+    ]
+  });
+  assert.equal(proseElicitation.elicitation_needed, true, 'Elicitation should trigger on user preference feedback');
+  const concisePref = proseElicitation.suggested_candidates.find(c => c.slug === 'user-preference-concise-conclusions');
+  assert.ok(concisePref, 'Should elicit user-preference-concise-conclusions');
+  assert.equal(concisePref.domain, 'workflow');
+  assert.equal(concisePref.elicited_from, 'user_feedback');
+
+  const debugElicitation = autoElicitSessionKnowledge(ws1Root, {
+    errorLogs: ['TypeError: Cannot read properties of undefined in auth-service']
+  });
+  assert.equal(debugElicitation.elicitation_needed, true, 'Elicitation should trigger on zero-code error logs');
+  assert.ok(debugElicitation.suggested_candidates.some(c => c.elicited_from === 'zero_code_debugging'), 'Should propose debugging gotcha candidate');
+
+  const arrayTranscriptDebug = autoElicitSessionKnowledge(ws1Root, {
+    transcript: [
+      { role: 'user', content: 'Run integration check' },
+      { role: 'assistant', content: 'Running command...' },
+      { role: 'tool', content: 'TypeError: Cannot access uninitialized variable in database-pool' }
+    ]
+  });
+  assert.equal(arrayTranscriptDebug.elicitation_needed, true, 'Array transcript with error message must trigger elicitation');
+  assert.ok(arrayTranscriptDebug.suggested_candidates.some(c => c.elicited_from === 'zero_code_debugging'));
+
+  const benignCmdElicitation = autoElicitSessionKnowledge(ws1Root, {
+    recentCommands: ['git status', 'ls -la', 'npm list']
+  });
+  assert.equal(benignCmdElicitation.suggested_candidates.some(c => c.elicited_from === 'zero_code_debugging'), false, 'Benign commands must not trigger zero-code debugging candidate');
+  console.log('  ✔ Passed: Trajectory-based zero-code debugging and user working preferences elicited accurately.\n');
+
+  // ==========================================
+  // TEST 30: Execution-Driven False-Negative Mitigation & Event Telemetry (Fix 4, Fix 5, Apply B)
+  // ==========================================
+  console.log('Test 30: Execution-Driven False-Negative Mitigation & Event Telemetry...');
+  const coarseEfficacyRes = correlateTestExecutionEfficacy(ws1Root, {
+    command: 'npm test',
+    exitCode: 1,
+    stderr: 'ECONNRESET unrelated socket drop',
+    slugs: ['k8s-delete-guard', 'slug-b', 'slug-c', 'slug-d']
+  });
+  assert.equal(coarseEfficacyRes.correlated, false, 'Coarse multi-slug failure should skip unverified penalties');
+  assert.equal(coarseEfficacyRes.penalized, 0, 'No rules should be penalized under coarse ambiguity');
+
+  const searchResults = await searchMemoriesHybrid(ws1Root, 'delete namespace');
+  assert.ok(Array.isArray(searchResults), 'Hybrid search must return array');
+  assert.ok(searchResults.length > 0, 'Should find memory result');
+  console.log('  ✔ Passed: Coarse false-negative penalties mitigated and async telemetry emitted.\n');
+
+  // ==========================================
+  // TEST 31: Visual Memory Studio In-Chat Generative UI & Claude Code Fallback (Apply 💡 6)
+  // ==========================================
+  console.log('Test 31: Visual Memory Studio In-Chat Generative UI & Claude Code Fallback...');
+  const testArtifactDir = path.join(tempRoot, 'artifacts');
+  fs.mkdirSync(testArtifactDir, { recursive: true });
+
+  // 1. Antigravity In-Chat Generative UI Embed Mode
+  const inChatResult = await renderVisualMemoryStudio(ws1Root, {
+    mode: 'in_chat',
+    compact: true,
+    artifactDir: testArtifactDir,
+    fileName: 'studio-in-chat.html'
+  });
+  assert.equal(inChatResult.status, 'ready');
+  assert.equal(inChatResult.platform, 'antigravity');
+  assert.equal(inChatResult.mode, 'in_chat');
+  assert.ok(inChatResult.embedTag.startsWith('<agent-embed src="file://'), 'Embed tag must be formatted as <agent-embed>');
+  assert.ok(inChatResult.embedTag.includes('studio-in-chat.html'));
+  assert.ok(fs.existsSync(inChatResult.artifactPath), 'HTML artifact must be saved to disk');
+  const inChatHtml = fs.readFileSync(inChatResult.artifactPath, 'utf8');
+  assert.ok(inChatHtml.includes('MiniD3'), 'Self-contained MiniD3 engine must be embedded for CSP compliance');
+  assert.ok(inChatHtml.includes('https://www.gstatic.com/antigravity/web/dev/tailwindcss.min.js'), 'Antigravity Tailwind script must be referenced');
+  assert.ok(inChatHtml.includes('var(--background'), 'Antigravity theme token must be styled');
+
+  // Test automatic artifact directory resolution via ANTIGRAVITY_CONVERSATION_ID
+  process.env.ANTIGRAVITY_CONVERSATION_ID = 'test-conv-987';
+  const autoArtifactResult = await renderVisualMemoryStudio(ws1Root, { mode: 'in_chat', fileName: 'auto-studio.html' });
+  assert.ok(autoArtifactResult.artifactPath.includes('test-conv-987'), 'Must resolve artifact path using ANTIGRAVITY_CONVERSATION_ID');
+  delete process.env.ANTIGRAVITY_CONVERSATION_ID;
+
+  // 2. Claude Code Browser Fallback Mode
+  const browserResult = await renderVisualMemoryStudio(ws1Root, {
+    mode: 'browser',
+    autoOpen: false,
+    port: 4299,
+    artifactDir: testArtifactDir,
+    fileName: 'studio-browser.html'
+  });
+  assert.equal(browserResult.status, 'ready');
+  assert.equal(browserResult.platform, 'claude_code');
+  assert.equal(browserResult.mode, 'browser');
+  assert.ok(browserResult.serverUrl.includes('4299'), 'Server URL must reflect designated port');
+  assert.ok(browserResult.offlineHtmlPath.includes('studio-browser.html'));
+  assert.ok(browserResult.stats.nodes > 0, 'Graph stats must report nodes');
+
+  // Stop Studio background instance cleanly
+  await stopStudioService();
+
+  console.log('  ✔ Passed: Visual Memory Studio provides in-chat generative UI for Antigravity and browser server fallback for Claude Code.\n');
+
+  // ==========================================
+  // TEST 32: Session-Start Lifecycle Hook Schema & Memory Store Statistics Integrity
+  // ==========================================
+  console.log('Test 32: Session-Start Lifecycle Hook Schema & Memory Store Statistics Integrity...');
+  const statsCheck = getLayerStatistics(ws1Root);
+  assert.ok(statsCheck.paths.settings, 'getLayerStatistics must provide paths.settings');
+  assert.equal(typeof statsCheck.counts.total, 'number', 'counts.total must be numeric');
+  assert.equal(typeof statsCheck.counts.active, 'number', 'counts.active must be numeric');
+  assert.ok(Array.isArray(statsCheck.staleness?.staleEntries), 'staleness.staleEntries must be an array');
+  assert.equal(typeof statsCheck.syncStatus.privateGit.isClean, 'boolean', 'privateGit.isClean must be boolean');
+  assert.equal(typeof statsCheck.syncStatus.privateGit.uncommittedCount, 'number', 'privateGit.uncommittedCount must be numeric');
+  assert.ok(Array.isArray(statsCheck.syncStatus.privateGit.uncommittedList), 'privateGit.uncommittedList must be an array');
+  assert.equal(typeof statsCheck.syncStatus.privateGit.upstreamAhead, 'number', 'privateGit.upstreamAhead must be numeric');
+
+  // Run bin/session-start.js to verify no ReferenceErrors or undefined outputs
+  const sessionStartBin = path.join(process.cwd(), 'plugins', 'knowledge-capture', 'bin', 'session-start.js');
+  const startRaw = execFileSync(process.execPath, [sessionStartBin], {
+    cwd: ws1Root,
+    encoding: 'utf8',
+    env: { ...process.env, WORKSPACE_DIR: ws1Root }
+  });
+  const startJson = JSON.parse(startRaw);
+  assert.ok(Array.isArray(startJson.injectSteps), 'session-start must return injectSteps array');
+  assert.ok(startJson.injectSteps.length > 0, 'session-start must emit non-empty injectSteps');
+  const reportMsg = startJson.injectSteps[0].systemMessage.systemMessage;
+  assert.ok(reportMsg.includes('### 🧠 Knowledge Capture Active'), 'Must include active header');
+  assert.ok(!reportMsg.includes('undefined uncommitted memory update(s)'), 'Must not contain undefined uncommitted count');
+
+  // Verify case-insensitive file resolution in LayerProvider
+  const lp = createLayerProvider(ws1Root);
+  const caseInsensitiveMatch = lp.findMemoryFile('K8S-DELETE-GUARD', 'workspace');
+  assert.ok(caseInsensitiveMatch, 'findMemoryFile must resolve slug case-insensitively');
+  assert.equal(caseInsensitiveMatch.slug.toLowerCase(), 'k8s-delete-guard');
+
+  console.log('  ✔ Passed: Session-Start hook schema, stats integrity, and case-insensitive resolution verified.\n');
+
   console.log('============================================================');
   console.log('🎉 ALL TESTS PASSED SUCCESSFULLY!');
   console.log('============================================================\n');
 } finally {
-  teardown();
+  await teardown();
 }

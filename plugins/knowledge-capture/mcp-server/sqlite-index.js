@@ -39,7 +39,8 @@ export {
 export {
   syncSqliteMetadata,
   getKnowledgeGraphData,
-  getMemoryGraphNeighbors
+  getMemoryGraphNeighbors,
+  getMemorySpanningTree
 } from './graph/graph-service.js';
 
 export {
@@ -62,6 +63,11 @@ export {
 export {
   generateKnowledgeGraphHtml
 } from './graph/memory-studio-html.js';
+
+export {
+  renderVisualMemoryStudio,
+  stopStudioService
+} from './graph/studio-launcher.js';
 
 export {
   detectContradictionsAndDrift
