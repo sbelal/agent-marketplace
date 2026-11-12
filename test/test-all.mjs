@@ -31,6 +31,7 @@ import {
   removeTeamRepository,
   syncTeamRepositories,
   getMemorySummary,
+  getLayerStatistics,
   deriveTeamRepoSlug,
   applyMemoryPatch,
   auditTeamConflicts,
@@ -1272,6 +1273,42 @@ Always execute tests with timeout guards.
   await stopStudioService();
 
   console.log('  ✔ Passed: Visual Memory Studio provides in-chat generative UI for Antigravity and browser server fallback for Claude Code.\n');
+
+  // ==========================================
+  // TEST 32: Session-Start Lifecycle Hook Schema & Memory Store Statistics Integrity
+  // ==========================================
+  console.log('Test 32: Session-Start Lifecycle Hook Schema & Memory Store Statistics Integrity...');
+  const statsCheck = getLayerStatistics(ws1Root);
+  assert.ok(statsCheck.paths.settings, 'getLayerStatistics must provide paths.settings');
+  assert.equal(typeof statsCheck.counts.total, 'number', 'counts.total must be numeric');
+  assert.equal(typeof statsCheck.counts.active, 'number', 'counts.active must be numeric');
+  assert.ok(Array.isArray(statsCheck.staleness?.staleEntries), 'staleness.staleEntries must be an array');
+  assert.equal(typeof statsCheck.syncStatus.privateGit.isClean, 'boolean', 'privateGit.isClean must be boolean');
+  assert.equal(typeof statsCheck.syncStatus.privateGit.uncommittedCount, 'number', 'privateGit.uncommittedCount must be numeric');
+  assert.ok(Array.isArray(statsCheck.syncStatus.privateGit.uncommittedList), 'privateGit.uncommittedList must be an array');
+  assert.equal(typeof statsCheck.syncStatus.privateGit.upstreamAhead, 'number', 'privateGit.upstreamAhead must be numeric');
+
+  // Run bin/session-start.js to verify no ReferenceErrors or undefined outputs
+  const sessionStartBin = path.join(process.cwd(), 'plugins', 'knowledge-capture', 'bin', 'session-start.js');
+  const startRaw = execFileSync(process.execPath, [sessionStartBin], {
+    cwd: ws1Root,
+    encoding: 'utf8',
+    env: { ...process.env, WORKSPACE_DIR: ws1Root }
+  });
+  const startJson = JSON.parse(startRaw);
+  assert.ok(Array.isArray(startJson.injectSteps), 'session-start must return injectSteps array');
+  assert.ok(startJson.injectSteps.length > 0, 'session-start must emit non-empty injectSteps');
+  const reportMsg = startJson.injectSteps[0].systemMessage.systemMessage;
+  assert.ok(reportMsg.includes('### 🧠 Knowledge Capture Active'), 'Must include active header');
+  assert.ok(!reportMsg.includes('undefined uncommitted memory update(s)'), 'Must not contain undefined uncommitted count');
+
+  // Verify case-insensitive file resolution in LayerProvider
+  const lp = createLayerProvider(ws1Root);
+  const caseInsensitiveMatch = lp.findMemoryFile('K8S-DELETE-GUARD', 'workspace');
+  assert.ok(caseInsensitiveMatch, 'findMemoryFile must resolve slug case-insensitively');
+  assert.equal(caseInsensitiveMatch.slug.toLowerCase(), 'k8s-delete-guard');
+
+  console.log('  ✔ Passed: Session-Start hook schema, stats integrity, and case-insensitive resolution verified.\n');
 
   console.log('============================================================');
   console.log('🎉 ALL TESTS PASSED SUCCESSFULLY!');

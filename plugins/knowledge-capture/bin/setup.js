@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import readline from 'node:readline';
+import { fileURLToPath } from 'node:url';
 import { execSync, execFileSync } from 'node:child_process';
 
 const GIT_EXEC_ENV = {
@@ -116,7 +117,7 @@ export function setupEnvironment(options = {}) {
   // If ONNX engine chosen and installation requested, ensure @xenova/transformers is ready
   if (settings.embeddingEngine === 'onnx' && options.installDependencies !== false) {
     try {
-      const currentDir = path.dirname(new URL(import.meta.url).pathname);
+      const currentDir = path.dirname(fileURLToPath(import.meta.url));
       const mcpServerDir = path.resolve(currentDir, '..', 'mcp-server');
       const nodeModulesDir = path.join(mcpServerDir, 'node_modules', '@xenova', 'transformers');
       if (!fs.existsSync(nodeModulesDir)) {

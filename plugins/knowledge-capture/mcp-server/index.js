@@ -700,7 +700,7 @@ function sendJsonRpc(response) {
   process.stdout.write(json + '\n');
 }
 
-function handleRequest(message) {
+async function handleRequest(message) {
   if (!message || typeof message !== 'object') {
     return;
   }
@@ -987,12 +987,12 @@ const rl = readline.createInterface({
   terminal: false
 });
 
-rl.on('line', (line) => {
+rl.on('line', async (line) => {
   const trimmed = line.trim();
   if (!trimmed) return;
   try {
     const parsed = JSON.parse(trimmed);
-    handleRequest(parsed);
+    await handleRequest(parsed);
   } catch {
     // Ignore invalid JSON lines
   }

@@ -234,6 +234,7 @@ async function main() {
   const paths = resolveStoragePaths(workspaceRoot);
   const settings = paths.settings;
   const privateDir = paths.privateDir;
+  const home = os.homedir();
 
   // Pull remote repositories concurrently if configured
   let privateSyncStatus = 'Not configured (Local store active)';
@@ -304,7 +305,7 @@ async function main() {
     report += `> **${stats.staleCount} memory entry/entries** have a \`verified\` date older than 180 days (or missing). Run \`/kc-consolidate\` to audit and refresh stale rules.\n`;
   }
 
-  if (!priv.isClean) {
+  if (priv.isGit && !priv.isClean) {
     report += `\n> [!WARNING]\n`;
     report += `> You have **${priv.uncommittedCount} uncommitted memory update(s)** in your Private layer.\n`;
     report += `> Run \`/kc-commit\` to review, audit, and push your changes.\n`;

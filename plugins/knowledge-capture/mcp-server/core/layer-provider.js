@@ -9,6 +9,20 @@ import { atomicWriteFileSync } from './memory-store.js';
  * Unified Layer Provider Pattern (Decoupling Filesystem & Multi-Team Routing from Memory Operations).
  * Provides a uniform interface across Workspace, Private, and multi-team repositories.
  */
+function findFileCaseInsensitive(dir, fileName) {
+  if (!fs.existsSync(dir)) return null;
+  const directPath = path.join(dir, fileName);
+  if (fs.existsSync(directPath)) return directPath;
+  try {
+    const target = fileName.toLowerCase();
+    const files = fs.readdirSync(dir);
+    const match = files.find(f => f.toLowerCase() === target);
+    return match ? path.join(dir, match) : null;
+  } catch {
+    return null;
+  }
+}
+
 export class LayerProvider {
   constructor(workspaceRoot = process.cwd()) {
     this.workspaceRoot = workspaceRoot;
@@ -113,17 +127,17 @@ export class LayerProvider {
 
     // 1. Workspace
     if (normLayer === 'all' || normLayer === 'workspace') {
-      const p = path.join(this.paths.workspaceDir, fileName);
-      if (fs.existsSync(p)) {
-        return { layer: 'workspace', teamSlug: null, path: p, slug: cleanSlug };
+      const p = findFileCaseInsensitive(this.paths.workspaceDir, fileName);
+      if (p) {
+        return { layer: 'workspace', teamSlug: null, path: p, slug: path.basename(p, '.md') };
       }
     }
 
     // 2. Private
     if (normLayer === 'all' || normLayer === 'private') {
-      const p = path.join(this.paths.privateDir, fileName);
-      if (fs.existsSync(p)) {
-        return { layer: 'private', teamSlug: null, path: p, slug: cleanSlug };
+      const p = findFileCaseInsensitive(this.paths.privateDir, fileName);
+      if (p) {
+        return { layer: 'private', teamSlug: null, path: p, slug: path.basename(p, '.md') };
       }
     }
 
@@ -136,16 +150,16 @@ export class LayerProvider {
       if (this.paths.activeTeamDirs && this.paths.activeTeamDirs.length > 0) {
         for (const tRepo of this.paths.activeTeamDirs) {
           if (targetTeamSlug && tRepo.slug.toLowerCase() !== targetTeamSlug) continue;
-          const p = path.join(tRepo.dir, fileName);
-          if (fs.existsSync(p)) {
-            return { layer: 'team', teamSlug: tRepo.slug, path: p, slug: cleanSlug };
+          const p = findFileCaseInsensitive(tRepo.dir, fileName);
+          if (p) {
+            return { layer: 'team', teamSlug: tRepo.slug, path: p, slug: path.basename(p, '.md') };
           }
         }
       }
       if (!targetTeamSlug || targetTeamSlug === 'default') {
-        const flatTeamPath = path.join(this.paths.teamDir, fileName);
-        if (fs.existsSync(flatTeamPath)) {
-          return { layer: 'team', teamSlug: 'default', path: flatTeamPath, slug: cleanSlug };
+        const p = findFileCaseInsensitive(this.paths.teamDir, fileName);
+        if (p) {
+          return { layer: 'team', teamSlug: 'default', path: p, slug: path.basename(p, '.md') };
         }
       }
     }

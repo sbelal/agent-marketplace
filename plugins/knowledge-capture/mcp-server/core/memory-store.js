@@ -50,7 +50,16 @@ export function evaluateEntryStaleness(verifiedString, nowMs = Date.now()) {
 
 export function queryGitRepoStatus(repoDir) {
   if (!fs.existsSync(path.join(repoDir, '.git'))) {
-    return { isGit: false };
+    return {
+      isGit: false,
+      isClean: true,
+      branch: null,
+      isPromoteBranch: false,
+      uncommittedCount: 0,
+      uncommittedList: [],
+      upstreamAhead: 0,
+      upstreamBehind: 0
+    };
   }
   try {
     const branch = execSync('git rev-parse --abbrev-ref HEAD', {
@@ -72,8 +81,10 @@ export function queryGitRepoStatus(repoDir) {
     }).trim();
 
     const isClean = porcelain === '';
-    const uncommittedCount = isClean ? 0 : porcelain.split('\n').filter(Boolean).length;
+    const uncommittedList = isClean ? [] : porcelain.split('\n').map(l => l.trim()).filter(Boolean);
+    const uncommittedCount = uncommittedList.length;
 
+    let upstreamAhead = 0;
     let upstreamBehind = 0;
     try {
       const counts = execSync('git rev-list --left-right --count HEAD...@{u}', {
@@ -85,6 +96,7 @@ export function queryGitRepoStatus(repoDir) {
       }).trim();
       const parts = counts.split(/\s+/);
       if (parts.length >= 2) {
+        upstreamAhead = parseInt(parts[0], 10) || 0;
         upstreamBehind = parseInt(parts[1], 10) || 0;
       }
     } catch {}
@@ -95,10 +107,21 @@ export function queryGitRepoStatus(repoDir) {
       isClean,
       isPromoteBranch,
       uncommittedCount,
+      uncommittedList,
+      upstreamAhead,
       upstreamBehind
     };
   } catch {
-    return { isGit: true, branch: 'unknown', isClean: true, isPromoteBranch: false, uncommittedCount: 0, upstreamBehind: 0 };
+    return {
+      isGit: true,
+      branch: 'unknown',
+      isClean: true,
+      isPromoteBranch: false,
+      uncommittedCount: 0,
+      uncommittedList: [],
+      upstreamAhead: 0,
+      upstreamBehind: 0
+    };
   }
 }
 
@@ -252,27 +275,36 @@ export function getLayerStatistics(workspaceRoot) {
       const hasUncommitted = teamReposGit.some(r => !r.isClean);
       const onPromote = teamReposGit.find(r => r.isPromoteBranch);
       const totalBehind = teamReposGit.reduce((acc, r) => acc + (r.upstreamBehind || 0), 0);
+      const totalAhead = teamReposGit.reduce((acc, r) => acc + (r.upstreamAhead || 0), 0);
       const totalUncommitted = teamReposGit.reduce((acc, r) => acc + (r.uncommittedCount || 0), 0);
+      const allUncommittedList = teamReposGit.flatMap(r => (r.uncommittedList || []).map(l => `[${r.slug}] ${l}`));
       teamGit = {
         isGit: true,
         isClean: !hasUncommitted,
         uncommittedCount: totalUncommitted,
+        uncommittedList: allUncommittedList,
         branch: onPromote ? onPromote.branch : (teamReposGit[0]?.branch || 'main'),
         isPromoteBranch: Boolean(onPromote),
+        upstreamAhead: totalAhead,
         upstreamBehind: totalBehind,
         repos: teamReposGit
       };
     }
   }
 
+  const totalFiles = workspaceFiles.length + privateFiles.length + teamFiles.length;
+
   return {
     counts: {
       workspace: workspaceFiles.length,
       private: privateFiles.length,
       team: teamFiles.length,
+      total: totalFiles,
+      active: activeEntries.length,
       totalActive: activeEntries.length
     },
     paths: {
+      settings: paths.settingsPath,
       workspace: paths.workspaceDir,
       private: paths.privateDir,
       team: paths.teamDir
@@ -281,9 +313,15 @@ export function getLayerStatistics(workspaceRoot) {
     domainSummary,
     staleCount: staleEntries.length,
     staleEntries,
+    staleness: {
+      staleCount: staleEntries.length,
+      staleEntries
+    },
     syncStatus: {
       privateGit,
-      teamGit
+      teamGit,
+      privateRepoConfigured: Boolean(paths.settings?.privateRepoUrl),
+      teamRepoConfigured: Boolean(paths.settings?.teamRepoUrl || (paths.activeTeamDirs && paths.activeTeamDirs.length > 0))
     }
   };
 }
