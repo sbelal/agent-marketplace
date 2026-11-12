@@ -2,113 +2,103 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import os from 'node:os';
-import { execSync, execFileSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
+import { resolveStoragePaths, GIT_EXEC_ENV } from '../mcp-server/core/storage-paths.js';
 
 /**
- * CLI Utility: Pull latest memory updates from Git upstream (Cross-platform)
+ * CLI Utility: Pull latest memory updates from Git upstream (Cross-platform, Multi-Team Support)
  */
 
-function main() {
-  const home = os.homedir();
-  const baseDir = path.join(home, '.gemini', 'knowledge-capture');
-  const teamDir = path.join(baseDir, 'team');
-  const privateDir = path.join(baseDir, 'private');
-  const settingsPath = path.join(baseDir, 'settings.json');
-
-  let settings = {};
-  if (fs.existsSync(settingsPath)) {
+function pullSingleRepo(repoDir, label, repoUrl) {
+  console.log(`=== Pulling ${label} (${repoDir}) ===`);
+  if (!repoUrl) {
+    console.log(`Notice: Repository URL is not configured for ${label}.`);
+    return 0;
+  }
+  if (!fs.existsSync(path.join(repoDir, '.git'))) {
+    console.log(`${label} clone not found. Initializing clone from ${repoUrl}...`);
     try {
-      settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
-    } catch {
-      // Ignore
+      fs.mkdirSync(path.dirname(repoDir), { recursive: true });
+      execFileSync('git', ['clone', repoUrl, repoDir], { stdio: 'inherit', env: GIT_EXEC_ENV });
+      console.log(`${label} cloned successfully.`);
+      return 0;
+    } catch (err) {
+      console.error(`Error cloning ${label}: ${err.message}`);
+      return 1;
     }
   }
 
+  try {
+    const dirty = execFileSync('git', ['status', '--porcelain'], { cwd: repoDir, encoding: 'utf8', env: GIT_EXEC_ENV }).trim();
+    if (dirty) {
+      console.error(`Error: ${label} working copy has uncommitted changes. Stash or commit before pulling:`);
+      console.error(dirty);
+      return 1;
+    }
+
+    const branch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: repoDir, encoding: 'utf8', env: GIT_EXEC_ENV }).trim() || 'main';
+    if (branch.startsWith('promote/')) {
+      console.warn(`Warning: ${label} is currently on a promotion branch: '${branch}'.`);
+      console.warn(`Run 'git -C "${repoDir}" checkout main' before pulling upstream updates.`);
+      return 1;
+    }
+
+    try {
+      execFileSync('git', ['branch', `--set-upstream-to=origin/${branch}`, branch], { cwd: repoDir, stdio: 'ignore', env: GIT_EXEC_ENV });
+    } catch {}
+
+    console.log(`Executing git pull --ff-only on branch '${branch}'...`);
+    const out = execFileSync('git', ['pull', '--ff-only'], { cwd: repoDir, encoding: 'utf8', env: GIT_EXEC_ENV });
+    console.log(out.trim());
+    return 0;
+  } catch (err) {
+    console.error(`Error pulling ${label}: ${err.message}`);
+    return 1;
+  }
+}
+
+function main() {
+  const workspaceRoot = process.cwd();
+  const paths = resolveStoragePaths(workspaceRoot);
+  const settings = paths.settings;
+
   const args = process.argv.slice(2);
-  const target = args[0] || 'team'; // 'team', 'private', or 'all'
+  const target = args[0] || 'team'; // 'team', 'private', 'all', or specific team slug
+  const specificSlug = args[1] || (target !== 'team' && target !== 'private' && target !== 'all' ? target : null);
 
   let exitCode = 0;
 
-  if (target === 'team' || target === 'all') {
-    console.log(`=== Pulling Team Memory Layer (${teamDir}) ===`);
-    if (!settings.teamRepoUrl) {
-      console.log('Notice: Team memory repository URL is not configured in settings.json.');
-    } else if (!fs.existsSync(path.join(teamDir, '.git'))) {
-      console.log(`Team clone not found. Initializing clone from ${settings.teamRepoUrl}...`);
-      try {
-        fs.mkdirSync(path.dirname(teamDir), { recursive: true });
-        execFileSync('git', ['clone', settings.teamRepoUrl, teamDir], { stdio: 'inherit' });
-        console.log('Team memory cloned successfully.');
-      } catch (err) {
-        console.error(`Error cloning team repository: ${err.message}`);
+  const shouldPullTeam = target === 'team' || target === 'all' || (specificSlug && paths.activeTeamDirs.some(t => t.slug === specificSlug));
+
+  if (shouldPullTeam) {
+    if (paths.activeTeamDirs && paths.activeTeamDirs.length > 0) {
+      const targets = specificSlug 
+        ? paths.activeTeamDirs.filter(t => t.slug === specificSlug)
+        : paths.activeTeamDirs;
+
+      if (targets.length === 0 && specificSlug) {
+        console.error(`Error: Team repository with slug '${specificSlug}' not found in settings.`);
         exitCode = 1;
-      }
-    } else {
-      // Check for uncommitted changes
-      try {
-        const dirty = execFileSync('git', ['status', '--porcelain'], { cwd: teamDir, encoding: 'utf8' }).trim();
-        if (dirty) {
-          console.error('Error: Team working copy has uncommitted changes. Stash or commit before pulling:');
-          console.error(dirty);
-          exitCode = 1;
-        } else {
-          const branch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: teamDir, encoding: 'utf8' }).trim();
-          if (branch.startsWith('promote/')) {
-            console.warn(`Warning: Team clone is currently on a promotion branch: '${branch}'.`);
-            console.warn(`Run 'git -C "${teamDir}" checkout main' before pulling upstream updates.`);
-            exitCode = 1;
-          } else {
-            try {
-              execFileSync('git', ['branch', `--set-upstream-to=origin/${branch}`, branch], { cwd: teamDir, stdio: 'ignore' });
-            } catch {}
-            console.log(`Executing git pull --ff-only on branch '${branch}'...`);
-            const out = execFileSync('git', ['pull', '--ff-only'], { cwd: teamDir, encoding: 'utf8' });
-            console.log(out.trim());
-          }
+      } else {
+        for (const tRepo of targets) {
+          const res = pullSingleRepo(tRepo.dir, `Team Memory [${tRepo.slug}]`, tRepo.url);
+          if (res !== 0) exitCode = res;
+          console.log('');
         }
-      } catch (err) {
-        console.error(`Error pulling team memory: ${err.message}`);
-        exitCode = 1;
       }
+    } else if (settings?.teamRepoUrl) {
+      const res = pullSingleRepo(paths.teamDir, 'Team Memory Layer', settings.teamRepoUrl);
+      if (res !== 0) exitCode = res;
+      console.log('');
+    } else {
+      console.log('=== Team Memory Layer ===\nNotice: Team memory repository URL is not configured in settings.json.\n');
     }
-    console.log('');
   }
 
   if (target === 'private' || target === 'all') {
-    console.log(`=== Pulling Private Memory Layer (${privateDir}) ===`);
-    if (!settings.privateRepoUrl) {
-      console.log('Notice: Private memory repository URL is not configured in settings.json.');
-    } else if (!fs.existsSync(path.join(privateDir, '.git'))) {
-      console.log(`Private clone not found. Initializing clone from ${settings.privateRepoUrl}...`);
-      try {
-        fs.mkdirSync(path.dirname(privateDir), { recursive: true });
-        execFileSync('git', ['clone', settings.privateRepoUrl, privateDir], { stdio: 'inherit' });
-        console.log('Private memory cloned successfully.');
-      } catch (err) {
-        console.error(`Error cloning private repository: ${err.message}`);
-        exitCode = 1;
-      }
-    } else {
-      try {
-        const dirty = execFileSync('git', ['status', '--porcelain'], { cwd: privateDir, encoding: 'utf8' }).trim();
-        if (dirty) {
-          console.error('Error: Private working copy has uncommitted changes. Run /kc-commit before pulling.');
-          exitCode = 1;
-        } else {
-          try {
-            const privBranch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: privateDir, encoding: 'utf8' }).trim() || 'main';
-            execFileSync('git', ['branch', `--set-upstream-to=origin/${privBranch}`, privBranch], { cwd: privateDir, stdio: 'ignore' });
-          } catch {}
-          console.log('Executing git pull --ff-only...');
-          const out = execFileSync('git', ['pull', '--ff-only'], { cwd: privateDir, encoding: 'utf8' });
-          console.log(out.trim());
-        }
-      } catch (err) {
-        console.error(`Error pulling private memory: ${err.message}`);
-        exitCode = 1;
-      }
-    }
+    const res = pullSingleRepo(paths.privateDir, 'Private Memory Layer', settings.privateRepoUrl);
+    if (res !== 0) exitCode = res;
+    console.log('');
   }
 
   process.exit(exitCode);

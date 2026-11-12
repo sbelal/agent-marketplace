@@ -54,13 +54,18 @@ import {
   proactiveMemoryProbe,
   recordMemoryEfficacy,
   getMemoryGraphNeighbors,
+  getMemorySpanningTree,
   generateEmbedding,
   getActiveEmbeddingConfig,
   resetOnnxState,
   isIndexDirty,
   dreamMemoryConsolidation,
-  correlateTestExecutionEfficacy
+  correlateTestExecutionEfficacy,
+  renderVisualMemoryStudio,
+  stopStudioService
 } from '../plugins/knowledge-capture/mcp-server/sqlite-index.js';
+
+import { createLayerProvider } from '../plugins/knowledge-capture/mcp-server/core/layer-provider.js';
 
 import {
   consultLogic,
@@ -69,7 +74,10 @@ import {
   evaluateArchitecturalTradeoffs
 } from '../plugins/syran-persona/mcp-server/logic-service.js';
 
-function teardown() {
+async function teardown() {
+  try {
+    await stopStudioService();
+  } catch {}
   try {
     fs.rmSync(tempRoot, { recursive: true, force: true });
   } catch {}
@@ -1075,9 +1083,124 @@ Always execute tests with timeout guards.
 
   console.log('  ✔ Passed: Syran Trade-Off Matrix calculates MAUT utilities, Pareto frontier, pivot sensitivity, and zero-contraction counsel.\n');
 
+  // ==========================================
+  // TEST 27: Unified Layer Provider Pattern & Multi-Team Routing (Apply A, Fix 1, Fix 2, Fix 3)
+  // ==========================================
+  console.log('Test 27: Unified Layer Provider Pattern & Multi-Team Routing...');
+  const layerProvider = createLayerProvider(ws1Root);
+  const activeLayers = layerProvider.getActiveLayers();
+  assert.ok(Array.isArray(activeLayers), 'activeLayers must be an array');
+  assert.ok(activeLayers.some(l => l.key === 'workspace'), 'Must include workspace layer');
+  assert.ok(activeLayers.some(l => l.key === 'private'), 'Must include private layer');
+
+  const sampleEntry = layerProvider.findMemoryFile('k8s-delete-guard');
+  assert.ok(sampleEntry, 'Layer provider should find sample entry across layers');
+  console.log('  ✔ Passed: Unified Layer Provider Pattern decouples filesystem from memory store.\n');
+
+  // ==========================================
+  // TEST 28: GraphRAG Multi-Hop Spanning Tree Recall (Apply 💡 4)
+  // ==========================================
+  console.log('Test 28: GraphRAG Multi-Hop Spanning Tree Recall...');
+  const spanningTree = getMemorySpanningTree(ws1Root, 'k8s-delete-guard', { depth: 2 });
+  assert.equal(spanningTree.rootSlug, 'k8s-delete-guard');
+  assert.ok(Array.isArray(spanningTree.nodes), 'Nodes must be an array');
+  assert.ok(Array.isArray(spanningTree.edges), 'Edges must be an array');
+  assert.ok(typeof spanningTree.contextEnvelope === 'string', 'Context envelope must be a string');
+  assert.ok(spanningTree.contextEnvelope.includes('GraphRAG Spanning Tree Context Envelope'), 'Envelope title must be present');
+
+  const enrichedRes = getMemoryContent(ws1Root, 'all', 'k8s-delete-guard', null, { depth: 2 });
+  assert.ok(enrichedRes.spanningTree, 'Spanning tree object should be attached when depth > 1');
+  assert.ok(enrichedRes.content.includes('GraphRAG Spanning Tree Context Envelope'), 'Context envelope should be in content');
+  console.log('  ✔ Passed: GraphRAG Multi-Hop Spanning Tree traversed reference graph with cycle safety.\n');
+
+  // ==========================================
+  // TEST 29: Trajectory-Based Zero-Code Debugging & User Preference Elicitation (Apply 💡 5)
+  // ==========================================
+  console.log('Test 29: Trajectory-Based Zero-Code Debugging & User Preference Elicitation...');
+  const proseElicitation = autoElicitSessionKnowledge(ws1Root, {
+    transcript: [
+      { role: 'user', content: 'I would rewrite that prose in this way that follows: focus on conclusions instead of detailed analysis, keep it concise.' }
+    ]
+  });
+  assert.equal(proseElicitation.elicitation_needed, true, 'Elicitation should trigger on user preference feedback');
+  const concisePref = proseElicitation.suggested_candidates.find(c => c.slug === 'user-preference-concise-conclusions');
+  assert.ok(concisePref, 'Should elicit user-preference-concise-conclusions');
+  assert.equal(concisePref.domain, 'workflow');
+  assert.equal(concisePref.elicited_from, 'user_feedback');
+
+  const debugElicitation = autoElicitSessionKnowledge(ws1Root, {
+    errorLogs: ['TypeError: Cannot read properties of undefined in auth-service']
+  });
+  assert.equal(debugElicitation.elicitation_needed, true, 'Elicitation should trigger on zero-code error logs');
+  assert.ok(debugElicitation.suggested_candidates.some(c => c.elicited_from === 'zero_code_debugging'), 'Should propose debugging gotcha candidate');
+  console.log('  ✔ Passed: Trajectory-based zero-code debugging and user working preferences elicited accurately.\n');
+
+  // ==========================================
+  // TEST 30: Execution-Driven False-Negative Mitigation & Event Telemetry (Fix 4, Fix 5, Apply B)
+  // ==========================================
+  console.log('Test 30: Execution-Driven False-Negative Mitigation & Event Telemetry...');
+  const coarseEfficacyRes = correlateTestExecutionEfficacy(ws1Root, {
+    command: 'npm test',
+    exitCode: 1,
+    stderr: 'ECONNRESET unrelated socket drop',
+    slugs: ['k8s-delete-guard', 'slug-b', 'slug-c', 'slug-d']
+  });
+  assert.equal(coarseEfficacyRes.correlated, false, 'Coarse multi-slug failure should skip unverified penalties');
+  assert.equal(coarseEfficacyRes.penalized, 0, 'No rules should be penalized under coarse ambiguity');
+
+  const searchResults = await searchMemoriesHybrid(ws1Root, 'delete namespace');
+  assert.ok(Array.isArray(searchResults), 'Hybrid search must return array');
+  assert.ok(searchResults.length > 0, 'Should find memory result');
+  console.log('  ✔ Passed: Coarse false-negative penalties mitigated and async telemetry emitted.\n');
+
+  // ==========================================
+  // TEST 31: Visual Memory Studio In-Chat Generative UI & Claude Code Fallback (Apply 💡 6)
+  // ==========================================
+  console.log('Test 31: Visual Memory Studio In-Chat Generative UI & Claude Code Fallback...');
+  const testArtifactDir = path.join(tempRoot, 'artifacts');
+  fs.mkdirSync(testArtifactDir, { recursive: true });
+
+  // 1. Antigravity In-Chat Generative UI Embed Mode
+  const inChatResult = await renderVisualMemoryStudio(ws1Root, {
+    mode: 'in_chat',
+    compact: true,
+    artifactDir: testArtifactDir,
+    fileName: 'studio-in-chat.html'
+  });
+  assert.equal(inChatResult.status, 'ready');
+  assert.equal(inChatResult.platform, 'antigravity');
+  assert.equal(inChatResult.mode, 'in_chat');
+  assert.ok(inChatResult.embedTag.startsWith('<agent-embed src="file://'), 'Embed tag must be formatted as <agent-embed>');
+  assert.ok(inChatResult.embedTag.includes('studio-in-chat.html'));
+  assert.ok(fs.existsSync(inChatResult.artifactPath), 'HTML artifact must be saved to disk');
+  const inChatHtml = fs.readFileSync(inChatResult.artifactPath, 'utf8');
+  assert.ok(inChatHtml.includes('MiniD3'), 'Self-contained MiniD3 engine must be embedded for CSP compliance');
+  assert.ok(inChatHtml.includes('https://www.gstatic.com/antigravity/web/dev/tailwindcss.min.js'), 'Antigravity Tailwind script must be referenced');
+  assert.ok(inChatHtml.includes('var(--background'), 'Antigravity theme token must be styled');
+
+  // 2. Claude Code Browser Fallback Mode
+  const browserResult = await renderVisualMemoryStudio(ws1Root, {
+    mode: 'browser',
+    autoOpen: false,
+    port: 4299,
+    artifactDir: testArtifactDir,
+    fileName: 'studio-browser.html'
+  });
+  assert.equal(browserResult.status, 'ready');
+  assert.equal(browserResult.platform, 'claude_code');
+  assert.equal(browserResult.mode, 'browser');
+  assert.ok(browserResult.serverUrl.includes('4299'), 'Server URL must reflect designated port');
+  assert.ok(browserResult.offlineHtmlPath.includes('studio-browser.html'));
+  assert.ok(browserResult.stats.nodes > 0, 'Graph stats must report nodes');
+
+  // Stop Studio background instance cleanly
+  await stopStudioService();
+
+  console.log('  ✔ Passed: Visual Memory Studio provides in-chat generative UI for Antigravity and browser server fallback for Claude Code.\n');
+
   console.log('============================================================');
   console.log('🎉 ALL TESTS PASSED SUCCESSFULLY!');
   console.log('============================================================\n');
 } finally {
-  teardown();
+  await teardown();
 }

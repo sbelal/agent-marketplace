@@ -4,8 +4,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { execSync } from 'node:child_process';
+import { execSync, execFile } from 'node:child_process';
 import { getLayerStatistics } from '../mcp-server/memory-service.js';
+import { resolveStoragePaths } from '../mcp-server/core/storage-paths.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -16,7 +17,7 @@ const pluginRoot = path.dirname(__dirname);
  *
  * Runs upon session startup to:
  * 1. Read ~/.gemini/knowledge-capture/settings.json
- * 2. Execute git pull on configured remote repositories (gracefully degraded if absent)
+ * 2. Execute git pull on configured remote repositories (concurrent non-blocking pulls)
  * 3. Count memory entries across Workspace, Private, and Team layers
  * 4. Audit uncommitted changes, active branches, and upstream divergence
  * 5. Output injectSteps system message via stdout complying with the Antigravity hook schema
@@ -28,12 +29,54 @@ const GIT_EXEC_ENV = {
   GIT_SSH_COMMAND: 'ssh -o BatchMode=yes -o ConnectTimeout=3'
 };
 
+function safeGitPullAsync(repoDir) {
+  return new Promise((resolve) => {
+    if (!fs.existsSync(path.join(repoDir, '.git'))) {
+      return resolve(false);
+    }
+    execFile('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
+      cwd: repoDir,
+      encoding: 'utf8',
+      timeout: 3000,
+      env: GIT_EXEC_ENV
+    }, (err, branchOut) => {
+      if (err) return resolve('failed');
+      const branch = (branchOut || '').trim();
+      if (branch.startsWith('promote/')) {
+        return resolve('on-promote-branch');
+      }
+
+      execFile('git', ['status', '--porcelain'], {
+        cwd: repoDir,
+        encoding: 'utf8',
+        timeout: 3000,
+        env: GIT_EXEC_ENV
+      }, (err2, dirtyOut) => {
+        if (err2) return resolve('failed');
+        const dirty = (dirtyOut || '').trim();
+        if (dirty) {
+          return resolve('dirty');
+        }
+
+        execFile('git', ['pull', '--ff-only'], {
+          cwd: repoDir,
+          encoding: 'utf8',
+          timeout: 4000,
+          env: GIT_EXEC_ENV
+        }, (err3) => {
+          if (err3) return resolve('failed');
+          resolve('success');
+        });
+      });
+    });
+  });
+}
+
 function safeGitPull(repoDir) {
   if (!fs.existsSync(path.join(repoDir, '.git'))) {
     return false;
   }
   try {
-    // Only pull if on main/master and working tree is clean
     const branch = execSync('git rev-parse --abbrev-ref HEAD', {
       cwd: repoDir,
       encoding: 'utf8',
@@ -69,6 +112,7 @@ function safeGitPull(repoDir) {
     return 'failed';
   }
 }
+
 
 function checkPluginUpdateNotice(pluginRoot, pluginName, homeDir) {
   try {
@@ -184,38 +228,51 @@ async function main() {
     // Stdin reading fallback to process.cwd()
   }
 
-  const home = os.homedir();
-  const baseDir = path.join(home, '.gemini', 'knowledge-capture');
-  const settingsPath = path.join(baseDir, 'settings.json');
-  const privateDir = path.join(baseDir, 'private');
-  const teamDir = path.join(baseDir, 'team');
+  const paths = resolveStoragePaths(workspaceRoot);
+  const settings = paths.settings;
+  const privateDir = paths.privateDir;
 
-  let settings = null;
-  if (fs.existsSync(settingsPath)) {
-    try {
-      settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
-    } catch {
-      // Invalid settings handled gracefully
-    }
-  }
-
-  // Pull remote repositories if configured
+  // Pull remote repositories concurrently if configured
   let privateSyncStatus = 'Not configured (Local store active)';
   let teamSyncStatus = 'Not configured';
 
+  const pullTasks = [];
+
   if (settings?.privateRepoUrl) {
-    const res = safeGitPull(privateDir);
-    if (res === 'success') privateSyncStatus = 'Synchronized (Git pull successful)';
-    else if (res === 'dirty') privateSyncStatus = 'Uncommitted changes present (skipped pull)';
-    else privateSyncStatus = 'Offline / Remote unavailable';
+    pullTasks.push(
+      safeGitPullAsync(privateDir).then((res) => {
+        if (res === 'success') privateSyncStatus = 'Synchronized (Git pull successful)';
+        else if (res === 'dirty') privateSyncStatus = 'Uncommitted changes present (skipped pull)';
+        else privateSyncStatus = 'Offline / Remote unavailable';
+      })
+    );
   }
 
-  if (settings?.teamRepoUrl) {
-    const res = safeGitPull(teamDir);
-    if (res === 'success') teamSyncStatus = 'Synchronized (Git pull successful)';
-    else if (res === 'on-promote-branch') teamSyncStatus = 'On promotion branch (manual pull required)';
-    else if (res === 'dirty') teamSyncStatus = 'Uncommitted changes present in team clone';
-    else teamSyncStatus = 'Offline / Remote unavailable';
+  const teamStatuses = [];
+  if (paths.activeTeamDirs && paths.activeTeamDirs.length > 0) {
+    for (const tRepo of paths.activeTeamDirs) {
+      if (tRepo.url) {
+        pullTasks.push(
+          safeGitPullAsync(tRepo.dir).then((res) => {
+            let status = 'Offline / Remote unavailable';
+            if (res === 'success') status = 'Synchronized (Git pull successful)';
+            else if (res === 'on-promote-branch') status = 'On promotion branch (manual pull required)';
+            else if (res === 'dirty') status = 'Uncommitted changes present in team clone';
+            teamStatuses.push(`${tRepo.slug}: ${status}`);
+          })
+        );
+      }
+    }
+  }
+
+  if (pullTasks.length > 0) {
+    await Promise.all(pullTasks);
+  }
+
+  if (teamStatuses.length > 0) {
+    teamSyncStatus = teamStatuses.join(', ');
+  } else if (settings?.teamRepoUrl) {
+    teamSyncStatus = 'Offline / Remote unavailable';
   }
 
   // Retrieve comprehensive layer statistics using pure query service

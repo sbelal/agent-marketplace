@@ -34,6 +34,8 @@ import {
   proactiveMemoryProbe,
   recordMemoryEfficacy,
   getMemoryGraphNeighbors,
+  getMemorySpanningTree,
+  renderVisualMemoryStudio,
   dreamMemoryConsolidation,
   correlateTestExecutionEfficacy
 } from './sqlite-index.js';
@@ -136,8 +138,35 @@ const TOOLS = [
           type: 'array',
           items: { type: 'string' },
           description: 'Optional array of memory slugs to retrieve in a single batch call.'
+        },
+        depth: {
+          type: 'number',
+          description: 'GraphRAG multi-hop spanning tree depth (1 to 3, default: 1). When depth > 1, traverses the memory reference graph and appends a GraphRAG Spanning Tree Context Envelope.'
         }
       }
+    }
+  },
+  {
+    name: 'get_memory_spanning_tree',
+    description:
+      'GraphRAG Multi-Hop Spanning Tree Recall. Traverses the bi-directional memory reference and override graph starting from a root slug up to a specified depth (1 to 3) with cycle detection, returning connected subgraph nodes, edges, and a formatted Context Envelope.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        slug: {
+          type: 'string',
+          description: 'Root memory slug to traverse from.'
+        },
+        depth: {
+          type: 'number',
+          description: 'Maximum traversal depth (1 to 3, default: 2).'
+        },
+        maxNodes: {
+          type: 'number',
+          description: 'Maximum total nodes to include in the spanning tree (default: 15).'
+        }
+      },
+      required: ['slug']
     }
   },
   {
@@ -159,6 +188,10 @@ const TOOLS = [
         slug: {
           type: 'string',
           description: 'Memory slug to inspect for bi-directional graph neighbors.'
+        },
+        depth: {
+          type: 'number',
+          description: 'Optional traversal depth (1 to 3, default: 1).'
         }
       },
       required: ['slug']
@@ -420,15 +453,50 @@ const TOOLS = [
     }
   },
   {
-    name: 'auto_elicit_session_knowledge',
+    name: 'render_visual_memory_studio',
     description:
-      'Inspects current workspace git diffs and modified files to automatically detect and propose session-end memory candidates before closing a session or compacting context.',
+      'Launches or renders the interactive Visual Memory Studio with dual-platform environment adaptation. In Antigravity: generates an in-chat Generative UI artifact (<agent-embed> inline widget or standalone artifact) with full D3/Canvas physics, domain filtering, and connect mode. In Claude Code: launches the local HTTP studio server daemon on localhost:4242, opens the default desktop browser, and provides clickable URLs and terminal fallbacks.',
     inputSchema: {
       type: 'object',
       properties: {
         workspaceRoot: {
           type: 'string',
           description: 'Optional path to the project root directory. Defaults to current working directory.'
+        },
+        mode: {
+          type: 'string',
+          enum: ['auto', 'in_chat', 'browser'],
+          description: "Target mode: 'auto' (auto-detects Antigravity vs Claude Code), 'in_chat' (generates in-chat Generative UI artifact), or 'browser' (launches local HTTP server and opens browser)."
+        },
+        compact: {
+          type: 'boolean',
+          description: 'If true, formats a compact (<= 450px) widget optimized for inline chat embedding.'
+        }
+      }
+    }
+  },
+  {
+    name: 'auto_elicit_session_knowledge',
+    description:
+      'Trajectory-based session knowledge elicitation. Inspects workspace git diffs, modified files, user feedback, preferences ("ways of working"), and zero-code debugging breakthrough signals to automatically detect and propose session-end memory candidates before closing a session or compacting context.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        workspaceRoot: {
+          type: 'string',
+          description: 'Optional path to the project root directory. Defaults to current working directory.'
+        },
+        transcript: {
+          description: 'Optional session conversation transcript (array of message objects or text string) to analyze for user corrections, stylistic preferences, and debugging insights.'
+        },
+        userFeedback: {
+          description: 'Optional explicit user feedback, corrections, or instructions regarding preferences or ways of working.'
+        },
+        recentCommands: {
+          description: 'Optional array or text of recent terminal commands executed during the session.'
+        },
+        errorLogs: {
+          description: 'Optional error messages or stack traces encountered during debugging.'
         }
       }
     }
@@ -715,7 +783,8 @@ function handleRequest(message) {
               workspaceRoot,
               args.layer || 'all',
               args.slug,
-              args.slugs
+              args.slugs,
+              { depth: args.depth || 1 }
             );
             resultData = contentObj.content;
             break;
@@ -726,11 +795,25 @@ function handleRequest(message) {
             break;
 
           case 'get_memory_graph_neighbors':
-            resultData = getMemoryGraphNeighbors(workspaceRoot, args.slug);
+            resultData = getMemoryGraphNeighbors(workspaceRoot, args.slug, {
+              depth: args.depth || 1
+            });
+            break;
+
+          case 'get_memory_spanning_tree':
+            resultData = getMemorySpanningTree(workspaceRoot, args.slug, {
+              depth: args.depth || 2,
+              maxDepth: args.depth || 2,
+              maxNodes: args.maxNodes || 15
+            });
             break;
 
           case 'generate_knowledge_graph_html':
             resultData = generateKnowledgeGraphHtml(workspaceRoot);
+            break;
+
+          case 'render_visual_memory_studio':
+            resultData = await renderVisualMemoryStudio(workspaceRoot, args);
             break;
 
           case 'bootstrap_workspace_memories':
@@ -784,7 +867,7 @@ function handleRequest(message) {
             break;
 
           case 'auto_elicit_session_knowledge':
-            resultData = autoElicitSessionKnowledge(workspaceRoot);
+            resultData = autoElicitSessionKnowledge(workspaceRoot, args);
             break;
 
           case 'detect_contradictions_and_drift':

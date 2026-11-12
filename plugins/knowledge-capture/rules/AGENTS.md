@@ -55,23 +55,25 @@ related: [<related-slug-1>, <related-slug-2>]
 
 ## 3. End-of-Task Elicitation & Full-Envelope Repurposing (`kc-capture`)
 
-Execute at task conclusion (including zero-code architectural or debugging investigations):
+Execute at task conclusion (including zero-code investigations or preference corrections):
 
 ### Qualification Criteria:
 * **Durable:** Reusable across tasks/sessions, not transient state.
 * **Actionable:** Clear instructions on when to apply and what to do.
 * **Specific:** Exact syntax, flags, or root causes—not generic advice.
 * **Novel:** Not already covered in READMEs, official docs, or memory.
+* **Zero-Code Breakthroughs:** Investigations, runtime errors, or tool gotchas requiring 0 file changes.
+* **Ways of Working & User Preferences:** User corrections, prose rewriting feedback (e.g. concise conclusions first vs. detailed analysis), and architectural preferences captured as `preference` or `convention` entries.
 
 ### Repurposing & Defragmentation Protocol:
 1. **Mandatory Pre-Scan:** Always invoke `get_memory_summary(layer="all")` before proposing candidates.
 2. **Full-Envelope Repurposing (`EXTEND` / `REPURPOSE-SLUG`):**
-   When new learnings relate to an existing memory, do not create fragmented sibling files or merely append footnotes. Update all three dimensions:
+   When new learnings relate to an existing memory, do not create fragmented sibling files. Update all three dimensions:
    * **Slug Evolution:** Propose renaming (`REPURPOSE-SLUG`) if scope expands.
    * **Trigger Expansion:** Broaden `description:` to cover both scenarios.
    * **Unified Synthesis:** Refactor `# Title`, `## Why`, and `## How to apply` into a cohesive guide; refresh `verified: YYYY-MM-DD`.
 3. **Co-Triggered Fragmentation Detection (`MERGE`):**
-   If 2+ memories from the same domain were co-retrieved or address tightly coupled facets of one concept, propose merging them (`<slug-a> + <slug-b> -> <merged-slug>`) with an expanded trigger description.
+   If 2+ memories from the same domain were co-retrieved or address tightly coupled facets of one concept, propose merging them (`<slug-a> + <slug-b> -> <merged-slug>`).
 4. **Candidate Approval Table:** Present candidates to the developer before writing to disk:
 
 | Action (CREATE \| EXTEND \| REPURPOSE-SLUG \| MERGE) | Layer | Target Slug (Old -> New) | Domain | Updated Trigger Description | Related Slugs | Summary of Content Synthesis |
@@ -81,7 +83,7 @@ Execute at task conclusion (including zero-code architectural or debugging inves
 5. **Mandatory Approval Halt:** Never write or delete files without explicit user consent.
 6. **Persistence & Reference Re-Wiring:**
    * Write approved `<target-slug>.md` using `save_memory_entry`.
-   * When renaming/merging, remove old file(s) and update all incoming `related:` and `overrides:` references across remaining files.
+   * When renaming/merging, remove old file(s) and re-wire incoming `related:` and `overrides:` references across remaining files.
    * Do not run `git commit`/`push` during capture; remind developer to run `/kc-commit`.
 
 ---
@@ -89,9 +91,10 @@ Execute at task conclusion (including zero-code architectural or debugging inves
 ## 4. MCP Memory Retrieval Protocol (`kc-recall`)
 
 At the start of complex tasks, consult memory with minimal token overhead using Command-Query Separation (CQS):
-* **`search_memories(query, limit?, mode?, format?)`**: High-performance multi-vector hybrid semantic retrieval combining local SQLite FTS5 BM25 with multi-facet dense embeddings (trigger intent 50%, content rule 35%, entity tags 15%) fused via Reciprocal Rank Fusion (RRF). Pure read query. Supports `format: 'compact'` (~15 tokens/card) and `format: 'full'` (expands markdown body).
+* **`search_memories(query, limit?, mode?, format?)`**: Multi-vector hybrid retrieval combining SQLite FTS5 BM25 with dense embeddings (trigger 50%, content 35%, entities 15%) fused via RRF. Pure read query. Supports `format: 'compact'` (~15 tokens/card) and `format: 'full'`.
 * **`get_memory_summary(layer?, domain?, query?, format?)`**: Scans guidelines, shadows overridden entries (`Workspace > Private > Team`), and outputs grouped markdown tables or compact index cards (`format: 'compact'`).
-* **`get_memory_content(layer?, slug?, slugs?)`**: Retrieves full markdown content, frontmatter, and resolved 1-hop related memory graph footer.
+* **`get_memory_content(layer?, slug?, slugs?, depth?)`**: Retrieves full markdown content, frontmatter, and resolved 1-hop related memory graph footer. With `depth: 2..3`, traverses multi-hop reference & override graph via BFS to assemble a structured GraphRAG Spanning Tree Context Envelope.
+* **`get_memory_spanning_tree(slug, depth?, maxNodes?)`**: GraphRAG Multi-Hop Spanning Tree Recall. Traverses connected subgraph with cycle detection, returning envelope context, nodes, and edges.
 * **`get_layer_statistics()`**: Returns layer counts, active domains, stale entry counts (>180d), multi-team repository status, and Git synchronization health.
 * **`manage_team_repositories(action, slug?, url?, name?, cleanDisk?)`**: Command for multi-team memory repositories (`list`, `add`, `activate`, `deactivate`, `remove`, `sync`). Scopes repositories under `team/<slug>/`.
 
@@ -104,13 +107,13 @@ At the start of complex tasks, consult memory with minimal token overhead using 
 * **Repository Bootstrapping (`/kc-bootstrap`):**
   Scans project ADRs (`docs/adr/`), CI workflows (`.github/workflows/`), linters, and Dockerfiles to auto-discover and propose initial Workspace memory rules on day one.
 * **Session-End Auto-Elicitation (`/kc-elicit`):**
-  Audits uncommitted working tree diffs, modified dependencies, and test fixtures at session close (via `SessionEnd` sentinel hook) and proposes structured memory drafts before context loss.
+  Audits uncommitted tree diffs, modified dependencies, error logs, and user feedback/preferences at session close (via `SessionEnd` hook) and proposes structured memory drafts before context loss.
 * **Interactive Visual Memory Studio (`/kc-studio` & `/kc-graph`):**
   Launches the standalone Memory Studio CLI server (`node ./bin/studio.js`) or generates the interactive D3.js canvas artifact. Features force physics, visual Connect Mode, inline node metadata editor, and direct 1-click browser-to-disk persistence via `/api/patch`.
-* **Memory Efficacy & Verification Scoring (`record_memory_efficacy`):**
+* **Memory Efficacy Scoring (`record_memory_efficacy`):**
   Tracks utility metrics and test pass/fail signals to automatically adjust efficacy scores (boosting effective rules, penalizing broken rules).
 * **Semantic Contradiction & Drift Engine (`/kc-drift`):**
-  Audits active memories across all layers for semantic contradictions (opposing directives on similar tasks without explicit `overrides:`) and codebase drift (missing referenced files, runtime engine mismatches, dangling overrides, and staleness).
+  Audits active memories across all layers for semantic contradictions (opposing directives on similar tasks without explicit `overrides:`) and codebase drift (missing referenced files, runtime mismatches, dangling overrides, staleness).
 * **4-Point "Lint & Dream" Consolidation (`/kc-consolidate` / `/kc-dream`):**
   1. Fragmented Slugs: Merge narrow co-triggered slugs in same domain.
   2. Orphaned Overrides & Redundant Copies: Prune entries whose overrides target disappeared upstream.

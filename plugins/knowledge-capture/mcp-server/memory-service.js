@@ -74,3 +74,12 @@ export {
   recordMemoryEfficacy,
   correlateTestExecutionEfficacy
 } from './db/telemetry.js';
+
+export {
+  getMemorySpanningTree
+} from './graph/graph-service.js';
+
+export {
+  renderVisualMemoryStudio,
+  stopStudioService
+} from './graph/studio-launcher.js';

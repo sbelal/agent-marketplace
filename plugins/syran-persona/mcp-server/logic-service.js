@@ -104,7 +104,7 @@ export function getPersonaStatus() {
       first_principles_reasoning: true,
       probability_analysis: true
     },
-    version: '1.0.0'
+    version: '1.1.0'
   };
 }
 
@@ -188,8 +188,10 @@ export function evaluateProbability(hypotheses = [], prior = 0.5) {
   const rawHypotheses = hypotheses.map((h, idx) => {
     const rawWeight = (typeof h.weight === 'number' && h.weight > 0) ? h.weight : 1.0;
     const riskFactor = (typeof h.risk === 'number') ? Math.max(0.0, Math.min(1.0, h.risk)) : 0.5;
-    // Bayesian prior weighting: modulate baseline likelihood with prior probability
-    const priorWeight = idx === 0 ? sanitizedPrior : (1.0 - sanitizedPrior) / Math.max(1, hypotheses.length - 1);
+    // Bayesian prior weighting: modulate baseline likelihood with prior probability (supports hypothesis-level prior or prior parameter)
+    const priorWeight = (typeof h.prior === 'number' && h.prior > 0)
+      ? Math.min(1.0, h.prior)
+      : (idx === 0 ? sanitizedPrior : (1.0 - sanitizedPrior) / Math.max(1, hypotheses.length - 1));
     const likelihood = rawWeight * priorWeight;
     totalLikelihood += likelihood;
     return { label: h.label || 'Unlabeled hypothesis', likelihood, riskFactor };
