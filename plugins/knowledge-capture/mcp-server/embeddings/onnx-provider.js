@@ -33,7 +33,9 @@ export function resetOnnxState() {
  */
 export function getActiveEmbeddingConfig() {
   const onnxAvailable = isOnnxPackageAvailable() && !onnxLoadFailed;
-  const envChoice = process.env.KC_EMBEDDING_ENGINE;
+  const envChoice = typeof process.env.KC_EMBEDDING_ENGINE === 'string'
+    ? process.env.KC_EMBEDDING_ENGINE.trim().toLowerCase()
+    : '';
   if (envChoice) {
     if (envChoice === 'onnx') {
       return { engine: 'onnx', dimensions: 384, onnxAvailable, fallbackActive: !onnxAvailable };
@@ -45,10 +47,13 @@ export function getActiveEmbeddingConfig() {
     const settingsPath = path.join(getStorageDir(), 'settings.json');
     if (fs.existsSync(settingsPath)) {
       const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
-      if (settings.embeddingEngine === 'onnx') {
+      const settingEngine = typeof settings.embeddingEngine === 'string'
+        ? settings.embeddingEngine.trim().toLowerCase()
+        : '';
+      if (settingEngine === 'onnx') {
         return { engine: 'onnx', dimensions: 384, onnxAvailable, fallbackActive: !onnxAvailable };
       }
-      if (settings.embeddingEngine === 'heuristic') {
+      if (settingEngine === 'heuristic') {
         return { engine: 'heuristic', dimensions: 128, onnxAvailable, fallbackActive: false };
       }
     }

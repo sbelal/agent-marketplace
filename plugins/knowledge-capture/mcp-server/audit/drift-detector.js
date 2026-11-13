@@ -183,9 +183,14 @@ function analyzeContradictionsAndDrifts(workspaceRoot, entryVectors, allKnownSlu
               excerpt_a: textA.slice(0, 240).trim(),
               excerpt_b: textB.slice(0, 240).trim()
             },
-            remediation: a.entry.layerKey !== b.entry.layerKey
-              ? `Declare 'overrides: ${b.entry.layerKey === 'team' ? b.entry.slug : a.entry.slug}' in the higher-tier memory file.`
-              : `Consolidate ${a.entry.slug} and ${b.entry.slug} into a unified rule via /kc-consolidate.`
+            remediation: (() => {
+              const rank = { workspace: 3, private: 2, team: 1 };
+              if (a.entry.layerKey !== b.entry.layerKey) {
+                const lowerEntry = (rank[a.entry.layerKey] || 0) >= (rank[b.entry.layerKey] || 0) ? b.entry : a.entry;
+                return `Declare 'overrides: ${lowerEntry.slug}' in the higher-tier memory file.`;
+              }
+              return `Consolidate ${a.entry.slug} and ${b.entry.slug} into a unified rule via /kc-consolidate.`;
+            })()
           });
         }
       }
@@ -221,7 +226,16 @@ function analyzeContradictionsAndDrifts(workspaceRoot, entryVectors, allKnownSlu
       });
     } else {
       const vDate = new Date(entry.verified);
-      if (!isNaN(vDate.getTime())) {
+      if (isNaN(vDate.getTime())) {
+        drifts.push({
+          slug: entry.slug,
+          layer: entry.layerKey,
+          type: 'invalid_verification',
+          severity: 'low',
+          detail: `Memory entry has an invalid 'verified' timestamp: '${entry.verified}'. Expected YYYY-MM-DD.`,
+          remediation: `Inspect rule accuracy and update 'verified: ${new Date().toISOString().slice(0, 10)}'.`
+        });
+      } else {
         const daysOld = Math.floor((now - vDate.getTime()) / ONE_DAY_MS);
         if (daysOld > 180) {
           drifts.push({

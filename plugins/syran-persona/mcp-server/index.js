@@ -194,7 +194,9 @@ function handleRequest(message) {
 
     case 'tools/call': {
       const toolName = params?.name;
-      const args = params?.arguments || {};
+      const args = (params?.arguments && typeof params.arguments === 'object' && !Array.isArray(params.arguments))
+        ? params.arguments
+        : {};
 
       try {
         let resultData = null;

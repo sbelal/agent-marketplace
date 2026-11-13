@@ -31,8 +31,37 @@ export function parseInlineArrayOrList(rawVal) {
   if (!inner) {
     return [];
   }
-  return inner
-    .split(',')
+  const items = [];
+  let current = '';
+  let inQuote = null;
+  for (let i = 0; i < inner.length; i++) {
+    const ch = inner[i];
+    if (inQuote) {
+      if (ch === '\\' && inQuote === '"' && i + 1 < inner.length) {
+        current += ch + inner[++i];
+      } else if (ch === inQuote) {
+        if (inQuote === "'" && inner[i + 1] === "'") {
+          current += "''";
+          i++;
+        } else {
+          inQuote = null;
+          current += ch;
+        }
+      } else {
+        current += ch;
+      }
+    } else if (ch === '"' || ch === "'") {
+      inQuote = ch;
+      current += ch;
+    } else if (ch === ',') {
+      items.push(current);
+      current = '';
+    } else {
+      current += ch;
+    }
+  }
+  items.push(current);
+  return items
     .map((item) => stripQuotes(item).replace(/\.md$/i, ''))
     .filter(Boolean);
 }
@@ -146,7 +175,7 @@ export function parseYamlFrontmatter(fileContent) {
       }
     } else if (currentKey) {
       const colonIndex = trimmedLine.indexOf(':');
-      if (blockStyle === null && colonIndex > 0 && !trimmedLine.startsWith('-')) {
+      if (blockStyle === null && subBlockStyle === null && colonIndex > 0 && !trimmedLine.startsWith('-')) {
         const subKey = trimmedLine.slice(0, colonIndex).trim();
         let subVal = trimmedLine.slice(colonIndex + 1).trim();
 
@@ -167,7 +196,7 @@ export function parseYamlFrontmatter(fileContent) {
         } else {
           frontmatter[currentKey][subKey] = stripQuotes(subVal);
         }
-      } else if (blockStyle === null && trimmedLine.startsWith('-')) {
+      } else if (blockStyle === null && subBlockStyle === null && trimmedLine.startsWith('-')) {
         const item = stripQuotes(trimmedLine.replace(/^-\s*/, '').trim());
         if (isSubMap && currentSubKey) {
           if (!Array.isArray(frontmatter[currentKey][currentSubKey])) {

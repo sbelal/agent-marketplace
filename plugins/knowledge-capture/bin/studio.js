@@ -137,7 +137,7 @@ export function openBrowser(rawUrl) {
 export function startStudioServer(options = {}) {
   const host = options.host || '127.0.0.1';
   const urlHost = formatUrlHost(host);
-  const initialPort = options.port || 4242;
+  const initialPort = options.port ?? 4242;
   const workspaceRoot = options.workspaceRoot || options.workspace || process.cwd();
   const autoOpen = options.autoOpen ?? true;
   const strictPort = options.strictPort ?? false;
@@ -145,7 +145,7 @@ export function startStudioServer(options = {}) {
 
   return new Promise((resolve, reject) => {
     let portAttempt = initialPort;
-    const maxPortAttempts = strictPort ? portAttempt : portAttempt + 20;
+    const maxPortAttempts = (strictPort || initialPort === 0) ? portAttempt : portAttempt + 20;
 
     function tryListen() {
       const server = http.createServer(async (req, res) => {
@@ -277,6 +277,10 @@ export function startStudioServer(options = {}) {
       });
 
       server.listen(portAttempt, host, () => {
+        const addr = server.address();
+        if (addr && typeof addr === 'object' && typeof addr.port === 'number') {
+          portAttempt = addr.port;
+        }
         const boundUrl = `http://${urlHost}:${portAttempt}`;
         if (autoOpen) {
           openBrowser(boundUrl);

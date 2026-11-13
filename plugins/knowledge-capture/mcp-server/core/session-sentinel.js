@@ -200,15 +200,16 @@ export function autoElicitSessionKnowledge(workspaceRoot = process.cwd(), option
 
     if (codeFiles.length > 0 && result.suggested_candidates.length < 3) {
       const primaryFile = codeFiles[0];
-      const moduleName = path.basename(primaryFile, path.extname(primaryFile));
+      const rawModuleName = path.basename(primaryFile, path.extname(primaryFile));
+      const cleanModuleSlug = rawModuleName.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/--+/g, '-').replace(/^-|-$/g, '') || 'module';
       result.suggested_candidates.push({
-        slug: `${moduleName}-session-patterns`,
-        title: `${moduleName} Architecture & Implementation Decisions`,
+        slug: `${cleanModuleSlug}-session-patterns`,
+        title: `${rawModuleName} Architecture & Implementation Decisions`,
         domain: 'architecture',
         type: 'convention',
         layer: 'workspace',
-        description: `When modifying or extending the ${moduleName} module`,
-        suggested_body: `# ${moduleName} Architecture & Implementation Decisions\n\n## Why It Matters\nCore architectural logic was updated in ${primaryFile}.\n\n## How to Apply\n- Maintain separation between core domain logic and platform adapters.\n- Verify cross-platform path resolution.`
+        description: `When modifying or extending the ${rawModuleName} module`,
+        suggested_body: `# ${rawModuleName} Architecture & Implementation Decisions\n\n## Why It Matters\nCore architectural logic was updated in ${primaryFile}.\n\n## How to Apply\n- Maintain separation between core domain logic and platform adapters.\n- Verify cross-platform path resolution.`
       });
     }
   }

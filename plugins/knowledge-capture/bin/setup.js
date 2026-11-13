@@ -127,7 +127,15 @@ export function setupEnvironment(options = {}) {
 
   if (options.removeTeamSlug) {
     const slug = options.removeTeamSlug.trim();
+    const removed = settings.teamRepos.find(item => item.slug === slug);
     settings.teamRepos = settings.teamRepos.filter(item => item.slug !== slug);
+    if (
+      slug === 'default' ||
+      removed?._legacyRoot ||
+      (settings.teamRepos.length === 0 && settings.teamRepoUrl && (!removed || removed.url === settings.teamRepoUrl))
+    ) {
+      settings.teamRepoUrl = '';
+    }
   }
 
   fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf8');
@@ -406,42 +414,51 @@ function runSetupCli() {
   const args = process.argv.slice(2);
   const options = {};
   let hasFlags = false;
+  let parseError = null;
 
-  for (let i = 0; i < args.length; i++) {
-    if (args[i] === '--private-url' && args[i + 1]) {
-      options.privateRepoUrl = args[++i];
-      hasFlags = true;
-    } else if (args[i] === '--team-url' && args[i + 1]) {
-      options.teamRepoUrl = args[++i];
-      hasFlags = true;
-    } else if (args[i] === '--embedding-engine' && args[i + 1]) {
-      options.embeddingEngine = args[++i];
-      hasFlags = true;
-    } else if (args[i].startsWith('--embedding-engine=')) {
-      options.embeddingEngine = args[i].split('=')[1];
-      hasFlags = true;
-    } else if (args[i] === '--no-install') {
-      options.installDependencies = false;
-      hasFlags = true;
-    } else if (args[i] === '--team-repo-slug' && args[i + 1]) {
-      options.teamRepoSlug = args[++i];
-      hasFlags = true;
-    } else if (args[i] === '--team-repo-url' && args[i + 1]) {
-      options.teamRepoUrl = args[++i];
-      hasFlags = true;
-    } else if (args[i] === '--activate-team' && args[i + 1]) {
-      options.activateTeamSlug = args[++i];
-      hasFlags = true;
-    } else if (args[i] === '--deactivate-team' && args[i + 1]) {
-      options.deactivateTeamSlug = args[++i];
-      hasFlags = true;
-    } else if (args[i] === '--remove-team' && args[i + 1]) {
-      options.removeTeamSlug = args[++i];
-      hasFlags = true;
+  const valueFlags = new Map([
+    ['--private-url', 'privateRepoUrl'],
+    ['--team-url', 'teamRepoUrl'],
+    ['--embedding-engine', 'embeddingEngine'],
+    ['--team-repo-slug', 'teamRepoSlug'],
+    ['--team-repo-url', 'teamRepoUrl'],
+    ['--activate-team', 'activateTeamSlug'],
+    ['--deactivate-team', 'deactivateTeamSlug'],
+    ['--remove-team', 'removeTeamSlug']
+  ]);
+
+  try {
+    for (let i = 0; i < args.length; i++) {
+      const arg = args[i];
+      if (arg === '--no-install') {
+        options.installDependencies = false;
+        hasFlags = true;
+        continue;
+      }
+
+      const eqIdx = arg.indexOf('=');
+      const flagName = eqIdx !== -1 ? arg.slice(0, eqIdx) : arg;
+      const optionKey = valueFlags.get(flagName);
+      if (optionKey) {
+        if (eqIdx !== -1) {
+          options[optionKey] = arg.slice(eqIdx + 1);
+        } else {
+          if (i + 1 >= args.length) {
+            throw new Error(`Missing value for flag ${flagName}`);
+          }
+          options[optionKey] = args[++i];
+        }
+        hasFlags = true;
+      }
     }
+  } catch (err) {
+    parseError = err;
   }
 
   try {
+    if (parseError) {
+      throw parseError;
+    }
     if (hasFlags) {
       // Headless mode
       const result = setupEnvironment(options);

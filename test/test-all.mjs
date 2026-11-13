@@ -2492,6 +2492,260 @@ Enforce standard conventions.
 
   console.log('  ✔ Passed: Slug trimming, CLI --update error exit & os.homedir() fallback verified.\n');
 
+  // ==========================================
+  // TEST 49: Team Legacy Removal, setup.js CLI Validation, Memory Store & YAML Parser
+  // ==========================================
+  console.log('Test 49: Legacy Team Removal, setup.js CLI Parsing, Memory Store & YAML Edge Cases...');
+  {
+    // 1. Removing legacy 'default' team repo must clear settings.teamRepoUrl (no resurrection)
+    const teamCleanupStorage = path.join(tempRoot, 'team-cleanup-storage');
+    const teamCleanupDir = path.join(teamCleanupStorage, 'team');
+    fs.mkdirSync(teamCleanupDir, { recursive: true });
+    fs.writeFileSync(path.join(teamCleanupStorage, 'settings.json'), JSON.stringify({
+      privateRepoUrl: 'https://github.com/acme/priv.git',
+      teamRepoUrl: 'https://github.com/acme/legacy-team.git',
+      embeddingEngine: 'heuristic',
+      teamRepos: []
+    }, null, 2), 'utf8');
+    fs.writeFileSync(path.join(teamCleanupDir, 'legacy-note.md'), '---\nname: legacy-note\n---\n# Note\n', 'utf8');
+
+    const prevStorageCleanup = process.env.KC_STORAGE_DIR;
+    process.env.KC_STORAGE_DIR = teamCleanupStorage;
+    try {
+      const setupCliPath = path.resolve(process.cwd(), 'plugins', 'knowledge-capture', 'bin', 'setup.js');
+
+      // Verify setup.js fails on missing value for value-taking flag
+      const missingValRun = spawnSync(process.execPath, [setupCliPath, '--private-url'], {
+        env: { ...process.env, KC_STORAGE_DIR: teamCleanupStorage },
+        encoding: 'utf8'
+      });
+      assert.notEqual(missingValRun.status, 0, 'setup.js must exit non-zero when flag value is missing');
+      assert.match(missingValRun.stderr, /Missing value for flag/, 'setup.js must explain missing flag value');
+
+      // Verify setup.js accepts explicit empty string "" to clear privateRepoUrl
+      const clearPrivRun = spawnSync(process.execPath, [setupCliPath, '--private-url', ''], {
+        env: { ...process.env, KC_STORAGE_DIR: teamCleanupStorage },
+        encoding: 'utf8'
+      });
+      assert.equal(clearPrivRun.status, 0, `setup.js --private-url "" should succeed: ${clearPrivRun.stderr}`);
+      const afterClearPriv = JSON.parse(fs.readFileSync(path.join(teamCleanupStorage, 'settings.json'), 'utf8'));
+      assert.equal(afterClearPriv.privateRepoUrl, '', '--private-url "" must clear privateRepoUrl');
+
+      // Verify removeTeamRepository('default', true) clears teamRepoUrl and cleans legacy root md
+      const remRes = removeTeamRepository(caseWs, { slug: 'default', deleteFiles: true });
+      assert.equal(remRes.removed, true);
+      const afterRemSettings = JSON.parse(fs.readFileSync(path.join(teamCleanupStorage, 'settings.json'), 'utf8'));
+      assert.equal(afterRemSettings.teamRepoUrl, '', 'removeTeamRepository("default") must clear legacy teamRepoUrl');
+      assert.equal(getTeamRepositories(caseWs).length, 0, 'Legacy default repo must not resurrect after removal');
+      assert.equal(fs.existsSync(path.join(teamCleanupDir, 'legacy-note.md')), false, 'deleteFiles must remove legacy root .md');
+    } finally {
+      process.env.KC_STORAGE_DIR = prevStorageCleanup;
+    }
+
+    // 2. Memory store: syncMemoryLayer(null), applyMemoryPatch description/trigger sync, case-insensitive rename guard
+    const syncNullRes = syncMemoryLayer(caseWs, { layer: null });
+    assert.equal(syncNullRes.private.attempted, true, 'syncMemoryLayer({ layer: null }) must safely default to all');
+
+    const patchTarget = saveMemoryEntry(caseWs, {
+      layer: 'workspace',
+      slug: 'patch-trigger-sync',
+      title: 'Patch Trigger Sync',
+      description: 'Initial trigger description',
+      why: 'Test trigger sync',
+      howToApply: 'Keep updated'
+    });
+    const patchTriggerRes = applyMemoryPatch(caseWs, {
+      modified_nodes: [{ slug: 'patch-trigger-sync', description: 'Updated trigger description' }]
+    });
+    assert.equal(patchTriggerRes.nodesUpdated, 1);
+    const reParsedPatched = parseYamlFrontmatter(fs.readFileSync(patchTarget.path, 'utf8'));
+    assert.equal(reParsedPatched.frontmatter.description, 'Updated trigger description');
+    assert.equal(reParsedPatched.frontmatter.trigger, 'Updated trigger description', 'trigger must reflect updated description');
+
+    const renameWs = path.join(tempRoot, 'rename-guard-ws');
+    const renameMemDir = path.join(renameWs, '.agents', 'rules', 'memory');
+    fs.mkdirSync(renameMemDir, { recursive: true });
+    const newCasePath = path.join(renameMemDir, 'case-rule.md');
+    const oldCaseAlias = path.join(renameMemDir, 'Case-Rule.md');
+    fs.writeFileSync(newCasePath, '---\nname: Case-Rule\ndescription: Case test\n---\n# Old\n', 'utf8');
+    try {
+      fs.symlinkSync(newCasePath, oldCaseAlias);
+      saveMemoryEntry(renameWs, {
+        layer: 'workspace',
+        slug: 'case-rule',
+        oldSlug: 'Case-Rule',
+        title: 'Case Rule',
+        description: 'Updated case test',
+        why: 'Verify inode check',
+        howToApply: 'Preserve file'
+      });
+      assert.equal(fs.existsSync(newCasePath), true, 'Target file must remain intact when oldSlug shares same inode');
+    } catch (err) {
+      if (err.code !== 'EPERM') throw err;
+    }
+
+    // 3. YAML parser: quoted commas in inline arrays and nested submap block scalars
+    const quotedYaml = parseYamlFrontmatter(`---
+name: yaml-edge
+related: ["alpha, beta", 'gamma, delta', epsilon]
+meta:
+  notes: |
+    key-like: value-inside-literal
+    - dash-item-inside-literal
+---
+# Body
+`);
+    assert.deepEqual(quotedYaml.frontmatter.related, ['alpha, beta', 'gamma, delta', 'epsilon']);
+    assert.equal(
+      quotedYaml.frontmatter.meta.notes,
+      'key-like: value-inside-literal\n- dash-item-inside-literal',
+      'Nested block scalar lines with colons or dashes must remain part of the scalar'
+    );
+  }
+
+  console.log('  ✔ Passed: Legacy removal, setup CLI validation, memory-store & YAML edge cases verified.\n');
+
+  // ==========================================
+  // TEST 50: Drift Precedence, Bootstrap/Sentinel Slugs, Telemetry, ONNX Env & Studio/Syran/Sync Guards
+  // ==========================================
+  console.log('Test 50: Drift Precedence, Bootstrap/Sentinel Slugs, Telemetry, ONNX & Studio/Syran/Sync...');
+  {
+    // 1. drift-detector: workspace vs private contradiction remediation & invalid verified date
+    const driftEdgeWs = path.join(tempRoot, 'drift-edge-ws');
+    const driftEdgeStorage = path.join(tempRoot, 'drift-edge-storage');
+    fs.mkdirSync(path.join(driftEdgeWs, '.agents', 'rules', 'memory'), { recursive: true });
+    fs.mkdirSync(path.join(driftEdgeStorage, 'private'), { recursive: true });
+    const prevDriftStorage = process.env.KC_STORAGE_DIR;
+    process.env.KC_STORAGE_DIR = driftEdgeStorage;
+    try {
+      saveMemoryEntry(driftEdgeWs, {
+        layer: 'workspace',
+        slug: 'ws-pkg-mgr',
+        domain: 'tooling',
+        type: 'convention',
+        description: 'When installing JavaScript dependencies in the repository',
+        why: 'Workspace uses npm',
+        howToApply: 'Always run npm install for packages.',
+        verified: '2026-11-12'
+      });
+      saveMemoryEntry(driftEdgeWs, {
+        layer: 'private',
+        slug: 'priv-pkg-mgr',
+        domain: 'tooling',
+        type: 'convention',
+        description: 'When installing JavaScript dependencies in the repository',
+        why: 'Private preference uses pnpm',
+        howToApply: 'Never use npm; always use pnpm install for packages.',
+        verified: 'not-a-valid-date'
+      });
+      const driftEdgeRes = detectContradictionsAndDrift(driftEdgeWs);
+      const pkgContra = driftEdgeRes.contradictions.find(c => c.slug_a === 'ws-pkg-mgr' || c.slug_b === 'ws-pkg-mgr');
+      assert.ok(pkgContra, 'Should detect workspace vs private contradiction');
+      assert.match(pkgContra.remediation, /overrides: priv-pkg-mgr/, 'Higher-tier workspace rule should override lower-tier private rule');
+      const invalidVerDrift = driftEdgeRes.drifts.find(d => d.slug === 'priv-pkg-mgr' && d.type === 'invalid_verification');
+      assert.ok(invalidVerDrift, 'Invalid verified timestamp must emit invalid_verification drift');
+    } finally {
+      process.env.KC_STORAGE_DIR = prevDriftStorage;
+    }
+
+    // 2. bootstrap-scanner: invalid targetLayer throws; symbol-only ADR filename uses adr-entry
+    const symAdrDir = path.join(driftEdgeWs, 'docs', 'adr');
+    fs.mkdirSync(symAdrDir, { recursive: true });
+    const symAdrFile = path.join(symAdrDir, '!!!.md');
+    fs.writeFileSync(symAdrFile, '# Decision\nContent.\n', 'utf8');
+    assert.throws(() => ingestTeamAdr(driftEdgeWs, symAdrFile, { targetLayer: 'bogus-layer' }), /Invalid targetLayer/);
+    const bootRes = bootstrapRepoMemories(driftEdgeWs);
+    const symBoot = bootRes.find(c => c.sourceFile.endsWith('!!!.md'));
+    assert.equal(symBoot?.slug, 'adr-entry', 'Symbol-only ADR filename must fall back cleanly to adr-entry');
+
+    // 3. session-sentinel: module filename with spaces/dots/uppercase produces clean kebab-case slug
+    const modSentinelWs = path.join(tempRoot, 'mod-sentinel-ws');
+    fs.mkdirSync(path.join(modSentinelWs, 'src'), { recursive: true });
+    execFileSync('git', ['init'], { cwd: modSentinelWs, stdio: 'ignore' });
+    fs.writeFileSync(path.join(modSentinelWs, 'src', 'My Module.v2.js'), 'export const x = 1;\n', 'utf8');
+    execFileSync('git', ['add', '.'], { cwd: modSentinelWs, stdio: 'ignore' });
+    const modElicit = autoElicitSessionKnowledge(modSentinelWs);
+    const modCand = modElicit.suggested_candidates.find(c => c.slug.endsWith('-session-patterns'));
+    assert.equal(modCand?.slug, 'my-module-v2-session-patterns', 'Module slug must be sanitized to kebab-case');
+
+    // 4. telemetry: null details and non-string stderr must not throw
+    recordTelemetryEvent('ws-pkg-mgr', 'test_pass', null);
+    const corrRes = correlateTestExecutionEfficacy(driftEdgeWs, {
+      command: 'npm test',
+      exitCode: 1,
+      slugs: ['ws-pkg-mgr'],
+      stderr: 12345
+    });
+    assert.equal(corrRes.correlated, true);
+
+    // 5. onnx-provider: case-insensitive KC_EMBEDDING_ENGINE
+    const prevOnnxEnv = process.env.KC_EMBEDDING_ENGINE;
+    process.env.KC_EMBEDDING_ENGINE = '  ONNX  ';
+    try {
+      const onnxCfg = getActiveEmbeddingConfig();
+      assert.equal(onnxCfg.engine, 'onnx');
+      assert.equal(onnxCfg.dimensions, 384);
+    } finally {
+      if (prevOnnxEnv === undefined) delete process.env.KC_EMBEDDING_ENGINE;
+      else process.env.KC_EMBEDDING_ENGINE = prevOnnxEnv;
+    }
+
+    // 6. studio.js ephemeral port 0 + studio-launcher workspace isolation + link description filter
+    const ephemeralStudio = await startStudioServer({
+      workspaceRoot: driftEdgeWs,
+      port: 0,
+      host: '127.0.0.1',
+      autoOpen: false,
+      strictPort: true
+    });
+    try {
+      assert.ok(ephemeralStudio.port > 0 && ephemeralStudio.port !== 4242, `port: 0 must bind ephemeral OS port, got ${ephemeralStudio.port}`);
+      const healthRes = await fetch(`${ephemeralStudio.url}/api/health`);
+      const healthJson = await healthRes.json();
+      assert.equal(healthJson.port, ephemeralStudio.port, '/api/health must report actual ephemeral bound port');
+    } finally {
+      await ephemeralStudio.close();
+    }
+
+    const wsA = path.join(tempRoot, 'studio-ws-a');
+    const wsB = path.join(tempRoot, 'studio-ws-b');
+    fs.mkdirSync(wsA, { recursive: true });
+    fs.mkdirSync(wsB, { recursive: true });
+    const browserA = await renderVisualMemoryStudio(wsA, {
+      mode: 'browser',
+      port: 0,
+      autoOpen: false,
+      artifactDir: path.join(tempRoot, 'artifacts-a')
+    });
+    assert.equal(browserA.serverStarted, true);
+    const inChatB = await renderVisualMemoryStudio(wsB, {
+      mode: 'in_chat',
+      artifactDir: path.join(tempRoot, 'artifacts-b')
+    });
+    const htmlB = fs.readFileSync(inChatB.artifactPath, 'utf8');
+    assert.equal(htmlB.includes(browserA.serverUrl), false, 'in_chat mode for Workspace B must not embed Workspace A serverUrl');
+    assert.match(htmlB, /sDesc\.toLowerCase\(\)\.includes\(q\)/, 'filterGraph linkElements must match node description text');
+    await stopStudioService();
+
+    // 7. syran-persona MCP server must handle array arguments gracefully
+    const syranMcpPath = path.resolve(process.cwd(), 'plugins', 'syran-persona', 'mcp-server', 'index.js');
+    const syranArrayRes = spawnSync(process.execPath, [syranMcpPath], {
+      input: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'syran_get_status', arguments: ['bad'] } }) + '\n',
+      encoding: 'utf8'
+    });
+    assert.equal(syranArrayRes.status, 0);
+    const syranParsed = JSON.parse(syranArrayRes.stdout.trim().split('\n')[0]);
+    assert.ok(syranParsed.result, 'syran-persona MCP server must respond cleanly when arguments is an array');
+
+    // 8. bin/sync-manifests.js --check passes with 0 drift
+    const syncCheckRun = spawnSync(process.execPath, [path.resolve(process.cwd(), 'bin', 'sync-manifests.js'), '--check'], {
+      encoding: 'utf8'
+    });
+    assert.equal(syncCheckRun.status, 0, `sync-manifests --check should exit 0: ${syncCheckRun.stderr}`);
+  }
+
+  console.log('  ✔ Passed: All round regressions, isolation, validation, and manifest checks verified.\n');
+
   console.log('============================================================');
   console.log('🎉 ALL TESTS PASSED SUCCESSFULLY!');
   console.log('============================================================\n');

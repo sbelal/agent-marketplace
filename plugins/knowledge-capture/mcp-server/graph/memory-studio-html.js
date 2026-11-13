@@ -1203,11 +1203,13 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd(), option
         const s = d.source;
         const t = d.target;
         const sSlug = typeof s === 'object' ? (s.slug || s.id || '') : String(s || '');
+        const sDesc = typeof s === 'object' ? (s.description || '') : '';
         const sDomain = typeof s === 'object' ? (s.domain || '') : '';
         const tSlug = typeof t === 'object' ? (t.slug || t.id || '') : String(t || '');
+        const tDesc = typeof t === 'object' ? (t.description || '') : '';
         const tDomain = typeof t === 'object' ? (t.domain || '') : '';
-        const sMatch = (!q || sSlug.toLowerCase().includes(q)) && (activeChips.length === 0 || activeChips.includes(sDomain));
-        const tMatch = (!q || tSlug.toLowerCase().includes(q)) && (activeChips.length === 0 || activeChips.includes(tDomain));
+        const sMatch = (!q || sSlug.toLowerCase().includes(q) || sDesc.toLowerCase().includes(q)) && (activeChips.length === 0 || activeChips.includes(sDomain));
+        const tMatch = (!q || tSlug.toLowerCase().includes(q) || tDesc.toLowerCase().includes(q)) && (activeChips.length === 0 || activeChips.includes(tDomain));
         return (sMatch && tMatch) ? 0.8 : 0.05;
       });
     }

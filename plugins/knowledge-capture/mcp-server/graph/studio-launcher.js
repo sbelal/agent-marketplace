@@ -50,8 +50,10 @@ export async function renderVisualMemoryStudio(workspaceRoot = process.cwd(), op
   const htmlPath = path.join(artifactDir, htmlFileName);
 
   // Start or reuse Studio HTTP server BEFORE rendering HTML in browser mode so the resolved port & token are embedded
-  let serverInfo = activeStudioInstance;
+  const requestedPort = options.port ?? 4242;
+  let serverInfo = null;
   if (mode === 'browser' || (isClaudeCode && mode !== 'in_chat')) {
+    serverInfo = activeStudioInstance;
     if (serverInfo && (activeStudioWorkspace !== resolvedWorkspace || serverInfo.server?.listening === false)) {
       await stopStudioService();
       serverInfo = null;
@@ -60,20 +62,27 @@ export async function renderVisualMemoryStudio(workspaceRoot = process.cwd(), op
       try {
         serverInfo = await startStudioServer({
           workspaceRoot: resolvedWorkspace,
-          port: options.port || 4242,
+          port: requestedPort,
+          strictPort: options.strictPort ?? false,
           autoOpen: options.autoOpen ?? true
         });
         activeStudioInstance = serverInfo;
         activeStudioWorkspace = resolvedWorkspace;
-      } catch {
-        serverInfo = { url: `http://127.0.0.1:${options.port || 4242}`, studioToken: '' };
+      } catch (err) {
+        serverInfo = { url: `http://127.0.0.1:${requestedPort}`, studioToken: '', serverStarted: false, error: err.message };
       }
     } else if (options.autoOpen !== false) {
       openBrowser(serverInfo.url);
     }
+  } else if (
+    activeStudioInstance &&
+    activeStudioWorkspace === resolvedWorkspace &&
+    activeStudioInstance.server?.listening !== false
+  ) {
+    serverInfo = activeStudioInstance;
   }
 
-  const resolvedServerUrl = serverInfo?.url || `http://127.0.0.1:${options.port || 4242}`;
+  const resolvedServerUrl = serverInfo?.url || `http://127.0.0.1:${requestedPort}`;
   const htmlContent = generateKnowledgeGraphHtml(resolvedWorkspace, {
     compact: options.compact ?? (mode === 'in_chat'),
     serverUrl: resolvedServerUrl,
@@ -87,20 +96,25 @@ export async function renderVisualMemoryStudio(workspaceRoot = process.cwd(), op
 
   // 1. Claude Code Fallback: Local HTTP persistence daemon + automatic browser open
   if (mode === 'browser' || (isClaudeCode && mode !== 'in_chat')) {
+    const serverStarted = Boolean(serverInfo?.server);
     return {
-      status: 'ready',
+      status: serverStarted ? 'ready' : 'offline_fallback',
+      serverStarted,
       platform: 'claude_code',
       mode: 'browser',
       workspace: resolvedWorkspace,
       serverUrl: serverInfo.url,
       offlineHtmlPath: htmlPath,
+      ...(serverInfo?.error ? { error: serverInfo.error } : {}),
       stats: {
         nodes: graphData.nodes.length,
         links: graphData.links.length,
         staleCount: graphData.summary.staleNodesCount,
         domains: graphData.summary.domains
       },
-      message: `Visual Memory Studio active at ${serverInfo.url}. Browser launched with direct browser-to-disk persistence via /api/patch.`
+      message: serverStarted
+        ? `Visual Memory Studio active at ${serverInfo.url}. Browser launched with direct browser-to-disk persistence via /api/patch.`
+        : `Visual Memory Studio HTTP server could not start (${serverInfo?.error || 'unknown error'}). Generated offline HTML at ${htmlPath}.`
     };
   }
 

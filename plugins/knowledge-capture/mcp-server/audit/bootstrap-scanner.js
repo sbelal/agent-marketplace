@@ -14,7 +14,11 @@ export function ingestTeamAdr(workspaceRoot, adrFilePath, options = {}) {
     throw new Error(`ADR file not found at ${adrFilePath}`);
   }
 
-  const targetLayer = (options.targetLayer || 'workspace').toLowerCase();
+  const targetLayer = String(options.targetLayer || 'workspace').trim().toLowerCase();
+  const isTeamLayer = targetLayer === 'team' || targetLayer.startsWith('team/');
+  if (targetLayer !== 'workspace' && targetLayer !== 'private' && !isTeamLayer) {
+    throw new Error(`Invalid targetLayer "${options.targetLayer}". Expected 'workspace', 'private', 'team', or 'team/<slug>'.`);
+  }
   const content = fs.readFileSync(adrFilePath, 'utf8');
   const baseName = path.basename(adrFilePath, path.extname(adrFilePath));
   const slug = `adr-${baseName.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`.replace(/--+/g, '-').replace(/^-|-$/g, '') || 'adr-entry';
@@ -23,7 +27,7 @@ export function ingestTeamAdr(workspaceRoot, adrFilePath, options = {}) {
   let targetDir = paths.workspaceDir;
   if (targetLayer === 'private') {
     targetDir = paths.privateDir;
-  } else if (targetLayer === 'team' || targetLayer.startsWith('team/')) {
+  } else if (isTeamLayer) {
     const specifiedSlug = options.teamSlug || (targetLayer.startsWith('team/') ? targetLayer.slice(5) : null);
     if (paths.activeTeamDirs && paths.activeTeamDirs.length > 0) {
       const match = specifiedSlug
@@ -112,9 +116,10 @@ export function bootstrapRepoMemories(workspaceRoot = process.cwd()) {
           const content = fs.readFileSync(f, 'utf8');
           const titleMatch = content.match(/^#\s+(.+)$/m);
           const title = titleMatch ? titleMatch[1].trim() : `ADR: ${base}`;
-          const slug = `adr-${base.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`.replace(/^-|-$/g, '');
+          const slug = `adr-${base.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`.replace(/--+/g, '-').replace(/^-|-$/g, '') || 'adr-entry';
+          const normalizedSlug = slug === 'adr' ? 'adr-entry' : slug;
           addCandidate({
-            slug,
+            slug: normalizedSlug,
             title,
             domain: 'architecture',
             type: 'convention',

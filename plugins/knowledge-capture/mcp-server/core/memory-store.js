@@ -714,7 +714,15 @@ export function saveMemoryEntry(workspaceRoot, params = {}) {
       const lp = createLayerProvider(workspaceRoot);
       const oldMatch = lp.findMemoryFile(cleanOld, normLayer);
       if (oldMatch && oldMatch.path !== targetFile && fs.existsSync(oldMatch.path)) {
-        fs.unlinkSync(oldMatch.path);
+        let sameFile = false;
+        try {
+          const oldStat = fs.statSync(oldMatch.path);
+          const newStat = fs.statSync(targetFile);
+          sameFile = oldStat.dev === newStat.dev && oldStat.ino === newStat.ino;
+        } catch {}
+        if (!sameFile) {
+          fs.unlinkSync(oldMatch.path);
+        }
       }
     }
     rewiredCount = rewireMemoryReferences(workspaceRoot, oldSlug, cleanSlug);
@@ -885,12 +893,15 @@ export function syncMemoryLayer(workspaceRoot, params = {}) {
     }
   };
 
-  if (layer === 'all' || layer === 'private') {
+  const normLayer = String(layer || 'all').trim().toLowerCase() || 'all';
+  const teamTargetSlug = normLayer.startsWith('team/') ? normLayer.slice(5) : normLayer;
+
+  if (normLayer === 'all' || normLayer === 'private') {
     results.private = { attempted: true, ...syncRepo(paths.privateDir) };
   }
   const hasConfiguredTeamRepos = Array.isArray(paths.settings?.teamRepos) && paths.settings.teamRepos.length > 0;
-  const specificTeam = paths.activeTeamDirs ? paths.activeTeamDirs.find(t => t.slug.toLowerCase() === layer.toLowerCase()) : null;
-  if (layer === 'all' || layer === 'team' || specificTeam) {
+  const specificTeam = paths.activeTeamDirs ? paths.activeTeamDirs.find(t => t.slug.toLowerCase() === teamTargetSlug) : null;
+  if (normLayer === 'all' || normLayer === 'team' || specificTeam) {
     if (specificTeam) {
       const res = syncRepo(specificTeam.dir);
       results.team = {
@@ -1138,7 +1149,10 @@ export function applyMemoryPatch(workspaceRoot = process.cwd(), patchData = {}) 
       const parsed = parseYamlFrontmatter(raw);
       if (mod.domain) parsed.frontmatter.domain = mod.domain;
       if (mod.type) parsed.frontmatter.type = mod.type;
-      if (mod.description) parsed.frontmatter.description = mod.description;
+      if (mod.description) {
+        parsed.frontmatter.description = mod.description;
+        delete parsed.frontmatter.trigger;
+      }
       if (mod.verified) parsed.frontmatter.verified = mod.verified;
 
       const newContent = serializeYamlFrontmatter(parsed.frontmatter, parsed.body);

@@ -294,16 +294,35 @@ export function removeTeamRepository(arg1 = process.cwd(), arg2 = {}, arg3 = nul
     throw new Error(`Team repository with slug "${slug}" not found.`);
   }
 
-  settings.teamRepos.splice(idx, 1);
+  const [removedRepo] = settings.teamRepos.splice(idx, 1);
+  if (
+    slug === 'default' ||
+    removedRepo?._legacyRoot ||
+    (settings.teamRepos.length === 0 && settings.teamRepoUrl && removedRepo?.url === settings.teamRepoUrl)
+  ) {
+    settings.teamRepoUrl = '';
+  }
   saveSettings(settings, paths.baseDir);
 
   if (deleteFiles) {
-    const targetDir = assertContainment(path.join(paths.teamDir, slug), paths.teamDir, 'team directory');
-    try {
-      if (fs.existsSync(targetDir)) {
+    const subDir = path.join(paths.teamDir, slug);
+    if (fs.existsSync(subDir)) {
+      const targetDir = assertContainment(subDir, paths.teamDir, 'team directory');
+      try {
         fs.rmSync(targetDir, { recursive: true, force: true });
-      }
-    } catch {}
+      } catch {}
+    } else if (removedRepo?._legacyRoot && fs.existsSync(paths.teamDir)) {
+      try {
+        const entries = fs.readdirSync(paths.teamDir, { withFileTypes: true });
+        for (const entry of entries) {
+          if (entry.isFile() && entry.name.endsWith('.md')) {
+            fs.unlinkSync(path.join(paths.teamDir, entry.name));
+          } else if (entry.isDirectory() && entry.name === '.git' && settings.teamRepos.length === 0) {
+            fs.rmSync(path.join(paths.teamDir, '.git'), { recursive: true, force: true });
+          }
+        }
+      } catch {}
+    }
   }
 
   return {

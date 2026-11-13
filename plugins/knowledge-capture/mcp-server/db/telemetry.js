@@ -52,7 +52,7 @@ export function recordTelemetryEvent(slug, eventType = 'recall', details = {}) {
               efficacy_score = MIN(1.0, efficacy_score + 0.05),
               last_feedback = ?
           WHERE slug = ?
-        `).run(details.message || 'test_passed', canonSlug);
+        `).run(details?.message || 'test_passed', canonSlug);
       } else if (eventType === 'test_fail') {
         db.prepare(`
           UPDATE telemetry 
@@ -60,7 +60,7 @@ export function recordTelemetryEvent(slug, eventType = 'recall', details = {}) {
               efficacy_score = MAX(0.1, efficacy_score - 0.20),
               last_feedback = ?
           WHERE slug = ?
-        `).run(details.message || 'test_failed', canonSlug);
+        `).run(details?.message || 'test_failed', canonSlug);
       } else {
         db.prepare(`
           UPDATE telemetry SET recalled_count = recalled_count + 1, last_recalled = ? WHERE slug = ?
@@ -90,11 +90,11 @@ export function recordTelemetryEvent(slug, eventType = 'recall', details = {}) {
   } else if (eventType === 'test_pass') {
     data[canonSlug].test_pass_count = (data[canonSlug].test_pass_count || 0) + 1;
     data[canonSlug].efficacy_score = Math.min(1.0, (data[canonSlug].efficacy_score || 1.0) + 0.05);
-    data[canonSlug].last_feedback = details.message || 'test_passed';
+    data[canonSlug].last_feedback = details?.message || 'test_passed';
   } else if (eventType === 'test_fail') {
     data[canonSlug].test_fail_count = (data[canonSlug].test_fail_count || 0) + 1;
     data[canonSlug].efficacy_score = Math.max(0.1, (data[canonSlug].efficacy_score || 1.0) - 0.20);
-    data[canonSlug].last_feedback = details.message || 'test_failed';
+    data[canonSlug].last_feedback = details?.message || 'test_failed';
   } else {
     data[canonSlug].recalled_count = (data[canonSlug].recalled_count || 0) + 1;
     data[canonSlug].last_recalled = nowIso;
@@ -158,7 +158,11 @@ export function correlateTestExecutionEfficacy(workspaceRoot = process.cwd(), op
       } catch {}
     } else {
       const data = readTelemetryJson();
-      targetSlugs = Object.keys(data).slice(0, 5);
+      targetSlugs = Object.entries(data)
+        .filter(([, entry]) => entry && (entry.last_applied || entry.last_recalled))
+        .sort(([, a], [, b]) => String(b.last_applied || b.last_recalled).localeCompare(String(a.last_applied || a.last_recalled)))
+        .slice(0, 5)
+        .map(([slug]) => slug);
     }
   }
 
@@ -180,7 +184,7 @@ export function correlateTestExecutionEfficacy(workspaceRoot = process.cwd(), op
     }
     results.correlated = results.correlatedSlugs.length > 0;
   } else {
-    const failureText = `${stdout}\n${stderr}`.toLowerCase();
+    const failureText = `${stdout ?? ''}\n${stderr ?? ''}`.toLowerCase();
     for (const s of targetSlugs) {
       const slugKey = s.replace(/-/g, ' ');
       const slugTokens = s.split('-').filter(t => t.length > 2);
@@ -194,9 +198,10 @@ export function correlateTestExecutionEfficacy(workspaceRoot = process.cwd(), op
       const isCorrelated = textCorrelates || (explicitSlugsProvided && targetSlugs.length <= 2 && options.explicitAttribution !== false);
 
       if (isCorrelated) {
+        const rawSnippet = stderr !== undefined && stderr !== null && stderr !== '' ? stderr : (stdout ?? '');
         const updated = recordMemoryEfficacy(s, 'test_fail', {
           command,
-          message: `Correlated with test failure: ${(stderr || stdout).slice(0, 200)}`
+          message: `Correlated with test failure: ${String(rawSnippet).slice(0, 200)}`
         });
         results.correlatedSlugs.push(s);
         results.updatedScores[s] = updated.efficacy_score;

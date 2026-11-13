@@ -170,7 +170,7 @@ function buildDerivedConfigs(pluginId, manifest) {
 
 function syncFile(targetPath, expectedContent, { checkMode = false, repoRoot = REPO_ROOT } = {}) {
   const parent = path.dirname(targetPath);
-  if (!fs.existsSync(parent)) {
+  if (!checkMode && !fs.existsSync(parent)) {
     fs.mkdirSync(parent, { recursive: true });
   }
 
