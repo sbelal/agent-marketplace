@@ -7,7 +7,8 @@ import { getActiveEmbeddingConfig } from '../embeddings/onnx-provider.js';
 import { loadCachedVectorsMap } from '../db/indexer.js';
 
 function clusterItemsForConsolidation(workspaceRoot, items, options = {}) {
-  const threshold = (typeof options.threshold === 'number' && Number.isFinite(options.threshold)) ? options.threshold : 0.65;
+  const hasExplicitThreshold = typeof options.threshold === 'number' && Number.isFinite(options.threshold);
+  const threshold = hasExplicitThreshold ? options.threshold : 0.65;
   const clusters = [];
   const assigned = new Set();
 
@@ -30,7 +31,10 @@ function clusterItemsForConsolidation(workspaceRoot, items, options = {}) {
       );
 
       const sameDomain = items[i].domain === items[j].domain;
-      if (triggerSim >= threshold || (sameDomain && (triggerSim >= 0.50 || contentSim >= 0.55))) {
+      const shouldCluster = hasExplicitThreshold
+        ? (triggerSim >= threshold || (sameDomain && contentSim >= Math.max(threshold, 0.55)))
+        : (triggerSim >= threshold || (sameDomain && (triggerSim >= 0.50 || contentSim >= 0.55)));
+      if (shouldCluster) {
         clusterMembers.push(items[j]);
         assigned.add(items[j].slug);
       }
@@ -102,6 +106,7 @@ function loadDreamCandidates(workspaceRoot, options = {}) {
 export function dreamMemoryConsolidation(workspaceRoot = process.cwd(), options = {}) {
   const { candidates, cachedVectors } = loadDreamCandidates(workspaceRoot, options);
   const items = [];
+  let hasUncached = false;
 
   for (const entry of candidates) {
     let body = '';
@@ -112,7 +117,9 @@ export function dreamMemoryConsolidation(workspaceRoot = process.cwd(), options 
     } catch {}
 
     const cacheKey = `${entry.layerKey}:${entry.teamSlug || ''}:${entry.file}`;
-    const multiVec = cachedVectors.get(cacheKey) || generateMultiVector({
+    const cachedVec = cachedVectors.get(cacheKey);
+    if (!cachedVec) hasUncached = true;
+    const multiVec = cachedVec || generateMultiVector({
       trigger: entry.trigger,
       body,
       slug: entry.slug,
@@ -132,6 +139,22 @@ export function dreamMemoryConsolidation(workspaceRoot = process.cwd(), options 
       overrides: entry.overrides || null,
       multiVec
     });
+  }
+
+  // Prevent dimension mismatch if some entries had cached 384-d ONNX vectors while uncached ones fell back to 128-d
+  if (hasUncached && items.some(it => it.multiVec.trigger_vector.length !== 128)) {
+    for (const it of items) {
+      if (it.multiVec.trigger_vector.length !== 128) {
+        it.multiVec = generateMultiVector({
+          trigger: it.trigger,
+          body: it.body,
+          slug: it.slug,
+          domain: it.domain,
+          type: it.type,
+          related: it.related
+        });
+      }
+    }
   }
 
   return clusterItemsForConsolidation(workspaceRoot, items, options);

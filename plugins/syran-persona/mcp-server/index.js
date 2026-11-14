@@ -244,6 +244,7 @@ function handleRequest(message) {
             return;
         }
 
+        const isToolError = Boolean(resultData && (resultData.status === 'error' || resultData.error));
         sendJsonRpc({
           jsonrpc: '2.0',
           id,
@@ -253,7 +254,8 @@ function handleRequest(message) {
                 type: 'text',
                 text: JSON.stringify(resultData, null, 2)
               }
-            ]
+            ],
+            ...(isToolError ? { isError: true } : {})
           }
         });
       } catch (err) {

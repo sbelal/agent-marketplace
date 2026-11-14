@@ -18,6 +18,7 @@ const {
   resolveSourceConfigPath,
   getPluginsConfig,
   findSourceEntry,
+  findMarketplaceSourceEntry,
   addSourceEntry,
   removeSourceEntry
 } = require('./source-manager');
@@ -479,15 +480,24 @@ function runInteractiveWizard() {
       const inventory = getPluginInventory(REPO_ROOT, WORKSPACE_DIR, HOME_DIR);
       let count = 0;
       for (const p of inventory.items) {
+        const display = p.displayName || p.name;
         if (p.workspaceNeedsUpdate) {
-          console.log(`Upgrading ${p.name} (Workspace)...`);
-          updatePlugin(p.id, REPO_ROOT, 'workspace', WORKSPACE_DIR, HOME_DIR);
-          count++;
+          console.log(`Upgrading ${display} (Workspace)...`);
+          try {
+            updatePlugin(p.id, REPO_ROOT, 'workspace', WORKSPACE_DIR, HOME_DIR);
+            count++;
+          } catch (err) {
+            console.error(`\x1b[31m✖ Failed updating ${display} (Workspace): ${err.message}\x1b[0m`);
+          }
         }
         if (p.globalNeedsUpdate) {
-          console.log(`Upgrading ${p.name} (Global)...`);
-          updatePlugin(p.id, REPO_ROOT, 'global', WORKSPACE_DIR, HOME_DIR);
-          count++;
+          console.log(`Upgrading ${display} (Global)...`);
+          try {
+            updatePlugin(p.id, REPO_ROOT, 'global', WORKSPACE_DIR, HOME_DIR);
+            count++;
+          } catch (err) {
+            console.error(`\x1b[31m✖ Failed updating ${display} (Global): ${err.message}\x1b[0m`);
+          }
         }
       }
       console.log(`\x1b[32m\nUpgraded ${count} plugin(s).\x1b[0m\n`);
@@ -548,7 +558,8 @@ function runInteractiveWizard() {
     } else if (sel === '3' || sel === '4') {
       const scope = sel === '3' ? 'workspace' : 'global';
       const configPath = resolveSourceConfigPath(scope, WORKSPACE_DIR, HOME_DIR);
-      const targetSourcePath = resolveSourceRegistrationPath(REPO_ROOT, HOME_DIR);
+      const matchedEntry = findMarketplaceSourceEntry(getPluginsConfig(configPath), REPO_ROOT, HOME_DIR);
+      const targetSourcePath = matchedEntry ? matchedEntry.path : resolveSourceRegistrationPath(REPO_ROOT, HOME_DIR);
       const removed = removeSourceEntry(configPath, targetSourcePath);
       if (removed) {
         console.log(`\x1b[32m✔ Successfully removed source from ${configPath}.\x1b[0m`);
@@ -662,7 +673,11 @@ Options:
     const configPath = resolveSourceConfigPath(scope, WORKSPACE_DIR, HOME_DIR);
     const targetSourcePath = resolveSourceRegistrationPath(REPO_ROOT, HOME_DIR);
     if (isNpxExecution(REPO_ROOT)) {
-      ensurePermanentSourceClone(targetSourcePath);
+      const cloned = ensurePermanentSourceClone(targetSourcePath);
+      if (!cloned) {
+        console.error('\x1b[31m✖ Failed to clone or update permanent marketplace source cache.\x1b[0m');
+        process.exit(1);
+      }
     }
     const added = addSourceEntry(configPath, targetSourcePath);
     const plugins = getAvailablePlugins(REPO_ROOT);
@@ -768,7 +783,8 @@ Options:
     }
     if (uninstallArg.toLowerCase() === 'source') {
       const configPath = resolveSourceConfigPath(scope, WORKSPACE_DIR, HOME_DIR);
-      const targetSourcePath = resolveSourceRegistrationPath(REPO_ROOT, HOME_DIR);
+      const matchedEntry = findMarketplaceSourceEntry(getPluginsConfig(configPath), REPO_ROOT, HOME_DIR);
+      const targetSourcePath = matchedEntry ? matchedEntry.path : resolveSourceRegistrationPath(REPO_ROOT, HOME_DIR);
       const removed = removeSourceEntry(configPath, targetSourcePath);
       if (removed) {
         console.log(`\x1b[32m✔ Successfully removed source from ${configPath}.\x1b[0m`);
@@ -777,11 +793,13 @@ Options:
       }
     } else {
       try {
-        const res = uninstallPlugin(uninstallArg, scope, WORKSPACE_DIR, HOME_DIR);
+        const matched = getAvailablePlugins(REPO_ROOT).find(p => p.id.toLowerCase() === uninstallArg.toLowerCase());
+        const targetId = matched ? matched.id : uninstallArg;
+        const res = uninstallPlugin(targetId, scope, WORKSPACE_DIR, HOME_DIR);
         if (res.success) {
-          console.log(`\x1b[32m✔ Successfully uninstalled ${uninstallArg} from ${scope}.\x1b[0m`);
+          console.log(`\x1b[32m✔ Successfully uninstalled ${targetId} from ${scope}.\x1b[0m`);
         } else {
-          console.log(`\x1b[33mPlugin ${uninstallArg} was not found in ${scope}.\x1b[0m`);
+          console.log(`\x1b[33mPlugin ${targetId} was not found in ${scope}.\x1b[0m`);
         }
       } catch (err) {
         console.error(`\x1b[31m✖ Failed uninstalling ${uninstallArg}: ${err.message}\x1b[0m`);

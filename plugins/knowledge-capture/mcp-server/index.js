@@ -348,11 +348,19 @@ const TOOLS = [
         why: { type: 'string', description: 'Consolidated rationale.' },
         howToApply: { type: 'string', description: 'Consolidated instructions.' },
         body: { type: 'string', description: 'Alternative full body.' },
-        type: { type: 'string', description: 'Guideline type.' },
+        type: {
+          type: 'string',
+          enum: ['convention', 'tool-gotcha', 'platform-fact', 'personal-preference'],
+          description: 'Guideline type.'
+        },
         domain: { type: 'string', description: 'Taxonomic category.' },
         description: { type: 'string', description: 'Expanded trigger description covering both scenarios.' },
         verified: { type: 'string', description: 'Verification date (YYYY-MM-DD).' },
-        related: { type: 'array', items: { type: 'string' } }
+        related: { type: 'array', items: { type: 'string' } },
+        overrides: {
+          type: 'string',
+          description: 'Comma-separated lower-tier memory slugs superseded by this merged entry.'
+        }
       },
       required: ['layer', 'targetSlug', 'sourceSlugs', 'description']
     }
@@ -422,7 +430,7 @@ const TOOLS = [
   {
     name: 'ingest_team_adr',
     description:
-      'Ingests an Architectural Decision Record (ADR) markdown file directly into the Team memory layer.',
+      'Ingests an Architectural Decision Record (ADR) markdown file into a target memory layer (defaults to workspace; supports workspace, private, or team).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -506,15 +514,19 @@ const TOOLS = [
           description: 'Optional path to the project root directory. Defaults to current working directory.'
         },
         transcript: {
+          anyOf: [{ type: 'string' }, { type: 'array' }],
           description: 'Optional session conversation transcript (array of message objects or text string) to analyze for user corrections, stylistic preferences, and debugging insights.'
         },
         userFeedback: {
+          type: 'string',
           description: 'Optional explicit user feedback, corrections, or instructions regarding preferences or ways of working.'
         },
         recentCommands: {
+          anyOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }],
           description: 'Optional array or text of recent terminal commands executed during the session.'
         },
         errorLogs: {
+          anyOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }],
           description: 'Optional error messages or stack traces encountered during debugging.'
         }
       }
@@ -616,7 +628,7 @@ const TOOLS = [
   {
     name: 'audit_team_conflicts',
     description:
-      'Audits multi-repository and team synchronization for potential conflicts (divergent overrides, conflicting rule bodies, missing dependencies). Returns detected conflicts with 3-way visual diffs.',
+      'Audits multi-repository and team synchronization for divergence conflicts between private and team layers (divergent overrides, conflicting rule triggers or bodies). Returns detected conflicts with 3-way diff summaries.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1020,16 +1032,16 @@ async function handleRequest(message) {
             if (action === 'list') {
               resultData = getTeamRepositories(workspaceRoot);
             } else if (action === 'add') {
-              resultData = addTeamRepository(slug, url, name, workspaceRoot);
+              resultData = addTeamRepository(workspaceRoot, { slug, url, name });
               await syncSqliteIndex(workspaceRoot);
             } else if (action === 'activate') {
-              resultData = setTeamRepositoryActive(slug, true, workspaceRoot);
+              resultData = setTeamRepositoryActive(workspaceRoot, { slug, active: true });
               await syncSqliteIndex(workspaceRoot);
             } else if (action === 'deactivate') {
-              resultData = setTeamRepositoryActive(slug, false, workspaceRoot);
+              resultData = setTeamRepositoryActive(workspaceRoot, { slug, active: false });
               await syncSqliteIndex(workspaceRoot);
             } else if (action === 'remove') {
-              resultData = removeTeamRepository(slug, cleanDisk === true, workspaceRoot);
+              resultData = removeTeamRepository(workspaceRoot, { slug, cleanDisk: cleanDisk === true });
               await syncSqliteIndex(workspaceRoot);
             } else if (action === 'sync') {
               resultData = syncTeamRepositories(workspaceRoot, { slug });
@@ -1074,7 +1086,7 @@ async function handleRequest(message) {
             return;
         }
 
-        const formattedText = typeof resultData === 'string' ? resultData : JSON.stringify(resultData, null, 2);
+        const formattedText = typeof resultData === 'string' ? resultData : JSON.stringify(resultData ?? null, null, 2);
 
         sendJsonRpc({
           jsonrpc: '2.0',

@@ -30,7 +30,8 @@ export async function renderVisualMemoryStudio(workspaceRoot = process.cwd(), op
   );
 
   const resolvedWorkspace = path.resolve(workspaceRoot);
-  const mode = options.mode || (isClaudeCode ? 'browser' : 'in_chat');
+  const requestedMode = (options.mode && options.mode !== 'auto') ? options.mode : null;
+  const mode = requestedMode || (isClaudeCode ? 'browser' : 'in_chat');
   const graphData = getKnowledgeGraphData(resolvedWorkspace);
   const paths = resolveStoragePaths(resolvedWorkspace);
 
@@ -82,11 +83,12 @@ export async function renderVisualMemoryStudio(workspaceRoot = process.cwd(), op
     serverInfo = activeStudioInstance;
   }
 
-  const resolvedServerUrl = serverInfo?.url || `http://127.0.0.1:${requestedPort}`;
+  const resolvedServerUrl = serverInfo?.server ? serverInfo.url : '';
+  const isCompact = Boolean(options.compact ?? (mode === 'in_chat'));
   const htmlContent = generateKnowledgeGraphHtml(resolvedWorkspace, {
-    compact: options.compact ?? (mode === 'in_chat'),
+    compact: isCompact,
     serverUrl: resolvedServerUrl,
-    studioToken: serverInfo?.studioToken || ''
+    studioToken: serverInfo?.server ? (serverInfo?.studioToken || '') : ''
   });
 
   try {
@@ -102,6 +104,7 @@ export async function renderVisualMemoryStudio(workspaceRoot = process.cwd(), op
       serverStarted,
       platform: 'claude_code',
       mode: 'browser',
+      compact: isCompact,
       workspace: resolvedWorkspace,
       serverUrl: serverInfo.url,
       offlineHtmlPath: htmlPath,
@@ -124,6 +127,7 @@ export async function renderVisualMemoryStudio(workspaceRoot = process.cwd(), op
     status: 'ready',
     platform: 'antigravity',
     mode: 'in_chat',
+    compact: isCompact,
     artifactPath: htmlPath,
     embedTag: embedCode,
     stats: {

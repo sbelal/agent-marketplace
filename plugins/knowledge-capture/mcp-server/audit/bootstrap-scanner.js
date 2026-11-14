@@ -10,8 +10,11 @@ import { atomicWriteFileSync } from '../core/memory-store.js';
  * Ingests an Architectural Decision Record (ADR) file cleanly into memory.
  */
 export function ingestTeamAdr(workspaceRoot, adrFilePath, options = {}) {
-  if (!fs.existsSync(adrFilePath)) {
-    throw new Error(`ADR file not found at ${adrFilePath}`);
+  const resolvedAdrPath = path.isAbsolute(adrFilePath)
+    ? adrFilePath
+    : path.resolve(workspaceRoot || process.cwd(), adrFilePath);
+  if (!fs.existsSync(resolvedAdrPath)) {
+    throw new Error(`ADR file not found at ${resolvedAdrPath}`);
   }
 
   const targetLayer = String(options.targetLayer || 'workspace').trim().toLowerCase();
@@ -19,9 +22,10 @@ export function ingestTeamAdr(workspaceRoot, adrFilePath, options = {}) {
   if (targetLayer !== 'workspace' && targetLayer !== 'private' && !isTeamLayer) {
     throw new Error(`Invalid targetLayer "${options.targetLayer}". Expected 'workspace', 'private', 'team', or 'team/<slug>'.`);
   }
-  const content = fs.readFileSync(adrFilePath, 'utf8');
-  const baseName = path.basename(adrFilePath, path.extname(adrFilePath));
-  const slug = `adr-${baseName.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`.replace(/--+/g, '-').replace(/^-|-$/g, '') || 'adr-entry';
+  const content = fs.readFileSync(resolvedAdrPath, 'utf8');
+  const baseName = path.basename(resolvedAdrPath, path.extname(resolvedAdrPath));
+  let slug = `adr-${baseName.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`.replace(/--+/g, '-').replace(/^-|-$/g, '') || 'adr-entry';
+  if (slug === 'adr') slug = 'adr-entry';
 
   const paths = resolveStoragePaths(workspaceRoot);
   let targetDir = paths.workspaceDir;
@@ -67,13 +71,50 @@ export function ingestTeamAdr(workspaceRoot, adrFilePath, options = {}) {
 
   let branchName = null;
   if ((targetLayer === 'team' || targetLayer.startsWith('team/')) && fs.existsSync(path.join(targetDir, '.git'))) {
-    branchName = `adr/${slug}`;
+    const dirtyOut = execFileSync('git', ['status', '--porcelain'], {
+      cwd: targetDir,
+      env: GIT_EXEC_ENV,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe']
+    }).trim();
+    if (dirtyOut) {
+      throw new Error(`Team repository at '${targetDir}' has uncommitted changes. Commit or stash before ingesting ADR.`);
+    }
+
+    const desiredBranch = `adr/${slug}`;
+    let baseBranch = null;
     try {
-      execFileSync('git', ['checkout', '-b', branchName], { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
+      const sym = execFileSync('git', ['symbolic-ref', 'refs/remotes/origin/HEAD', '--short'], {
+        cwd: targetDir,
+        env: GIT_EXEC_ENV,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore']
+      }).trim();
+      if (sym) baseBranch = sym.replace(/^origin\//, '');
+    } catch {}
+    if (!baseBranch) {
+      for (const cand of ['main', 'master']) {
+        try {
+          execFileSync('git', ['rev-parse', '--verify', '--quiet', `refs/heads/${cand}`], {
+            cwd: targetDir,
+            env: GIT_EXEC_ENV,
+            stdio: 'ignore'
+          });
+          baseBranch = cand;
+          break;
+        } catch {}
+      }
+    }
+    if (baseBranch) {
+      execFileSync('git', ['checkout', baseBranch], { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
+    }
+
+    try {
+      execFileSync('git', ['checkout', '-b', desiredBranch], { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
+      branchName = desiredBranch;
     } catch {
-      try {
-        execFileSync('git', ['checkout', branchName], { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
-      } catch {}
+      execFileSync('git', ['checkout', desiredBranch], { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
+      branchName = desiredBranch;
     }
   }
 
@@ -152,7 +193,8 @@ export function bootstrapRepoMemories(workspaceRoot = process.cwd()) {
         });
       }
     } catch {}
-  } else if (fs.existsSync(gitlabCiPath)) {
+  }
+  if (!seenSlugs.has('ci-pipeline-conventions') && fs.existsSync(gitlabCiPath)) {
     addCandidate({
       slug: 'ci-pipeline-conventions',
       title: 'GitLab CI/CD Pipeline Validation & Testing Standards',

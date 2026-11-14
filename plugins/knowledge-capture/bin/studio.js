@@ -70,22 +70,52 @@ export function parseCliArgs(args) {
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
-    if (arg === '--port' || arg === '-p') {
-      if (i + 1 >= args.length) {
-        throw new Error(`Missing value for ${arg}`);
+    const eqIdx = arg.indexOf('=');
+    const flag = eqIdx !== -1 ? arg.slice(0, eqIdx) : arg;
+    const inlineVal = eqIdx !== -1 ? arg.slice(eqIdx + 1) : null;
+
+    if (flag === '--port' || flag === '-p') {
+      let rawPort;
+      if (inlineVal !== null) {
+        if (!inlineVal) throw new Error(`Missing value for ${flag}`);
+        rawPort = inlineVal;
+      } else {
+        if (i + 1 >= args.length || !args[i + 1]) {
+          throw new Error(`Missing value for ${arg}`);
+        }
+        rawPort = args[++i];
       }
-      const parsedPort = parseInt(args[++i], 10);
-      options.port = Number.isInteger(parsedPort) && parsedPort >= 1 && parsedPort <= 65535 ? parsedPort : 4242;
-    } else if (arg === '--host' || arg === '-h') {
-      if (i + 1 >= args.length) {
-        throw new Error(`Missing value for ${arg}`);
+      if (!/^\d+$/.test(rawPort)) {
+        throw new Error(`Invalid port number '${rawPort}'. Must be an integer between 0 and 65535.`);
       }
-      options.host = args[++i] || '127.0.0.1';
-    } else if (arg === '--workspace' || arg === '-w') {
-      if (i + 1 >= args.length || !args[i + 1]) {
-        throw new Error(`Missing path for ${arg}`);
+      const parsedPort = Number(rawPort);
+      if (!Number.isInteger(parsedPort) || parsedPort < 0 || parsedPort > 65535) {
+        throw new Error(`Invalid port number '${rawPort}'. Must be between 0 and 65535.`);
       }
-      options.workspace = path.resolve(args[++i]);
+      options.port = parsedPort;
+    } else if (flag === '--host' || flag === '-h') {
+      let hostVal;
+      if (inlineVal !== null) {
+        hostVal = inlineVal;
+      } else {
+        if (i + 1 >= args.length) {
+          throw new Error(`Missing value for ${arg}`);
+        }
+        hostVal = args[++i];
+      }
+      options.host = hostVal || '127.0.0.1';
+    } else if (flag === '--workspace' || flag === '-w') {
+      let wsVal;
+      if (inlineVal !== null) {
+        if (!inlineVal) throw new Error(`Missing path for ${flag}`);
+        wsVal = inlineVal;
+      } else {
+        if (i + 1 >= args.length || !args[i + 1]) {
+          throw new Error(`Missing path for ${arg}`);
+        }
+        wsVal = args[++i];
+      }
+      options.workspace = path.resolve(wsVal);
     } else if (arg === '--no-open') {
       options.autoOpen = false;
     } else if (arg === '--strict-port') {
@@ -95,7 +125,7 @@ export function parseCliArgs(args) {
 Knowledge Capture Studio CLI
 
 Options:
-  --port, -p <number>       Port to listen on (default: 4242)
+  --port, -p <number>       Port to listen on (default: 4242, 0 for ephemeral)
   --host, -h <string>       Host to bind (default: 127.0.0.1)
   --workspace, -w <path>    Workspace root directory (default: current directory)
   --no-open                 Do not automatically open the browser
@@ -103,6 +133,8 @@ Options:
   --help                    Show this help message
 `);
       process.exit(0);
+    } else if (arg.startsWith('-')) {
+      throw new Error(`Unknown flag: ${arg}`);
     }
   }
 

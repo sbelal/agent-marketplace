@@ -476,6 +476,12 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd(), option
             if (typeof fn === 'function') fn(this);
             return this;
           }
+          merge(other) {
+            return new MiniDataSelection(
+              [...this._elements, ...(other?._elements || [])],
+              this._parent || other?._parent
+            );
+          }
         }
 
         class MiniDataSelection extends MiniSelection {
@@ -488,14 +494,14 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd(), option
           data(dataset, keyFn) {
             const key = keyFn || ((d, i) => i);
             const existingMap = new Map();
-            this._elements.forEach(el => {
-              if (el.__data__) existingMap.set(key(el.__data__), el);
+            this._elements.forEach((el, idx) => {
+              if (el.__data__ !== undefined) existingMap.set(key(el.__data__, idx), el);
             });
             const matched = [];
             const enterItems = [];
             const usedKeys = new Set();
-            dataset.forEach(d => {
-              const k = key(d);
+            dataset.forEach((d, idx) => {
+              const k = key(d, idx);
               usedKeys.add(k);
               const existing = existingMap.get(k);
               if (existing) {
@@ -506,8 +512,8 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd(), option
               }
             });
             const exitEls = [];
-            this._elements.forEach(el => {
-              if (el.__data__ && !usedKeys.has(key(el.__data__))) {
+            this._elements.forEach((el, idx) => {
+              if (el.__data__ !== undefined && !usedKeys.has(key(el.__data__, idx))) {
                 exitEls.push(el);
               }
             });
@@ -539,9 +545,6 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd(), option
                 els.forEach(el => el.parentNode?.removeChild(el));
               }
             };
-          }
-          merge(other) {
-            return new MiniSelection([...this._elements, ...(other._elements || [])]);
           }
         }
 

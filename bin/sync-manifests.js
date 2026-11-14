@@ -105,12 +105,14 @@ function buildDerivedConfigs(pluginId, manifest) {
   const description = manifest.description || '';
   const repository = manifest.repository || 'https://github.com/sbelal/agent-marketplace';
 
+  const isAuthorObj = manifest.author !== null && typeof manifest.author === 'object' && !Array.isArray(manifest.author);
+
   const agPlugin = {
     name,
     displayName: manifest.displayName || name,
     description,
     version,
-    author: typeof manifest.author === 'object' ? manifest.author.name : (manifest.author || 'Author'),
+    author: isAuthorObj ? (manifest.author.name || 'Author') : (manifest.author || 'Author'),
     repository
   };
 
@@ -118,7 +120,7 @@ function buildDerivedConfigs(pluginId, manifest) {
     name,
     version,
     description,
-    author: typeof manifest.author === 'object' ? manifest.author : { name: manifest.author || 'Author' },
+    author: isAuthorObj ? manifest.author : { name: manifest.author || 'Author' },
     repository
   };
 
@@ -128,12 +130,13 @@ function buildDerivedConfigs(pluginId, manifest) {
 
   let agHooks = null;
   let ccHooks = null;
-  if (manifest.hooks) {
+  if (manifest.hooks && typeof manifest.hooks === 'object') {
     agHooks = { [`${name}-session`]: {} };
     ccHooks = { hooks: {} };
 
     for (const [event, hookList] of Object.entries(manifest.hooks)) {
-      const agFiltered = hookList.filter(h => !h.platforms || h.platforms.includes('antigravity'));
+      if (!Array.isArray(hookList)) continue;
+      const agFiltered = hookList.filter(h => h && (!h.platforms || (Array.isArray(h.platforms) && h.platforms.includes('antigravity'))));
       if (agFiltered.length > 0) {
         agHooks[`${name}-session`][event] = agFiltered.map(h => ({
           type: h.type || 'command',
@@ -143,7 +146,7 @@ function buildDerivedConfigs(pluginId, manifest) {
         }));
       }
 
-      const ccFiltered = hookList.filter(h => !h.platforms || h.platforms.includes('claude-code'));
+      const ccFiltered = hookList.filter(h => h && (!h.platforms || (Array.isArray(h.platforms) && h.platforms.includes('claude-code'))));
       if (ccFiltered.length > 0) {
         const matcherGroups = new Map();
         for (const h of ccFiltered) {
@@ -226,8 +229,18 @@ function syncManifests(options = {}) {
 
     if (!fs.existsSync(manifestPath)) continue;
 
-    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-    validationErrors.push(...validateCanonicalManifest(pluginId, pluginDir, manifest, options));
+    let manifest;
+    try {
+      manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+    } catch (err) {
+      validationErrors.push(`[${pluginId}] Invalid JSON in plugin.manifest.json: ${err.message}`);
+      continue;
+    }
+    const pluginErrors = validateCanonicalManifest(pluginId, pluginDir, manifest, options);
+    if (pluginErrors.length > 0) {
+      validationErrors.push(...pluginErrors);
+      continue;
+    }
     plugins.push({ pluginId, pluginDir, manifest });
 
     const { agPlugin, ccPlugin, mcpContent, agHooks, ccHooks } = buildDerivedConfigs(pluginId, manifest);
@@ -258,7 +271,7 @@ function syncManifests(options = {}) {
 
   // 8. Marketplace Catalog (.claude-plugin/marketplace.json)
   const marketplacePath = path.join(repoRoot, '.claude-plugin', 'marketplace.json');
-  if (fs.existsSync(marketplacePath)) {
+  if (validationErrors.length === 0 && fs.existsSync(marketplacePath)) {
     const market = JSON.parse(fs.readFileSync(marketplacePath, 'utf8'));
     market.plugins = plugins.map(p => ({
       name: p.manifest.name || p.pluginId,

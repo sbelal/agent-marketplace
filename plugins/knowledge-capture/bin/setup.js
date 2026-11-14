@@ -81,7 +81,7 @@ export function setupEnvironment(options = {}) {
     validateSafeGitUrl(cleanPriv);
     settings.privateRepoUrl = cleanPriv;
   }
-  if (options.teamRepoUrl !== undefined) {
+  if (options.teamRepoUrl !== undefined && !options.teamRepoSlug) {
     const cleanTeam = options.teamRepoUrl.trim();
     validateSafeGitUrl(cleanTeam);
     settings.teamRepoUrl = cleanTeam;
@@ -95,7 +95,16 @@ export function setupEnvironment(options = {}) {
   if (teamUrl) {
     validateSafeGitUrl(teamUrl);
     const slug = options.teamRepoSlug ? assertSafeSlug(options.teamRepoSlug) : deriveTeamRepoSlug(teamUrl);
-    const existingIdx = settings.teamRepos.findIndex(r => r.slug === slug);
+    if (slug.toLowerCase() !== 'default' && settings.teamRepoUrl && settings.teamRepos.length === 0) {
+      settings.teamRepos.push({
+        slug: 'default',
+        url: settings.teamRepoUrl,
+        active: true,
+        name: 'Default Team',
+        _legacyRoot: true
+      });
+    }
+    const existingIdx = settings.teamRepos.findIndex(r => r && r.slug && r.slug.toLowerCase() === slug.toLowerCase());
     if (existingIdx >= 0) {
       settings.teamRepos[existingIdx].url = teamUrl;
       settings.teamRepos[existingIdx].active = true;
@@ -108,27 +117,27 @@ export function setupEnvironment(options = {}) {
         name: options.teamRepoName || slug
       });
     }
-    if (!settings.teamRepoUrl || slug === 'default') {
+    if (!settings.teamRepoUrl || slug.toLowerCase() === 'default') {
       settings.teamRepoUrl = teamUrl;
     }
   }
 
   if (options.activateTeamSlug) {
-    const slug = options.activateTeamSlug.trim();
-    const r = settings.teamRepos.find(item => item.slug === slug);
+    const slug = options.activateTeamSlug.trim().toLowerCase();
+    const r = settings.teamRepos.find(item => item && item.slug && item.slug.toLowerCase() === slug);
     if (r) r.active = true;
   }
 
   if (options.deactivateTeamSlug) {
-    const slug = options.deactivateTeamSlug.trim();
-    const r = settings.teamRepos.find(item => item.slug === slug);
+    const slug = options.deactivateTeamSlug.trim().toLowerCase();
+    const r = settings.teamRepos.find(item => item && item.slug && item.slug.toLowerCase() === slug);
     if (r) r.active = false;
   }
 
   if (options.removeTeamSlug) {
-    const slug = options.removeTeamSlug.trim();
-    const removed = settings.teamRepos.find(item => item.slug === slug);
-    settings.teamRepos = settings.teamRepos.filter(item => item.slug !== slug);
+    const slug = options.removeTeamSlug.trim().toLowerCase();
+    const removed = settings.teamRepos.find(item => item && item.slug && item.slug.toLowerCase() === slug);
+    settings.teamRepos = settings.teamRepos.filter(item => !item || !item.slug || item.slug.toLowerCase() !== slug);
     if (
       slug === 'default' ||
       removed?._legacyRoot ||
@@ -198,9 +207,6 @@ export function setupEnvironment(options = {}) {
           execFileSync('git', ['init', '-b', 'main'], { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
           execFileSync('git', ['remote', 'add', '--', 'origin', cleanUrl], { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
           execFileSync('git', ['fetch', 'origin'], { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
-          try {
-            execFileSync('git', ['branch', '--set-upstream-to=origin/main', 'main'], { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
-          } catch {}
         } else {
           fs.rmSync(targetDir, { recursive: true, force: true });
           execFileSync('git', ['clone', '--', cleanUrl, targetDir], { env: GIT_EXEC_ENV, stdio: 'ignore' });
@@ -285,10 +291,7 @@ async function runInteractiveWizard() {
   console.log('\x1b[36m============================================================\x1b[0m');
   console.log('Configure your persistent memory storage and optional Git remotes.\n');
 
-  const options = {
-    privateRepoUrl: '',
-    teamRepoUrl: ''
-  };
+  const options = {};
 
   // Step 1: Private Memory
   console.log('\x1b[1m\x1b[34m[Step 1/2] Private Memory Layer (Personal Engineering Learnings)\x1b[0m');
@@ -412,6 +415,27 @@ async function runInteractiveWizard() {
 
 function runSetupCli() {
   const args = process.argv.slice(2);
+  if (args.includes('--help') || args.includes('-h')) {
+    console.log(`
+Knowledge Capture Setup CLI
+
+Usage: node setup.js [options]
+
+Options:
+  --private-url <url>          Private memory Git repository URL ("" to clear)
+  --team-url <url>             Team memory Git repository URL ("" to clear)
+  --team-repo-slug <slug>      Slug identifier for named team repository
+  --team-repo-url <url>        URL for named team repository
+  --activate-team <slug>       Activate configured team repository
+  --deactivate-team <slug>     Deactivate configured team repository
+  --remove-team <slug>         Remove configured team repository
+  --embedding-engine <engine>  onnx | heuristic
+  --no-install                 Skip @xenova/transformers npm install
+  --help, -h                   Show this help message
+`);
+    process.exit(0);
+  }
+
   const options = {};
   let hasFlags = false;
   let parseError = null;
@@ -443,12 +467,14 @@ function runSetupCli() {
         if (eqIdx !== -1) {
           options[optionKey] = arg.slice(eqIdx + 1);
         } else {
-          if (i + 1 >= args.length) {
+          if (i + 1 >= args.length || (args[i + 1].startsWith('-') && args[i + 1].length > 1)) {
             throw new Error(`Missing value for flag ${flagName}`);
           }
           options[optionKey] = args[++i];
         }
         hasFlags = true;
+      } else {
+        throw new Error(`Unknown argument: ${arg}. Run --help for usage.`);
       }
     }
   } catch (err) {
@@ -461,7 +487,7 @@ function runSetupCli() {
     }
     if (hasFlags) {
       // Headless mode
-      const result = setupEnvironment(options);
+      const result = setupEnvironment({ ...options, silent: true });
       console.log(JSON.stringify(result, null, 2));
     } else if (process.stdin.isTTY) {
       // Interactive TUI mode
@@ -471,7 +497,7 @@ function runSetupCli() {
       });
     } else {
       // Non-interactive fallback without flags (e.g. piped or automated script)
-      const result = setupEnvironment({});
+      const result = setupEnvironment({ silent: true });
       console.log(JSON.stringify(result, null, 2));
     }
   } catch (err) {

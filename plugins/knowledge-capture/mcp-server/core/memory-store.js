@@ -766,6 +766,16 @@ export function mergeMemoryEntries(workspaceRoot, params = {}) {
     throw new Error(`Direct writes are only permitted to 'workspace' or 'private' layer. Got '${layer}'.`);
   }
 
+  const validatedSourceSlugs = [];
+  for (const src of sourceSlugs) {
+    const rawSrc = String(src || '').trim().replace(/\.md$/i, '');
+    const cleanSrc = path.basename(rawSrc);
+    if (!cleanSrc || cleanSrc !== rawSrc || cleanSrc.includes('..')) {
+      throw new Error('Invalid source slug. Directory traversal is prohibited.');
+    }
+    validatedSourceSlugs.push(cleanSrc);
+  }
+
   const saveRes = saveMemoryEntry(workspaceRoot, {
     layer: normLayer,
     slug: targetSlug,
@@ -783,12 +793,7 @@ export function mergeMemoryEntries(workspaceRoot, params = {}) {
 
   const lp = createLayerProvider(workspaceRoot);
   let totalRewired = 0;
-  for (const src of sourceSlugs) {
-    const rawSrc = String(src || '').trim().replace(/\.md$/i, '');
-    const cleanSrc = path.basename(rawSrc);
-    if (!cleanSrc || cleanSrc !== rawSrc || cleanSrc.includes('..')) {
-      throw new Error('Invalid source slug. Directory traversal is prohibited.');
-    }
+  for (const cleanSrc of validatedSourceSlugs) {
     if (cleanSrc.toLowerCase() === saveRes.slug.toLowerCase()) continue;
 
     const srcMatch = lp.findMemoryFile(cleanSrc, normLayer);
@@ -971,7 +976,9 @@ export function prepareTeamPromotion(workspaceRoot, params = {}) {
 
   const cleanSlug = path.basename(slug.trim()).replace(/\.md$/i, '');
   const paths = resolveStoragePaths(workspaceRoot);
-  const privateFile = path.join(paths.privateDir, `${cleanSlug}.md`);
+  const lp = createLayerProvider(workspaceRoot);
+  const privMatch = lp.findMemoryFile(cleanSlug, 'private');
+  const privateFile = privMatch?.path || path.join(paths.privateDir, `${cleanSlug}.md`);
 
   if (!customContent && !fs.existsSync(privateFile)) {
     throw new Error(`Private memory file '${cleanSlug}.md' does not exist.`);
@@ -1182,7 +1189,13 @@ export function applyMemoryPatch(workspaceRoot = process.cwd(), patchData = {}) 
       const raw = fs.readFileSync(sourceFilePath, 'utf8');
       const parsed = parseYamlFrontmatter(raw);
       if (relType === 'overrides') {
-        parsed.frontmatter.overrides = targetClean;
+        const existingOverrides = parseInlineArrayOrList(parsed.frontmatter.overrides);
+        if (!existingOverrides.some(o => String(o).trim().toLowerCase() === targetClean.toLowerCase())) {
+          existingOverrides.push(targetClean);
+        }
+        parsed.frontmatter.overrides = Array.isArray(parsed.frontmatter.overrides)
+          ? existingOverrides
+          : (existingOverrides.length === 1 ? existingOverrides[0] : existingOverrides.join(', '));
       } else {
         const related = Array.isArray(parsed.frontmatter.related) ? [...parsed.frontmatter.related] : [];
         if (!related.some(r => String(r).toLowerCase() === targetClean.toLowerCase())) {

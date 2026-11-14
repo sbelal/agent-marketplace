@@ -2,6 +2,7 @@ import path from 'node:path';
 import { getDatabase } from '../db/connection.js';
 import { normalizeWorkspaceId } from '../core/storage-paths.js';
 import { scanLayerEntries } from '../retrieval/shadow-resolver.js';
+import { isIndexDirty } from '../retrieval/hybrid-search.js';
 import { readTelemetryJson } from '../db/telemetry.js';
 import { syncSqliteMetadataSync } from '../db/indexer.js';
 
@@ -24,7 +25,7 @@ export function getKnowledgeGraphData(workspaceRoot) {
   let rawNodes = [];
   let rawLinks = [];
 
-  if (db) {
+  if (db && !isIndexDirty(workspaceRoot)) {
     rawNodes = db.prepare(`
       SELECT m.slug as id, m.slug, m.layer, m.team_slug, m.domain, m.type, m.verified, m.trigger as description,
              COALESCE(t.applied_count, 0) as applied_count,
@@ -45,6 +46,13 @@ export function getKnowledgeGraphData(workspaceRoot) {
   } else {
     const { activeEntries } = scanLayerEntries(workspaceRoot, 'all');
     const tele = readTelemetryJson();
+    if (db) {
+      try {
+        for (const row of db.prepare('SELECT * FROM telemetry').all()) {
+          if (row && row.slug) tele[row.slug] = row;
+        }
+      } catch {}
+    }
     const teleLower = {};
     for (const [k, v] of Object.entries(tele)) {
       teleLower[k.toLowerCase()] = v;

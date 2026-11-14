@@ -112,6 +112,7 @@ export function parseYamlFrontmatter(fileContent) {
   let isSubMap = false;
   let blockStyle = null;
   let subBlockStyle = null;
+  let subKeyIndent = null;
   let pendingBlankLines = 0;
 
   const appendBlockSegment = (existing, segment, style) => {
@@ -154,6 +155,7 @@ export function parseYamlFrontmatter(fileContent) {
       isSubMap = false;
       blockStyle = null;
       subBlockStyle = null;
+      subKeyIndent = null;
       pendingBlankLines = 0;
       const colonIndex = rawLine.indexOf(':');
       if (colonIndex > 0) {
@@ -175,6 +177,10 @@ export function parseYamlFrontmatter(fileContent) {
       }
     } else if (currentKey) {
       const colonIndex = trimmedLine.indexOf(':');
+      if (isSubMap && subBlockStyle !== null && subKeyIndent !== null && indent <= subKeyIndent && colonIndex > 0 && !trimmedLine.startsWith('-')) {
+        subBlockStyle = null;
+        pendingBlankLines = 0;
+      }
       if (blockStyle === null && subBlockStyle === null && colonIndex > 0 && !trimmedLine.startsWith('-')) {
         const subKey = trimmedLine.slice(0, colonIndex).trim();
         let subVal = trimmedLine.slice(colonIndex + 1).trim();
@@ -184,6 +190,7 @@ export function parseYamlFrontmatter(fileContent) {
         }
         isSubMap = true;
         currentSubKey = subKey;
+        subKeyIndent = indent;
         subBlockStyle = null;
         pendingBlankLines = 0;
 

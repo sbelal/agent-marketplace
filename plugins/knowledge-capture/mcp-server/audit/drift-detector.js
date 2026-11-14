@@ -21,8 +21,8 @@ function hasAffirmativeToolMention(text, tool) {
 
   for (const line of lines) {
     if (!toolRe.test(line)) continue;
-    // Split on clause boundaries so "Never use pnpm, always enforce npm" isolates clauses
-    const clauses = line.split(/[,;]+/);
+    // Split on sentence & clause boundaries so "Never use npm. Always enforce npm" or commas isolate clauses
+    const clauses = line.split(/[,;.]+/);
     for (const clause of clauses) {
       if (!toolRe.test(clause)) continue;
       if (!negationBeforeRe.test(clause) && !negationAfterRe.test(clause)) {
@@ -71,7 +71,12 @@ function extractAffirmativeConfigReferences(body) {
     }
     if (inCodeBlock || negationLineRe.test(line)) continue;
 
-    const matches = line.match(filePattern);
+    // Strip URLs and user home paths before extracting workspace config filenames
+    const cleanLine = line
+      .replace(/https?:\/\/\S+/gi, ' ')
+      .replace(/(?:^|[\s`('"])~\/\S+/g, ' ');
+
+    const matches = cleanLine.match(filePattern);
     if (!matches) continue;
     for (const cf of matches) {
       const clean = cf.replace(/^\.\//, '');
@@ -85,7 +90,8 @@ function extractAffirmativeConfigReferences(body) {
 }
 
 function analyzeContradictionsAndDrifts(workspaceRoot, entryVectors, allKnownSlugs, shadowedSet, options = {}) {
-  const threshold = (typeof options.threshold === 'number' && Number.isFinite(options.threshold)) ? options.threshold : 0.65;
+  const hasExplicitThreshold = typeof options.threshold === 'number' && Number.isFinite(options.threshold);
+  const threshold = hasExplicitThreshold ? options.threshold : 0.65;
   const contradictions = [];
   const ambiguousPairs = [];
   const drifts = [];
@@ -107,7 +113,7 @@ function analyzeContradictionsAndDrifts(workspaceRoot, entryVectors, allKnownSlu
       const triggerSim = computeDenseCosineSimilarity(a.multiVec.trigger_vector, b.multiVec.trigger_vector);
       const sameDomain = a.entry.domain && b.entry.domain && a.entry.domain === b.entry.domain;
 
-      if (triggerSim >= threshold || (sameDomain && triggerSim >= 0.50)) {
+      if (triggerSim >= threshold || (!hasExplicitThreshold && sameDomain && triggerSim >= 0.50)) {
         const textA = `${a.entry.trigger}\n${a.body}`;
         const textB = `${b.entry.trigger}\n${b.body}`;
 
@@ -131,8 +137,8 @@ function analyzeContradictionsAndDrifts(workspaceRoot, entryVectors, allKnownSlu
           const aUses2 = hasAffirmativeToolMention(textA, tool2);
           const bUses1 = hasAffirmativeToolMention(textB, tool1);
 
-          if ((aUses1 && bUses2 && !bUses1) || (aUses2 && bUses1 && !aUses1)) {
-            const firstTool = (aUses1 && bUses2 && !bUses1) ? tool1 : tool2;
+          if ((aUses1 && !aUses2 && bUses2 && !bUses1) || (aUses2 && !aUses1 && bUses1 && !bUses2)) {
+            const firstTool = (aUses1 && !aUses2 && bUses2 && !bUses1) ? tool1 : tool2;
             const secondTool = firstTool === tool1 ? tool2 : tool1;
             conflictReason = `Opposing toolchain recommendations: ${a.entry.slug} mandates '${firstTool}' while ${b.entry.slug} mandates '${secondTool}'.`;
             severity = 'high';
@@ -300,16 +306,20 @@ function analyzeContradictionsAndDrifts(workspaceRoot, entryVectors, allKnownSlu
       const reqMatch = targetNodeEngine.match(/(?:>=?\s*|\^|~|^v?)([0-9]+)/);
       if (reqMatch) {
         const minRequired = parseInt(reqMatch[1], 10);
-        // Strip migration expressions like "from Node 18 to Node 22" before scanning required versions
-        const sanitizedBody = body.replace(
-          /\b(?:from|migrating\s+from|upgrading\s+from|dropped|legacy)\s+Node(?:\.js)?\s+(?:v|version\s+)?[0-9]+(?:\s*(?:to|->|→)\s*Node(?:\.js)?\s+(?:v|version\s+)?[0-9]+)?/gi,
-          ' '
-        );
-        const versionRegex = /Node(?:\.js)?\s+(?:v|version\s+)?([0-9]+)/gi;
+        // Strip migration and negated expressions before scanning required Node.js versions
+        const sanitizedBody = body
+          .replace(
+            /\b(?:from|migrating\s+from|upgrading\s+from|dropped|legacy|never\s+use|do\s+not\s+use|don't\s+use|avoid|deprecated\s+in|prior\s+to)\s+Node(?:\.js)?\s+(?:v|version\s+)?[0-9]+(?:\s*(?:to|->|→)\s*Node(?:\.js)?\s+(?:v|version\s+)?[0-9]+)?/gi,
+            ' '
+          );
+        const versionRegex = /\bNode(\.js)?\s+(?:(v|version\s+))?([0-9]+)\b/gi;
         const flaggedVersions = new Set();
         let match;
         while ((match = versionRegex.exec(sanitizedBody)) !== null) {
-          const statedVersion = parseInt(match[1], 10);
+          const hasExplicitJsOrPrefix = Boolean(match[1] || match[2]);
+          const statedVersion = parseInt(match[3], 10);
+          // Avoid false positives on graph/k8s/AST "node 0/1/2" when neither ".js" nor "v/version" is present
+          if (!hasExplicitJsOrPrefix && statedVersion < 6) continue;
           if (statedVersion < minRequired && !flaggedVersions.has(statedVersion)) {
             flaggedVersions.add(statedVersion);
             drifts.push({
@@ -373,6 +383,7 @@ export function detectContradictionsAndDrift(workspaceRoot = process.cwd(), opti
   const { targetEntries, allKnownSlugs, shadowedSet, cachedVectors } = prepareEntriesForAudit(workspaceRoot, options);
 
   const entryVectors = [];
+  let hasUncached = false;
   for (const entry of targetEntries) {
     let body = '';
     let fm = {};
@@ -384,7 +395,9 @@ export function detectContradictionsAndDrift(workspaceRoot = process.cwd(), opti
     } catch {}
 
     const cacheKey = `${entry.layerKey}:${entry.teamSlug || ''}:${entry.file}`;
-    const multiVec = cachedVectors.get(cacheKey) || generateMultiVector({
+    const cachedVec = cachedVectors.get(cacheKey);
+    if (!cachedVec) hasUncached = true;
+    const multiVec = cachedVec || generateMultiVector({
       trigger: entry.trigger,
       body,
       slug: entry.slug,
@@ -394,6 +407,21 @@ export function detectContradictionsAndDrift(workspaceRoot = process.cwd(), opti
     });
 
     entryVectors.push({ entry, body, fm, multiVec });
+  }
+
+  if (hasUncached && entryVectors.some(ev => ev.multiVec.trigger_vector.length !== 128)) {
+    for (const ev of entryVectors) {
+      if (ev.multiVec.trigger_vector.length !== 128) {
+        ev.multiVec = generateMultiVector({
+          trigger: ev.entry.trigger,
+          body: ev.body,
+          slug: ev.entry.slug,
+          domain: ev.entry.domain,
+          type: ev.entry.type,
+          related: ev.entry.related
+        });
+      }
+    }
   }
 
   return analyzeContradictionsAndDrifts(workspaceRoot, entryVectors, allKnownSlugs, shadowedSet, options);

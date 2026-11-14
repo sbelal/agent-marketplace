@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { getDatabase } from './connection.js';
 import { resolveStoragePaths, normalizeWorkspaceId } from '../core/storage-paths.js';
-import { parseYamlFrontmatter } from '../core/yaml-parser.js';
+import { parseYamlFrontmatter, parseInlineArrayOrList } from '../core/yaml-parser.js';
 import { findMarkdownFiles } from '../retrieval/shadow-resolver.js';
 import { getActiveEmbeddingConfig } from '../embeddings/onnx-provider.js';
 import { generateMultiVector, generateMultiVectorAsync } from '../embeddings/multi-vector.js';
@@ -93,12 +93,20 @@ export function loadCachedVectorsMap(workspaceRoot = process.cwd()) {
     const activeConfig = getActiveEmbeddingConfig();
     const currentWsId = normalizeWorkspaceId(workspaceRoot);
     const rows = db.prepare(`
-      SELECT layer, team_slug, slug, path, trigger_vector, content_vector, entity_vector
+      SELECT layer, team_slug, slug, path, mtime, trigger_vector, content_vector, entity_vector
       FROM memories
       WHERE workspace_id = ? OR workspace_id = 'global'
     `).all(currentWsId);
 
     for (const r of rows) {
+      let diskMtime = null;
+      try {
+        diskMtime = Math.floor(fs.statSync(r.path).mtimeMs);
+      } catch {
+        continue;
+      }
+      if (diskMtime !== r.mtime) continue;
+
       const tVec = bufferOrJsonToArray(r.trigger_vector);
       const cVec = bufferOrJsonToArray(r.content_vector);
       const eVec = bufferOrJsonToArray(r.entity_vector);
@@ -215,7 +223,10 @@ function flushSyncToDatabase(db, currentFiles, existingRows, pendingUpdates, wri
       type=excluded.type,
       verified=excluded.verified,
       trigger=excluded.trigger,
-      mtime=excluded.mtime
+      mtime=excluded.mtime,
+      trigger_vector=NULL,
+      content_vector=NULL,
+      entity_vector=NULL
   `);
 
   const deleteFts = db.prepare('DELETE FROM memories_fts WHERE workspace_id = ? AND layer = ? AND team_slug = ? AND slug = ?');
@@ -278,7 +289,7 @@ function flushSyncToDatabase(db, currentFiles, existingRows, pendingUpdates, wri
         }
       }
       if (u.fm.overrides) {
-        const overridesList = Array.isArray(u.fm.overrides) ? u.fm.overrides : [u.fm.overrides];
+        const overridesList = parseInlineArrayOrList(u.fm.overrides);
         for (const ov of overridesList) {
           if (ov) insertGraph.run(u.item.wsId, u.item.layer, u.item.teamSlug, u.slug, ov, 'overrides');
         }

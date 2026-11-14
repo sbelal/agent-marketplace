@@ -106,6 +106,21 @@ function detectDefaultUpstreamRef(repoDir) {
   return null;
 }
 
+function compareSemver(v1, v2) {
+  if (!v1 || v1 === 'unknown') return 1;
+  if (!v2 || v2 === 'unknown') return 0;
+  const p1 = String(v1).replace(/^v/, '').split('.').map(n => parseInt(n, 10) || 0);
+  const p2 = String(v2).replace(/^v/, '').split('.').map(n => parseInt(n, 10) || 0);
+  const len = Math.max(p1.length, p2.length);
+  for (let i = 0; i < len; i++) {
+    const a = p1[i] || 0;
+    const b = p2[i] || 0;
+    if (b > a) return 1;
+    if (b < a) return -1;
+  }
+  return 0;
+}
+
 function checkPluginUpdateNotice(pluginRoot, pluginName, homeDir) {
   try {
     const cacheFile = path.join(homeDir, '.gemini', 'config', `.update_check_${pluginName}.json`);
@@ -130,7 +145,7 @@ function checkPluginUpdateNotice(pluginRoot, pluginName, homeDir) {
     if (fs.existsSync(repoGit)) {
       try {
         const repoDir = path.dirname(repoGit);
-        execFileSync('git', ['fetch', '--dry-run', 'origin'], {
+        execFileSync('git', ['fetch', '--quiet', 'origin'], {
           cwd: repoDir,
           timeout: 2000,
           env: GIT_EXEC_ENV,
@@ -161,7 +176,7 @@ function checkPluginUpdateNotice(pluginRoot, pluginName, homeDir) {
           const permManifest = path.join(homeDir, '.gemini', 'sources', 'agent-marketplace', 'plugins', pluginName, 'plugin.json');
           if (fs.existsSync(permManifest)) {
             const availVersion = JSON.parse(fs.readFileSync(permManifest, 'utf8')).version || currentVersion;
-            if (availVersion !== currentVersion) {
+            if (compareSemver(currentVersion, availVersion) > 0) {
               hasUpdate = true;
               notice = `\n> [!NOTE]\n> 🚀 **Plugin Update Available:** Version v${availVersion} is available for \`${pluginName}\` (installed: v${currentVersion}).\n> Instruct me: **"Update ${pluginName}"** or **"Update all plugins"** to upgrade.\n`;
             }
@@ -196,7 +211,7 @@ async function main(hookState = {}) {
   const paths = resolveStoragePaths(workspaceRoot);
   const settings = paths.settings;
   const privateDir = paths.privateDir;
-  const home = os.homedir();
+  const home = process.env.USERPROFILE || process.env.HOME || os.homedir();
 
   // Pull remote repositories concurrently if configured
   let privateSyncStatus = 'Not configured (Local store active)';
@@ -293,7 +308,7 @@ async function main(hookState = {}) {
     report += `> Team memory clone is **${team.upstreamBehind} commit(s) behind** upstream. Run \`/kc-pull\` to fast-forward.\n`;
   }
 
-  if (!settings) {
+  if (!settings || !fs.existsSync(paths.settingsPath)) {
     report += `\n> [!NOTE]\n`;
     report += `> Settings file not detected at \`~/.gemini/knowledge-capture/settings.json\`.\n`;
     report += `> The Private layer operates locally without Git sync. Run \`/kc-init\` to configure remotes.\n`;

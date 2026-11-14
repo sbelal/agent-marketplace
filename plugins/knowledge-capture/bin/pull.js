@@ -113,7 +113,9 @@ function main() {
 
   const args = process.argv.slice(2);
   const target = args[0] || 'team'; // 'team', 'private', 'all', or specific team slug
-  const specificSlug = args[1] || (target !== 'team' && target !== 'private' && target !== 'all' ? target : null);
+  const specificSlug = target === 'team'
+    ? (args[1] || null)
+    : (target !== 'private' && target !== 'all' ? target : null);
 
   let exitCode = 0;
 

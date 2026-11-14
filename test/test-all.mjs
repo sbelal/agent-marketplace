@@ -2746,6 +2746,359 @@ meta:
 
   console.log('  ✔ Passed: All round regressions, isolation, validation, and manifest checks verified.\n');
 
+  // ==========================================
+  // TEST 51: Final Round Hardening (MiniD3, Studio Auto, Indexer Mtime, Team/YAML/Scanners/Drift, CLI & Syran)
+  // ==========================================
+  console.log('Test 51: Final Round Hardening Across UI, DB, Scanners, CLIs, Syran & Installer...');
+  {
+    const vm = await import('node:vm');
+    const { searchMemoriesFileBasedFallback } = await import('../plugins/knowledge-capture/mcp-server/retrieval/hybrid-search.js');
+
+    // 1. MiniD3 merge() & repeating data() update + studio-launcher mode: 'auto' + dirty graph telemetry fallback
+    const studioWs51 = path.join(tempRoot, 'studio-51-ws');
+    fs.mkdirSync(path.join(studioWs51, '.agents', 'rules', 'memory'), { recursive: true });
+    saveMemoryEntry(studioWs51, {
+      layer: 'workspace',
+      slug: 'alpha-studio-rule',
+      domain: 'architecture',
+      description: 'Alpha rule for studio test',
+      why: 'Test studio graph',
+      howToApply: 'Keep graph clean'
+    });
+    saveMemoryEntry(studioWs51, {
+      layer: 'workspace',
+      slug: 'beta-studio-rule',
+      domain: 'architecture',
+      description: 'Beta rule related to alpha',
+      why: 'Test links',
+      howToApply: 'Link properly',
+      related: ['alpha-studio-rule']
+    });
+
+    await syncSqliteIndex(studioWs51);
+    recordMemoryEfficacy('alpha-studio-rule', 'test_pass');
+
+    // Dirty disk state: modify rule file so isIndexDirty === true
+    const alphaFile = path.join(studioWs51, '.agents', 'rules', 'memory', 'alpha-studio-rule.md');
+    fs.writeFileSync(alphaFile, fs.readFileSync(alphaFile, 'utf8') + '\nUpdated disk line.\n', 'utf8');
+    const dirtyMtime = new Date(Date.now() + 5000);
+    fs.utimesSync(alphaFile, dirtyMtime, dirtyMtime);
+    assert.equal(isIndexDirty(studioWs51), true);
+
+    const dirtyGraph = getKnowledgeGraphData(studioWs51);
+    const alphaNode = dirtyGraph.nodes.find(n => n.slug === 'alpha-studio-rule');
+    assert.ok(alphaNode, 'alpha-studio-rule node must exist in dirty fallback graph');
+    assert.ok(alphaNode.test_pass_count >= 1, 'Dirty graph fallback must preserve SQLite telemetry test_pass_count');
+
+    const autoStudio = await renderVisualMemoryStudio(studioWs51, {
+      mode: 'auto',
+      artifactDir: path.join(tempRoot, 'artifacts-auto-51')
+    });
+    assert.equal(autoStudio.compact, true, "mode: 'auto' in offline Antigravity must render compact UI");
+    const autoHtml = fs.readFileSync(autoStudio.artifactPath, 'utf8');
+
+    // Execute MiniSelection / MiniDataSelection classes from generated HTML to verify .merge() & second .data() pass
+    const d3Start = autoHtml.indexOf("if (typeof d3 === 'undefined')");
+    const d3End = autoHtml.indexOf('const graphData =', d3Start);
+    assert.ok(d3Start > 0 && d3End > d3Start, 'Generated HTML must contain MiniD3 fallback');
+    const miniD3Code = autoHtml.slice(d3Start, d3End);
+    const makeEl = (tag) => {
+      const el = {
+        tagName: tag.toUpperCase(),
+        style: {},
+        attributes: {},
+        children: [],
+        parentNode: null,
+        _listeners: {},
+        classList: {
+          add() {}, remove() {}, contains() { return false; }
+        },
+        setAttribute(k, v) { this.attributes[k] = String(v); },
+        getAttribute(k) { return this.attributes[k] ?? null; },
+        removeAttribute(k) { delete this.attributes[k]; },
+        appendChild(child) { child.parentNode = this; this.children.push(child); return child; },
+        removeChild(child) { this.children = this.children.filter(c => c !== child); },
+        remove() {
+          if (this.parentNode) {
+            this.parentNode.children = this.parentNode.children.filter(c => c !== this);
+          }
+        },
+        addEventListener(ev, fn) { this._listeners[ev] = fn; },
+        querySelectorAll(sel) { return this.children.filter(c => c.tagName.toLowerCase() === sel.toLowerCase()); },
+        querySelector(sel) { return this.querySelectorAll(sel)[0] || null; },
+        getBoundingClientRect() { return { width: 800, height: 600 }; }
+      };
+      return el;
+    };
+    const rootSvg = makeEl('svg');
+    const vmCtx = {
+      document: {
+        querySelector(sel) { return sel === '#graph' ? rootSvg : null; },
+        querySelectorAll() { return []; },
+        createElementNS(_ns, tag) { return makeEl(tag); },
+        createElement(tag) { return makeEl(tag); }
+      },
+      window: {}
+    };
+    vm.runInNewContext(`${miniD3Code}\nthis.__d3 = window.d3;`, vmCtx);
+    const linkJoin1 = vmCtx.__d3.select('#graph').selectAll('line').data([{ id: 'l1', val: 1 }], d => d.id);
+    const linkEnter1 = linkJoin1.enter().append('line');
+    let mergedLinks = linkEnter1.merge(linkJoin1);
+    assert.equal(mergedLinks._elements.length, 1);
+    const linkJoin2 = mergedLinks.data([{ id: 'l1', val: 2 }, { id: 'l2', val: 3 }], d => d.id);
+    mergedLinks = linkJoin2.enter().append('line').merge(linkJoin2);
+    assert.equal(mergedLinks._elements.length, 2, 'MiniSelection.merge + second data() join must keep both elements');
+    const vals = [];
+    mergedLinks.attr('data-val', d => { vals.push(d.val); return d.val; });
+    assert.deepEqual(vals.sort((a, b) => a - b), [2, 3], 'Second data() join must bind updated datum onto existing element');
+
+    // 2. indexer mtime invalidation, hybrid-search fallback full body & telemetry fallback slug
+    await syncSqliteIndex(studioWs51); // resync clean index
+    const fallbackFull = await searchMemoriesFileBasedFallback(studioWs51, 'Alpha rule studio', { format: 'full', limit: 5 });
+    assert.ok(fallbackFull.some(r => r.slug === 'alpha-studio-rule' && typeof r.content === 'string' && r.content.includes('Updated disk line')));
+
+    const fbTele = recordMemoryEfficacy('unindexed-slug', 'test_pass');
+    assert.equal(fbTele.slug, 'unindexed-slug', 'recordMemoryEfficacy fallback must include canonical slug');
+
+    // 3. yaml-parser sibling key after nested block scalar + memory-store pre-validation/overrides/promo
+    const nestedYaml51 = parseYamlFrontmatter(`---
+name: nested-sibling-51
+meta:
+  notes: |
+    first-line
+    second-line
+  author: syran
+---
+# Body
+`);
+    assert.equal(nestedYaml51.frontmatter.meta.notes, 'first-line\nsecond-line');
+    assert.equal(nestedYaml51.frontmatter.meta.author, 'syran', 'Sibling key after nested block scalar must be parsed');
+
+    assert.throws(
+      () => mergeMemoryEntries(studioWs51, {
+        layer: 'workspace',
+        targetSlug: 'should-not-exist-51',
+        sourceSlugs: ['alpha-studio-rule', '../evil-traversal'],
+        title: 'Should Not Exist',
+        description: 'Invalid merge',
+        why: 'Traversal source',
+        howToApply: 'Fail early'
+      }),
+      /Invalid source slug/i
+    );
+    assert.equal(
+      fs.existsSync(path.join(studioWs51, '.agents', 'rules', 'memory', 'should-not-exist-51.md')),
+      false,
+      'Failed mergeMemoryEntries must not write partial merged file before validating all sources'
+    );
+
+    saveMemoryEntry(studioWs51, {
+      layer: 'workspace',
+      slug: 'multi-override-target',
+      domain: 'architecture',
+      description: 'Target with existing override',
+      why: 'Test append overrides',
+      howToApply: 'Keep prior overrides',
+      overrides: ['old-rule-a']
+    });
+    applyMemoryPatch(studioWs51, {
+      added_links: [{ source: 'multi-override-target', target: 'old-rule-b', type: 'overrides' }]
+    });
+    const patchedMulti = getMemoryContent(studioWs51, 'workspace', 'multi-override-target').content;
+    assert.ok(
+      patchedMulti.includes('old-rule-a') && patchedMulti.includes('old-rule-b'),
+      'applyMemoryPatch overrides link must append rather than overwrite existing overrides'
+    );
+
+    // 4. team-sync positional args & stale trigger strip on merge_both
+    assert.throws(() => addTeamRepository(studioWs51, {}), /required|url/i);
+    assert.throws(() => setTeamRepositoryActive(studioWs51), /required|slug/i);
+    assert.throws(() => removeTeamRepository(studioWs51), /required|slug/i);
+
+    const mergePaths51 = resolveStoragePaths(studioWs51);
+    fs.mkdirSync(mergePaths51.privateDir, { recursive: true });
+    fs.mkdirSync(mergePaths51.teamDir, { recursive: true });
+    const privMergeFile = path.join(mergePaths51.privateDir, 'shared-rule.md');
+    const teamMergeFile = path.join(mergePaths51.teamDir, 'shared-rule.md');
+    fs.writeFileSync(privMergeFile, '---\nname: shared-rule\ndescription: Old desc\ntrigger: Stale trigger\nslug: stale-slug\n---\n# Private Body\nPriv details.\n', 'utf8');
+    fs.writeFileSync(teamMergeFile, '---\nname: shared-rule\ndescription: Team desc\n---\n# Team Body\nTeam details.\n', 'utf8');
+    const mergeBothRes = resolveTeamConflict(studioWs51, {
+      slug: 'shared-rule',
+      resolution: 'merge_both',
+      privatePath: privMergeFile,
+      teamPath: teamMergeFile,
+      mergedContent: '---\ndescription: Merged desc\n---\n# Merged Body\nMerged details.\n'
+    });
+    assert.equal(mergeBothRes.action, 'merged_both_versions');
+    const mergedFm = parseYamlFrontmatter(fs.readFileSync(privMergeFile, 'utf8')).frontmatter;
+    assert.equal(mergedFm.description, 'Merged desc');
+    assert.equal(mergedFm.trigger, 'Merged desc', 'merge_both must strip stale trigger rather than preserving it');
+    assert.equal(mergedFm.slug, 'shared-rule', 'merge_both must strip stale slug rather than preserving it');
+    fs.rmSync(privMergeFile, { force: true });
+    fs.rmSync(teamMergeFile, { force: true });
+
+    // 5. archeology-scanner delimiter & word boundaries + bootstrap-scanner gitlab fallback + dream threshold + drift false positives
+    const arch51Repo = path.join(tempRoot, 'arch-51-repo');
+    fs.mkdirSync(arch51Repo, { recursive: true });
+    execFileSync('git', ['init'], { cwd: arch51Repo, stdio: 'ignore' });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: arch51Repo, stdio: 'ignore' });
+    execFileSync('git', ['config', 'user.name', 'Test User'], { cwd: arch51Repo, stdio: 'ignore' });
+    fs.writeFileSync(path.join(arch51Repo, 'notes.txt'), 'line 1\n', 'utf8');
+    execFileSync('git', ['add', '.'], { cwd: arch51Repo, stdio: 'ignore' });
+    execFileSync('git', ['commit', '-m', 'fix: explicit feedback on json gotcha', '-m', 'COMMIT: fake body header that should not split record'], {
+      cwd: arch51Repo,
+      stdio: 'ignore'
+    });
+    const arch51Res = mineGitHistoryMemories(arch51Repo, { maxCommits: 5 });
+    assert.equal(arch51Res.candidates.length, 1, 'Commit body containing COMMIT: must not split commit record');
+    assert.equal(arch51Res.candidates[0].domain, 'general', 'Substring words (explicit/json/gotcha) must not misclassify domain');
+
+    const gitlabWs51 = path.join(tempRoot, 'gitlab-ws-51');
+    fs.mkdirSync(path.join(gitlabWs51, '.github', 'workflows'), { recursive: true });
+    fs.writeFileSync(path.join(gitlabWs51, '.gitlab-ci.yml'), 'stages:\n  - test\n', 'utf8');
+    const bootGitlab = bootstrapRepoMemories(gitlabWs51);
+    assert.ok(bootGitlab.some(c => c.slug === 'ci-pipeline-conventions'), 'GitLab CI must be discovered even when .github/workflows/ exists but is empty');
+
+    const dream51Ws = path.join(tempRoot, 'dream-51-ws');
+    fs.mkdirSync(path.join(dream51Ws, '.agents', 'rules', 'memory'), { recursive: true });
+    saveMemoryEntry(dream51Ws, { layer: 'workspace', slug: 'dream-rule-1', domain: 'k8s', description: 'Configure pod probes', why: 'Health', howToApply: 'Add readinessProbe' });
+    saveMemoryEntry(dream51Ws, { layer: 'workspace', slug: 'dream-rule-2', domain: 'k8s', description: 'Configure ingress TLS', why: 'Security', howToApply: 'Enable cert-manager' });
+    const strictDream = await dreamMemoryConsolidation(dream51Ws, { threshold: 0.99 });
+    assert.equal(strictDream.clusters.length, 0, 'High explicit threshold (0.99) must not force unrelated rules into clusters');
+
+    const drift51Ws = path.join(tempRoot, 'drift-51-ws');
+    fs.mkdirSync(path.join(drift51Ws, '.agents', 'rules', 'memory'), { recursive: true });
+    fs.writeFileSync(path.join(drift51Ws, 'package.json'), JSON.stringify({
+      name: 'drift-51',
+      engines: { node: '>=18.0.0' },
+      dependencies: { npm: '10.0.0' }
+    }), 'utf8');
+    saveMemoryEntry(drift51Ws, {
+      layer: 'workspace',
+      slug: 'sentence-contra-rule-a',
+      domain: 'tooling',
+      description: 'When installing JavaScript dependencies in the repository',
+      why: 'Verify sentence boundaries',
+      howToApply: 'Never use npm. Always use npm install for packages.'
+    });
+    saveMemoryEntry(drift51Ws, {
+      layer: 'workspace',
+      slug: 'sentence-contra-rule-b',
+      domain: 'tooling',
+      description: 'When installing JavaScript dependencies in the repository',
+      why: 'Conflicting package manager',
+      howToApply: 'Always use pnpm install for packages.'
+    });
+    saveMemoryEntry(drift51Ws, {
+      layer: 'workspace',
+      slug: 'k8s-node-and-url-rule',
+      domain: 'infra',
+      description: 'Cluster docs',
+      why: 'No false Node version or config file drift',
+      howToApply: 'See https://npm.im/pkg and ~/webpack.config.js. Restart Kubernetes node 1 before Do not use Node 14 upgrades.'
+    });
+    const drift51Res = detectContradictionsAndDrift(drift51Ws);
+    assert.ok(
+      drift51Res.contradictions.some(c =>
+        (c.slug_a === 'sentence-contra-rule-a' && c.slug_b === 'sentence-contra-rule-b') ||
+        (c.slug_a === 'sentence-contra-rule-b' && c.slug_b === 'sentence-contra-rule-a')
+      ),
+      'Affirmative sentence after negated sentence must be recognized by hasAffirmativeToolMention'
+    );
+    assert.equal(
+      drift51Res.drifts.some(d => d.slug === 'k8s-node-and-url-rule'),
+      false,
+      'URLs, home ~/ paths, Kubernetes node N, and negated Node version must not trigger false drift'
+    );
+
+    // 6. setup.js legacy teamRepoUrl preservation, pull.js private extra arg, studio.js CLI port 0
+    const setupStorage51 = path.join(tempRoot, 'setup-51-storage');
+    fs.mkdirSync(setupStorage51, { recursive: true });
+    fs.writeFileSync(path.join(setupStorage51, 'settings.json'), JSON.stringify({
+      teamRepoUrl: 'https://example.com/legacy-team.git',
+      teamRepos: []
+    }), 'utf8');
+    const prevStorage51 = process.env.KC_STORAGE_DIR;
+    process.env.KC_STORAGE_DIR = setupStorage51;
+    try {
+      const setup51Res = setupEnvironment({
+        teamRepoSlug: 'platform',
+        teamRepoUrl: 'https://example.com/platform-team.git',
+        installDependencies: false,
+        silent: true
+      });
+      assert.ok(setup51Res.settings.teamRepos.some(r => r.slug === 'default' && r._legacyRoot === true && r.url === 'https://example.com/legacy-team.git'),
+        'setupEnvironment must preserve legacy teamRepoUrl when adding named team repo');
+      assert.ok(setup51Res.settings.teamRepos.some(r => r.slug === 'platform'), 'Named team repo must also be registered');
+    } finally {
+      process.env.KC_STORAGE_DIR = prevStorage51;
+    }
+
+    const setupCli51 = path.resolve(process.cwd(), 'plugins', 'knowledge-capture', 'bin', 'setup.js');
+    const setupUnknownRun = spawnSync(process.execPath, [setupCli51, '--bogus-flag'], {
+      env: { ...process.env, KC_STORAGE_DIR: setupStorage51 },
+      encoding: 'utf8'
+    });
+    assert.notEqual(setupUnknownRun.status, 0, 'setup.js must reject unknown CLI flags');
+
+    const pullCli51 = path.resolve(process.cwd(), 'plugins', 'knowledge-capture', 'bin', 'pull.js');
+    const pullPrivRun = spawnSync(process.execPath, [pullCli51, 'private', 'extra-arg'], {
+      env: { ...process.env, KC_STORAGE_DIR: setupStorage51 },
+      encoding: 'utf8'
+    });
+    assert.equal(pullPrivRun.status, 0);
+    assert.equal(pullPrivRun.stdout.includes('Team Memory'), false, 'pull.js private <extra> must not pull team repositories');
+
+    const parsedStudioArgs = parseCliArgs(['--port=0', `--workspace=${studioWs51}`]);
+    assert.equal(parsedStudioArgs.port, 0, 'studio CLI must allow --port=0');
+    assert.equal(parsedStudioArgs.workspace, path.resolve(studioWs51));
+    assert.throws(() => parseCliArgs(['--port', 'not-a-number']), /Invalid port number/);
+
+    // 7. syran edge cases & MCP isError propagation
+    assert.ok(evaluateProbability([null]).error, 'evaluateProbability([null]) must return structured error');
+    const zeroPriorRes = evaluateProbability([{ label: 'H1' }, { label: 'H2' }], '0');
+    assert.equal(zeroPriorRes.prior_probability, 0.01, "String '0' prior must clamp to 0.01 rather than falling back to 0.5");
+    assert.equal(evaluateArchitecturalTradeoffs([{ name: 'A', scores: { c: 1 } }, null]).status, 'error');
+    const infWeightRes = evaluateArchitecturalTradeoffs(
+      [{ name: 'A', scores: { c: 1 } }, { name: 'B', scores: { c: 2 } }],
+      [{ name: 'c', weight: Infinity }]
+    );
+    assert.equal(Number.isFinite(infWeightRes.utilityRanking[0].utilityScore), true, 'Infinity weight must not cause NaN utility');
+
+    const syranMcp51 = path.resolve(process.cwd(), 'plugins', 'syran-persona', 'mcp-server', 'index.js');
+    const syranErrRun = spawnSync(process.execPath, [syranMcp51], {
+      input: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'syran_consult', arguments: { query: '' } } }) + '\n',
+      encoding: 'utf8'
+    });
+    const syranErrJson = JSON.parse(syranErrRun.stdout.trim().split('\n')[0]);
+    assert.equal(syranErrJson.result.isError, true, 'syran MCP server must set isError: true on error payloads');
+
+    // 8. sync-manifests null author / invalid hooks & dual-scope plugin uninstall
+    const badMarket = path.join(tempRoot, 'bad-manifest-market');
+    const badPluginDir = path.join(badMarket, 'plugins', 'bad-p');
+    fs.mkdirSync(badPluginDir, { recursive: true });
+    fs.writeFileSync(path.join(badPluginDir, 'plugin.manifest.json'), JSON.stringify({
+      name: 'bad-p',
+      version: '1.0.0',
+      author: null,
+      hooks: { SessionStart: 'not-an-array' }
+    }), 'utf8');
+    const badSyncRes = syncManifests({ repoRoot: badMarket, checkMode: false });
+    assert.ok(badSyncRes.validationErrors.length > 0, 'Invalid hooks type must report validation error instead of crashing');
+
+    const { installPlugin, uninstallPlugin, isPluginEnabled } = requireCjs('../bin/plugin-manager.js');
+    const pmHome51 = path.join(tempRoot, 'pm-home-51');
+    const pmWs51 = path.join(tempRoot, 'pm-ws-51');
+    fs.mkdirSync(pmHome51, { recursive: true });
+    fs.mkdirSync(pmWs51, { recursive: true });
+    installPlugin('syran-persona', process.cwd(), 'workspace', pmWs51, pmHome51);
+    installPlugin('syran-persona', process.cwd(), 'global', pmWs51, pmHome51);
+    uninstallPlugin('syran-persona', 'workspace', pmWs51, pmHome51);
+    assert.equal(isPluginEnabled('syran-persona', pmHome51), true, 'Uninstalling workspace copy must keep plugin enabled when global copy remains');
+  }
+
+  console.log('  ✔ Passed: Final round hardening across UI, DB, scanners, CLIs, Syran & installer verified.\n');
+
   console.log('============================================================');
   console.log('🎉 ALL TESTS PASSED SUCCESSFULLY!');
   console.log('============================================================\n');

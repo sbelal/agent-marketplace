@@ -131,7 +131,7 @@ export function recordMemoryEfficacy(slug, feedbackType, details = {}) {
     } catch {}
   }
   const data = readTelemetryJson();
-  return data[canonSlug] || { slug: canonSlug, efficacy_score: 1.0 };
+  return data[canonSlug] ? { slug: canonSlug, ...data[canonSlug] } : { slug: canonSlug, efficacy_score: 1.0 };
 }
 
 /**

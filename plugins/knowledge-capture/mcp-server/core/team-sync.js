@@ -3,7 +3,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { resolveStoragePaths, getStorageDir, getSettings, deriveTeamRepoSlug, GIT_EXEC_ENV } from './storage-paths.js';
 import { findMarkdownFiles } from '../retrieval/shadow-resolver.js';
-import { parseYamlFrontmatter, serializeYamlFrontmatter } from './yaml-parser.js';
+import { parseYamlFrontmatter, serializeYamlFrontmatter, parseInlineArrayOrList } from './yaml-parser.js';
 import { atomicWriteFileSync, cleanDanglingReferences } from './memory-store.js';
 
 export { deriveTeamRepoSlug };
@@ -107,7 +107,7 @@ export function getTeamRepositories(workspaceRoot = process.cwd()) {
  * - addTeamRepository(slug, url, name, workspaceRoot)
  * - addTeamRepository(workspaceRoot, { slug, url, name, active })
  */
-export function addTeamRepository(arg1 = process.cwd(), arg2 = {}, arg3 = null, arg4 = null) {
+export function addTeamRepository(arg1 = process.cwd(), arg2 = undefined, arg3 = undefined, arg4 = undefined) {
   let workspaceRoot = process.cwd();
   let options = {};
 
@@ -215,7 +215,7 @@ export function addTeamRepository(arg1 = process.cwd(), arg2 = {}, arg3 = null, 
  * - setTeamRepositoryActive(slug, active, workspaceRoot)
  * - setTeamRepositoryActive(workspaceRoot, { slug, active })
  */
-export function setTeamRepositoryActive(arg1 = process.cwd(), arg2 = {}, arg3 = null) {
+export function setTeamRepositoryActive(arg1 = process.cwd(), arg2 = undefined, arg3 = undefined) {
   let workspaceRoot = process.cwd();
   let slug = '';
   let active = true;
@@ -262,7 +262,7 @@ export function setTeamRepositoryActive(arg1 = process.cwd(), arg2 = {}, arg3 = 
  * - removeTeamRepository(slug, deleteFiles, workspaceRoot)
  * - removeTeamRepository(workspaceRoot, { slug, deleteFiles })
  */
-export function removeTeamRepository(arg1 = process.cwd(), arg2 = {}, arg3 = null) {
+export function removeTeamRepository(arg1 = process.cwd(), arg2 = undefined, arg3 = undefined) {
   let workspaceRoot = process.cwd();
   let slug = '';
   let deleteFiles = false;
@@ -418,7 +418,7 @@ export function auditTeamConflicts(workspaceRoot = process.cwd()) {
       };
       privateMap.set(slug.toLowerCase(), data);
       if (parsed.frontmatter.overrides) {
-        const ovs = Array.isArray(parsed.frontmatter.overrides) ? parsed.frontmatter.overrides : [parsed.frontmatter.overrides];
+        const ovs = parseInlineArrayOrList(parsed.frontmatter.overrides);
         for (const ov of ovs) {
           privateMap.set(String(ov).toLowerCase(), data);
         }
@@ -460,9 +460,7 @@ export function auditTeamConflicts(workspaceRoot = process.cwd()) {
 
             const teamVerified = Date.parse(teamFm.verified || '') || 0;
             const privVerified = Date.parse(privFm.verified || '') || 0;
-            const privOverrides = Array.isArray(privFm.overrides)
-              ? privFm.overrides.map(o => String(o).trim().toLowerCase())
-              : String(privFm.overrides || '').split(',').map(o => o.trim().toLowerCase()).filter(Boolean);
+            const privOverrides = parseInlineArrayOrList(privFm.overrides).map(o => String(o).trim().toLowerCase());
 
             if (teamVerified > privVerified && (teamVerified - privVerified) > 14 * 24 * 3600 * 1000) {
               divergenceType = 'upstream_updated_ahead';
@@ -553,9 +551,7 @@ export function resolveTeamConflict(workspaceRoot = process.cwd(), options = {})
           break;
         }
         if (parsed.frontmatter.overrides) {
-          const ovs = Array.isArray(parsed.frontmatter.overrides)
-            ? parsed.frontmatter.overrides
-            : String(parsed.frontmatter.overrides).split(',').map(s => s.trim());
+          const ovs = parseInlineArrayOrList(parsed.frontmatter.overrides);
           if (ovs.map(s => s.toLowerCase()).includes(cleanSlug.toLowerCase())) {
             privateFile = pf;
             resolvedPrivateSlug = pSlug;
@@ -619,8 +615,12 @@ export function resolveTeamConflict(workspaceRoot = process.cwd(), options = {})
       body = parsedContent.body || '';
     }
 
+    const baseFm = { ...parsed.frontmatter };
+    delete baseFm.trigger;
+    delete baseFm.slug;
+
     const fm = {
-      ...parsed.frontmatter,
+      ...baseFm,
       ...contentFm,
       ...(mergedFrontmatter || {}),
       verified: new Date().toISOString().slice(0, 10)

@@ -124,7 +124,8 @@ export function searchMemoriesFileBasedFallback(workspaceRoot, queryText, option
         efficacyScore,
         ...(efficacyScore < 0.6 ? { lowEfficacyWarning: `Memory efficacy rating is ${Math.round(efficacyScore * 100)}% due to prior test failures.` } : {}),
         related: entry.related || [],
-        precedenceTier: precedence[entry.layerKey] || 0
+        precedenceTier: precedence[entry.layerKey] || 0,
+        _filePath: entry.file
       });
     }
   }
@@ -135,7 +136,17 @@ export function searchMemoriesFileBasedFallback(workspaceRoot, queryText, option
   });
 
   const limit = options.limit || 5;
-  return scored.slice(0, limit);
+  const topResults = scored.slice(0, limit).map(({ _filePath, ...cand }) => {
+    if (options.format === 'full' && _filePath && fs.existsSync(_filePath)) {
+      try {
+        const parsed = parseYamlFrontmatter(fs.readFileSync(_filePath, 'utf8'));
+        cand.content = parsed.body;
+      } catch {}
+    }
+    return cand;
+  });
+
+  return topResults;
 }
 
 /**

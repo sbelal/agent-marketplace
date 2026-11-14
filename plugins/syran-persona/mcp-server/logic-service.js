@@ -124,20 +124,22 @@ export function getPersonaStatus() {
  * @returns {Object} Structured logical deconstruction
  */
 export function consultLogic(query, premise = '') {
-  if (!query || typeof query !== 'string') {
+  if (!query || typeof query !== 'string' || !query.trim()) {
     return {
       status: 'error',
       message: 'A valid proposition or query string is required for logical evaluation.'
     };
   }
 
-  const fallacies = analyzeLogicalFallacies(query + ' ' + premise);
+  const safePremise = typeof premise === 'string' ? premise : (premise == null ? '' : String(premise));
+  const combined = `${query} ${safePremise}`.trim();
+  const fallacies = analyzeLogicalFallacies(combined);
   const contractionMatches = query.match(/\b(can't|don't|won't|isn't|aren't|haven't|hasn't|didn't|couldn't|shouldn't|wouldn't|it's|they're|we're|i'm|you're)\b/gi) || [];
   const containsContraction = contractionMatches.length > 0;
 
   const evidence = [];
   for (const f of fallacies.detected) {
-    const m = (query + ' ' + premise).match(FALLACY_PATTERNS.find(p => p.name === f.name)?.pattern || /$^/);
+    const m = combined.match(FALLACY_PATTERNS.find(p => p.name === f.name)?.pattern || /$^/);
     evidence.push({
       type: 'fallacy_pattern',
       label: f.name,
@@ -153,13 +155,13 @@ export function consultLogic(query, premise = '') {
   }
 
   const epistemicGaps = [];
-  if (!premise || !String(premise).trim()) {
+  if (!safePremise.trim()) {
     epistemicGaps.push({
       gap: 'missing_explicit_premise',
       detail: 'No explicit underlying premise was supplied; deductive validity relies upon unstated assumptions.'
     });
   }
-  if (!/\d+(?:\.\d+)?%?/.test(query + ' ' + premise)) {
+  if (!/\d+(?:\.\d+)?%?/.test(combined)) {
     epistemicGaps.push({
       gap: 'unquantified_proposition',
       detail: 'No empirical measurements, thresholds, or probabilities were provided in the proposition.'
@@ -169,7 +171,7 @@ export function consultLogic(query, premise = '') {
   return {
     officer: 'Syran',
     input_analyzed: query,
-    explicit_premise: premise || 'Not explicitly stated; derived from input context.',
+    explicit_premise: safePremise || 'Not explicitly stated; derived from input context.',
     logical_validity: fallacies.detected.length === 0 ? 'VALID' : 'COMPROMISED',
     identified_fallacies: fallacies.detected,
     informal_anomalies: containsContraction ? ['Contraction detected in input query; formal delivery recommended.'] : [],
@@ -228,8 +230,16 @@ export function evaluateProbability(hypotheses = [], prior = 0.5) {
       error: 'At least one hypothesis is required for probability calculation.'
     };
   }
+  if (hypotheses.some(h => !h || typeof h !== 'object' || Array.isArray(h))) {
+    return {
+      error: 'Each hypothesis entry must be an object with at least a label.'
+    };
+  }
 
-  const numPrior = (typeof prior === 'number' && !isNaN(prior)) ? prior : (Number(prior) || 0.5);
+  const parsedPrior = typeof prior === 'number'
+    ? prior
+    : (typeof prior === 'string' && prior.trim() !== '' ? Number(prior) : NaN);
+  const numPrior = Number.isFinite(parsedPrior) ? parsedPrior : 0.5;
   const sanitizedPrior = Math.max(0.01, Math.min(0.99, numPrior));
   let totalLikelihood = 0;
 
@@ -238,7 +248,7 @@ export function evaluateProbability(hypotheses = [], prior = 0.5) {
     const rawWeight = (typeof h.weight === 'number' && Number.isFinite(h.weight) && h.weight >= 0) ? h.weight : 1.0;
     const riskFactor = (typeof h.risk === 'number' && Number.isFinite(h.risk)) ? Math.max(0.0, Math.min(1.0, h.risk)) : 0.5;
     // Bayesian prior weighting: modulate baseline likelihood with prior probability (supports hypothesis-level prior or prior parameter)
-    const priorWeight = (typeof h.prior === 'number' && !isNaN(h.prior))
+    const priorWeight = (typeof h.prior === 'number' && Number.isFinite(h.prior))
       ? Math.max(0.01, Math.min(0.99, h.prior))
       : (idx === 0 ? sanitizedPrior : (1.0 - sanitizedPrior) / Math.max(1, hypotheses.length - 1));
     const likelihood = rawWeight * priorWeight;
@@ -292,9 +302,18 @@ export function evaluateArchitecturalTradeoffs(options = [], criteria = []) {
       message: 'A minimum of two candidate architectural options is required for comparative trade-off analysis.'
     };
   }
+  if (options.some(opt => !opt || typeof opt !== 'object' || Array.isArray(opt))) {
+    return {
+      status: 'error',
+      officer: 'Syran',
+      message: 'All candidate architectural options must be non-null objects.'
+    };
+  }
 
   // Derive criteria list if not provided
-  let activeCriteria = Array.isArray(criteria) && criteria.length > 0 ? [...criteria] : [];
+  let activeCriteria = Array.isArray(criteria) && criteria.length > 0
+    ? criteria.filter(c => c && typeof c === 'object' && typeof c.name === 'string' && c.name.trim())
+    : [];
   if (activeCriteria.length === 0) {
     const inferredKeys = [];
     const seenKeys = new Set();
@@ -326,14 +345,18 @@ export function evaluateArchitecturalTradeoffs(options = [], criteria = []) {
   }
 
   // Normalize criteria weights
-  const totalWeight = activeCriteria.reduce((sum, c) => sum + (typeof c.weight === 'number' && c.weight > 0 ? c.weight : 1.0), 0);
-  const normalizedCriteria = activeCriteria.map(c => ({
-    name: c.name,
-    weight: (typeof c.weight === 'number' && c.weight > 0 ? c.weight : 1.0) / totalWeight,
-    rawWeight: typeof c.weight === 'number' && c.weight > 0 ? c.weight : 1.0,
-    direction: c.direction === 'minimize' ? 'minimize' : 'maximize',
-    description: c.description || c.name
-  }));
+  const finiteWeight = (c) => (typeof c.weight === 'number' && Number.isFinite(c.weight) && c.weight > 0 ? c.weight : 1.0);
+  const totalWeight = activeCriteria.reduce((sum, c) => sum + finiteWeight(c), 0);
+  const normalizedCriteria = activeCriteria.map(c => {
+    const rw = finiteWeight(c);
+    return {
+      name: c.name,
+      weight: rw / totalWeight,
+      rawWeight: rw,
+      direction: c.direction === 'minimize' ? 'minimize' : 'maximize',
+      description: c.description || c.name
+    };
+  });
 
   // Find min and max strictly across present finite numeric values
   const criteriaBounds = {};

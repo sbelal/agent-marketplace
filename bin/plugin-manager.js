@@ -524,7 +524,7 @@ function checkMarketplaceUpdates(repoRoot, workspaceDir = process.cwd(), homeDir
     if (!fs.existsSync(path.join(dir, '.git'))) return 0;
     const gitEnv = { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_SSH_COMMAND: 'ssh -o BatchMode=yes -o ConnectTimeout=3' };
     try {
-      execFileSync('git', ['fetch', '--dry-run', 'origin'], {
+      execFileSync('git', ['fetch', '--quiet', 'origin'], {
         cwd: dir,
         timeout: 2500,
         env: gitEnv,
@@ -573,7 +573,14 @@ function checkMarketplaceUpdates(repoRoot, workspaceDir = process.cwd(), homeDir
 
   if (inventory.sources.global.active || inventory.sources.workspace.active) {
     const permanentClone = homeDir ? path.join(homeDir, '.gemini', 'sources', 'agent-marketplace') : '';
-    if (permanentClone && fs.existsSync(permanentClone)) {
+    const activeEntry = findMarketplaceSourceEntry({ entries: inventory.sources.workspace.entries }, repoRoot, homeDir)
+      || findMarketplaceSourceEntry({ entries: inventory.sources.global.entries }, repoRoot, homeDir);
+    const activeRepoDir = activeEntry && activeEntry.path
+      ? (path.basename(activeEntry.path) === 'plugins' ? path.dirname(activeEntry.path) : activeEntry.path)
+      : '';
+    if (activeRepoDir && fs.existsSync(path.join(activeRepoDir, '.git'))) {
+      sourceCommitsBehind = checkGitDir(activeRepoDir);
+    } else if (permanentClone && fs.existsSync(permanentClone)) {
       sourceCommitsBehind = checkGitDir(permanentClone);
     } else if (fs.existsSync(path.join(repoRoot, '.git'))) {
       sourceCommitsBehind = checkGitDir(repoRoot);
@@ -774,8 +781,21 @@ function uninstallPlugin(pluginId, scope, workspaceDir = process.cwd(), homeDir 
     const rootParent = path.dirname(pluginsParent);
     removeEmptyDirectory(rootParent);
 
-    // Remove activation entry from config.json
-    removePluginFromConfig(pluginId, homeDir);
+    // Only remove activation entry from config.json if not still installed in the other scope or mounted via source
+    const otherScope = scope === 'workspace' ? 'global' : 'workspace';
+    let stillInstalledOtherScope = false;
+    try {
+      const otherPath = resolvePluginInstallPath(pluginId, otherScope, workspaceDir, homeDir);
+      stillInstalledOtherScope = Boolean(otherPath && fs.existsSync(otherPath));
+    } catch {}
+    const wsCfg = getPluginsConfig(path.join(workspaceDir, '.agents', 'plugins.json'));
+    const glCfg = homeDir ? getPluginsConfig(path.join(homeDir, '.gemini', 'config', 'plugins.json')) : { entries: [] };
+    const stillMountedViaSource = [...(wsCfg.entries || []), ...(glCfg.entries || [])].some(
+      e => e && e.path && fs.existsSync(path.join(e.path, pluginId))
+    );
+    if (!stillInstalledOtherScope && !stillMountedViaSource) {
+      removePluginFromConfig(pluginId, homeDir);
+    }
 
     return { success: true, targetPath };
   }
@@ -794,18 +814,18 @@ function uninstallPlugin(pluginId, scope, workspaceDir = process.cwd(), homeDir 
  * @returns {{ success: boolean, updated: boolean, fromVersion: string, toVersion: string, targetPath: string }}
  */
 function updatePlugin(pluginId, repoRoot, scope, workspaceDir = process.cwd(), homeDir = getDefaultHomeDir()) {
-  const targetPath = resolvePluginInstallPath(pluginId, scope, workspaceDir, homeDir);
-  const info = getInstalledPluginInfo(targetPath);
-
-  if (!info.installed) {
-    throw new Error(`Plugin '${pluginId}' is not installed in ${scope} scope.`);
-  }
-
   const available = getAvailablePlugins(repoRoot);
   const plugin = available.find(p => p.id.toLowerCase() === pluginId.toLowerCase());
 
   if (!plugin) {
     throw new Error(`Plugin '${pluginId}' not found in source repository.`);
+  }
+
+  const targetPath = resolvePluginInstallPath(plugin.id, scope, workspaceDir, homeDir);
+  const info = getInstalledPluginInfo(targetPath);
+
+  if (!info.installed) {
+    throw new Error(`Plugin '${plugin.id}' is not installed in ${scope} scope.`);
   }
 
   const comp = compareVersions(info.version, plugin.version);
@@ -820,7 +840,7 @@ function updatePlugin(pluginId, repoRoot, scope, workspaceDir = process.cwd(), h
   }
 
   // Execute update copy
-  installPlugin(pluginId, repoRoot, scope, workspaceDir, homeDir);
+  installPlugin(plugin.id, repoRoot, scope, workspaceDir, homeDir);
 
   return {
     success: true,
