@@ -82,7 +82,19 @@ export function getIndexLayerDirs(workspaceRoot = process.cwd()) {
 }
 
 /**
- * Loads cached multi-vectors from SQLite keyed by lowercase slug and layer+path when dimension matches active config.
+ * Checks if a buffer/value decodes to a vector with expected dimensions.
+ */
+function hasDimensionMatch(val, dimensions) {
+  if (!val || !dimensions) return false;
+  if ((val instanceof Uint8Array || Buffer.isBuffer(val)) && val.byteLength === dimensions * 4 && val[0] !== 91) {
+    return true;
+  }
+  const decoded = bufferOrJsonToArray(val);
+  return Array.isArray(decoded) && decoded.length === dimensions;
+}
+
+/**
+ * Loads cached multi-vectors from SQLite keyed by layer:team:path and lowercase slug when dimension matches active config.
  */
 export function loadCachedVectorsMap(workspaceRoot = process.cwd()) {
   const cached = new Map();
@@ -92,8 +104,21 @@ export function loadCachedVectorsMap(workspaceRoot = process.cwd()) {
   try {
     const activeConfig = getActiveEmbeddingConfig();
     const currentWsId = normalizeWorkspaceId(workspaceRoot);
+
+    const vecRows = new Map();
+    try {
+      const dimRows = db.prepare(`
+        SELECT workspace_id, layer, team_slug, path, mtime, trigger_vector, content_vector, entity_vector
+        FROM memory_vectors
+        WHERE (workspace_id = ? OR workspace_id = 'global') AND dimensions = ?
+      `).all(currentWsId, activeConfig.dimensions);
+      for (const vr of dimRows) {
+        vecRows.set(`${vr.workspace_id}:${vr.layer}:${vr.team_slug || ''}:${vr.path}`, vr);
+      }
+    } catch {}
+
     const rows = db.prepare(`
-      SELECT layer, team_slug, slug, path, mtime, trigger_vector, content_vector, entity_vector
+      SELECT workspace_id, layer, team_slug, slug, path, mtime, trigger_vector, content_vector, entity_vector
       FROM memories
       WHERE workspace_id = ? OR workspace_id = 'global'
     `).all(currentWsId);
@@ -107,9 +132,24 @@ export function loadCachedVectorsMap(workspaceRoot = process.cwd()) {
       }
       if (diskMtime !== r.mtime) continue;
 
-      const tVec = bufferOrJsonToArray(r.trigger_vector);
-      const cVec = bufferOrJsonToArray(r.content_vector);
-      const eVec = bufferOrJsonToArray(r.entity_vector);
+      let tVec = bufferOrJsonToArray(r.trigger_vector);
+      let cVec = bufferOrJsonToArray(r.content_vector);
+      let eVec = bufferOrJsonToArray(r.entity_vector);
+
+      if (
+        !tVec || !cVec || !eVec ||
+        tVec.length !== activeConfig.dimensions ||
+        cVec.length !== activeConfig.dimensions ||
+        eVec.length !== activeConfig.dimensions
+      ) {
+        const vr = vecRows.get(`${r.workspace_id}:${r.layer}:${r.team_slug || ''}:${r.path}`);
+        if (vr && vr.mtime === diskMtime) {
+          tVec = bufferOrJsonToArray(vr.trigger_vector);
+          cVec = bufferOrJsonToArray(vr.content_vector);
+          eVec = bufferOrJsonToArray(vr.entity_vector);
+        }
+      }
+
       if (
         tVec && cVec && eVec &&
         tVec.length === activeConfig.dimensions &&
@@ -154,26 +194,37 @@ function collectPendingDiskState(db, workspaceRoot, activeConfig, checkVectors) 
     WHERE workspace_id = ? OR workspace_id = 'global'
   `).all(currentWsId);
 
+  const cachedDimMap = new Map();
+  if (checkVectors && activeConfig) {
+    try {
+      const dimRows = db.prepare(`
+        SELECT workspace_id, layer, team_slug, path, mtime, trigger_vector, content_vector, entity_vector
+        FROM memory_vectors
+        WHERE (workspace_id = ? OR workspace_id = 'global') AND dimensions = ?
+      `).all(currentWsId, activeConfig.dimensions);
+      for (const vr of dimRows) {
+        if (vr.trigger_vector && vr.content_vector && vr.entity_vector) {
+          const key = `${vr.workspace_id}:${vr.layer}:${vr.team_slug || ''}:${vr.path}`;
+          cachedDimMap.set(key, vr);
+        }
+      }
+    } catch {}
+  }
+
   const existingMap = new Map();
   for (const row of existingRows) {
     let hasValidVector = false;
-    if (checkVectors && row.trigger_vector && row.content_vector && row.entity_vector) {
-      const tv = bufferOrJsonToArray(row.trigger_vector);
-      const cv = bufferOrJsonToArray(row.content_vector);
-      const ev = bufferOrJsonToArray(row.entity_vector);
-      if (
-        Array.isArray(tv) && tv.length === activeConfig.dimensions &&
-        Array.isArray(cv) && cv.length === activeConfig.dimensions &&
-        Array.isArray(ev) && ev.length === activeConfig.dimensions
-      ) {
-        hasValidVector = true;
-      }
+    if (checkVectors && activeConfig && row.trigger_vector && row.content_vector && row.entity_vector) {
+      hasValidVector =
+        hasDimensionMatch(row.trigger_vector, activeConfig.dimensions) &&
+        hasDimensionMatch(row.content_vector, activeConfig.dimensions) &&
+        hasDimensionMatch(row.entity_vector, activeConfig.dimensions);
     }
     const key = `${row.workspace_id}:${row.layer}:${row.team_slug || ''}:${row.path}`;
     existingMap.set(key, { slug: row.slug, mtime: row.mtime, hasValidVector });
   }
 
-  return { currentFiles, existingRows, existingMap };
+  return { currentFiles, existingRows, existingMap, cachedDimMap };
 }
 
 function parseEntryForSync(item) {
@@ -189,11 +240,12 @@ function parseEntryForSync(item) {
     trigger: fm.description || fm.trigger || '',
     body: parsed.body,
     fm,
-    multiVec: null
+    multiVec: null,
+    rawVectorBuffers: null
   };
 }
 
-function flushSyncToDatabase(db, currentFiles, existingRows, pendingUpdates, writeVectors) {
+function flushSyncToDatabase(db, currentFiles, existingRows, pendingUpdates, writeVectors, vectorDimensions = null) {
   const insertMetaWithVec = db.prepare(`
     INSERT INTO memories (
       workspace_id, layer, team_slug, path, slug, domain, type, verified, trigger, mtime,
@@ -210,6 +262,25 @@ function flushSyncToDatabase(db, currentFiles, existingRows, pendingUpdates, wri
       trigger_vector=excluded.trigger_vector,
       content_vector=excluded.content_vector,
       entity_vector=excluded.entity_vector
+  `);
+
+  const upsertMemoryVector = db.prepare(`
+    INSERT INTO memory_vectors (
+      workspace_id, layer, team_slug, path, dimensions, mtime,
+      trigger_vector, content_vector, entity_vector
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(workspace_id, layer, team_slug, path, dimensions) DO UPDATE SET
+      mtime=excluded.mtime,
+      trigger_vector=excluded.trigger_vector,
+      content_vector=excluded.content_vector,
+      entity_vector=excluded.entity_vector
+  `);
+
+  const restoreMemoryVectorsOnly = db.prepare(`
+    UPDATE memories
+    SET trigger_vector = ?, content_vector = ?, entity_vector = ?
+    WHERE workspace_id = ? AND layer = ? AND team_slug = ? AND path = ?
   `);
 
   const insertMetaNoVec = db.prepare(`
@@ -241,10 +312,29 @@ function flushSyncToDatabase(db, currentFiles, existingRows, pendingUpdates, wri
     VALUES (?, ?, ?, ?, ?, ?)
   `);
 
+  const deleteVecCache = db.prepare('DELETE FROM memory_vectors WHERE workspace_id = ? AND layer = ? AND team_slug = ? AND path = ?');
+
   db.exec('BEGIN IMMEDIATE');
   try {
     for (const u of pendingUpdates) {
-      if (writeVectors && u.multiVec) {
+      if (u.vectorsOnly && u.rawVectorBuffers) {
+        restoreMemoryVectorsOnly.run(
+          u.rawVectorBuffers.trigger_vector,
+          u.rawVectorBuffers.content_vector,
+          u.rawVectorBuffers.entity_vector,
+          u.item.wsId,
+          u.item.layer,
+          u.item.teamSlug,
+          u.item.filePath
+        );
+        continue;
+      }
+
+      if (writeVectors && (u.rawVectorBuffers || u.multiVec)) {
+        const tvBuf = u.rawVectorBuffers ? u.rawVectorBuffers.trigger_vector : arrayToFloat32Buffer(u.multiVec.trigger_vector);
+        const cvBuf = u.rawVectorBuffers ? u.rawVectorBuffers.content_vector : arrayToFloat32Buffer(u.multiVec.content_vector);
+        const evBuf = u.rawVectorBuffers ? u.rawVectorBuffers.entity_vector : arrayToFloat32Buffer(u.multiVec.entity_vector);
+
         insertMetaWithVec.run(
           u.item.wsId,
           u.item.layer,
@@ -256,10 +346,25 @@ function flushSyncToDatabase(db, currentFiles, existingRows, pendingUpdates, wri
           u.verified,
           u.trigger,
           u.item.mtime,
-          arrayToFloat32Buffer(u.multiVec.trigger_vector),
-          arrayToFloat32Buffer(u.multiVec.content_vector),
-          arrayToFloat32Buffer(u.multiVec.entity_vector)
+          tvBuf,
+          cvBuf,
+          evBuf
         );
+
+        const dims = vectorDimensions || (u.multiVec?.trigger_vector?.length || (tvBuf ? Math.floor(tvBuf.byteLength / 4) : 0));
+        if (dims > 0 && tvBuf && cvBuf && evBuf) {
+          upsertMemoryVector.run(
+            u.item.wsId,
+            u.item.layer,
+            u.item.teamSlug,
+            u.item.filePath,
+            dims,
+            u.item.mtime,
+            tvBuf,
+            cvBuf,
+            evBuf
+          );
+        }
       } else {
         insertMetaNoVec.run(
           u.item.wsId,
@@ -304,6 +409,7 @@ function flushSyncToDatabase(db, currentFiles, existingRows, pendingUpdates, wri
         deleteMeta.run(row.workspace_id, row.layer, teamSlug, row.path);
         deleteFts.run(row.workspace_id, row.layer, teamSlug, row.slug);
         deleteGraph.run(row.workspace_id, row.layer, teamSlug, row.slug);
+        deleteVecCache.run(row.workspace_id, row.layer, teamSlug, row.path);
       }
     }
 
@@ -317,7 +423,7 @@ function flushSyncToDatabase(db, currentFiles, existingRows, pendingUpdates, wri
 }
 
 /**
- * Synchronous metadata, FTS5, and graph sync sharing exact Schema v2 logic.
+ * Synchronous metadata, FTS5, and graph sync sharing exact Schema v3 logic.
  */
 export function syncSqliteMetadataSync(workspaceRoot = process.cwd()) {
   const db = getDatabase();
@@ -340,6 +446,7 @@ export function syncSqliteMetadataSync(workspaceRoot = process.cwd()) {
 
 /**
  * Asynchronous full SQLite synchronization engine (metadata, FTS5, graph edges, and binary BLOB vectors).
+ * Uses dimension-partitioned memory_vectors cache so alternating engines/workspaces never thrash vectors.
  */
 export async function syncSqliteCore(workspaceRoot = process.cwd(), { computeVectors = true } = {}) {
   if (!computeVectors) {
@@ -353,21 +460,12 @@ export async function syncSqliteCore(workspaceRoot = process.cwd(), { computeVec
 
   const activeConfig = getActiveEmbeddingConfig();
 
-  let storedDim = null;
-  try {
-    const row = db.prepare('SELECT val FROM meta WHERE key = ?').get('embedding_dim');
-    if (row && row.val) storedDim = parseInt(row.val, 10);
-  } catch {}
-
-  if (storedDim && storedDim !== activeConfig.dimensions) {
-    db.exec(`UPDATE memories SET trigger_vector = NULL, content_vector = NULL, entity_vector = NULL;`);
-  }
   try {
     db.prepare('INSERT OR REPLACE INTO meta (key, val) VALUES (?, ?)').run('embedding_engine', activeConfig.engine);
     db.prepare('INSERT OR REPLACE INTO meta (key, val) VALUES (?, ?)').run('embedding_dim', String(activeConfig.dimensions));
   } catch {}
 
-  const { currentFiles, existingRows, existingMap } = collectPendingDiskState(db, workspaceRoot, activeConfig, true);
+  const { currentFiles, existingRows, existingMap, cachedDimMap } = collectPendingDiskState(db, workspaceRoot, activeConfig, true);
   const pendingUpdates = [];
 
   for (const [key, item] of currentFiles.entries()) {
@@ -375,6 +473,31 @@ export async function syncSqliteCore(workspaceRoot = process.cwd(), { computeVec
     if (prev && prev.mtime === item.mtime && prev.hasValidVector) {
       continue;
     }
+
+    const cachedVecRow = cachedDimMap.get(key);
+    if (cachedVecRow && cachedVecRow.mtime === item.mtime) {
+      const rawVectorBuffers = {
+        trigger_vector: cachedVecRow.trigger_vector,
+        content_vector: cachedVecRow.content_vector,
+        entity_vector: cachedVecRow.entity_vector
+      };
+      if (prev && prev.mtime === item.mtime) {
+        pendingUpdates.push({
+          item,
+          vectorsOnly: true,
+          rawVectorBuffers
+        });
+        continue;
+      }
+      try {
+        const entryData = parseEntryForSync(item);
+        entryData.prevSlug = prev ? prev.slug : null;
+        entryData.rawVectorBuffers = rawVectorBuffers;
+        pendingUpdates.push(entryData);
+        continue;
+      } catch {}
+    }
+
     try {
       const entryData = parseEntryForSync(item);
       entryData.prevSlug = prev ? prev.slug : null;
@@ -401,5 +524,5 @@ export async function syncSqliteCore(workspaceRoot = process.cwd(), { computeVec
     } catch {}
   }
 
-  return flushSyncToDatabase(db, currentFiles, existingRows, pendingUpdates, true);
+  return flushSyncToDatabase(db, currentFiles, existingRows, pendingUpdates, true, activeConfig.dimensions);
 }

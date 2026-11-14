@@ -350,7 +350,7 @@ const TOOLS = [
         body: { type: 'string', description: 'Alternative full body.' },
         type: {
           type: 'string',
-          enum: ['convention', 'tool-gotcha', 'platform-fact', 'personal-preference'],
+          enum: ['convention', 'tool-gotcha', 'platform-fact', 'preference'],
           description: 'Guideline type.'
         },
         domain: { type: 'string', description: 'Taxonomic category.' },
@@ -1137,6 +1137,8 @@ const rl = readline.createInterface({
   terminal: false
 });
 
+let requestQueue = Promise.resolve();
+
 rl.on('line', (line) => {
   const trimmed = line.trim();
   if (!trimmed) return;
@@ -1154,7 +1156,24 @@ rl.on('line', (line) => {
     });
     return;
   }
-  handleRequest(parsed).catch(() => {});
+  requestQueue = requestQueue.then(async () => {
+    try {
+      await handleRequest(parsed);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      process.stderr.write(`[knowledge-capture] Unhandled JSON-RPC error: ${msg}\n`);
+      if (parsed && parsed.id !== undefined && parsed.id !== null) {
+        sendJsonRpc({
+          jsonrpc: '2.0',
+          id: parsed.id,
+          error: {
+            code: -32603,
+            message: `Internal error: ${msg}`
+          }
+        });
+      }
+    }
+  });
 });
 
 process.on('SIGINT', () => process.exit(0));

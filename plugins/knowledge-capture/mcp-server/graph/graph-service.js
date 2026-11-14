@@ -3,7 +3,7 @@ import { getDatabase } from '../db/connection.js';
 import { normalizeWorkspaceId } from '../core/storage-paths.js';
 import { scanLayerEntries } from '../retrieval/shadow-resolver.js';
 import { isIndexDirty } from '../retrieval/hybrid-search.js';
-import { readTelemetryJson } from '../db/telemetry.js';
+import { loadScopedTelemetryMap, pickTelemetryEntry } from '../db/telemetry.js';
 import { syncSqliteMetadataSync } from '../db/indexer.js';
 
 /**
@@ -21,22 +21,36 @@ export function syncSqliteMetadata(workspaceRoot = process.cwd()) {
 export function getKnowledgeGraphData(workspaceRoot) {
   const db = getDatabase();
   const currentWsId = normalizeWorkspaceId(workspaceRoot);
+  const teleLookup = loadScopedTelemetryMap(workspaceRoot, db);
 
   let rawNodes = [];
   let rawLinks = [];
 
   if (db && !isIndexDirty(workspaceRoot)) {
-    rawNodes = db.prepare(`
-      SELECT m.slug as id, m.slug, m.layer, m.team_slug, m.domain, m.type, m.verified, m.trigger as description,
-             COALESCE(t.applied_count, 0) as applied_count,
-             COALESCE(t.recalled_count, 0) as recalled_count,
-             COALESCE(t.test_pass_count, 0) as test_pass_count,
-             COALESCE(t.test_fail_count, 0) as test_fail_count,
-             COALESCE(t.efficacy_score, 1.0) as efficacy_score
+    const rows = db.prepare(`
+      SELECT m.workspace_id, m.slug as id, m.slug, m.layer, m.team_slug, m.domain, m.type, m.verified, m.trigger as description
       FROM memories m
-      LEFT JOIN telemetry t ON LOWER(m.slug) = LOWER(t.slug)
       WHERE m.workspace_id = ? OR m.workspace_id = 'global'
     `).all(currentWsId);
+
+    rawNodes = rows.map(r => {
+      const tEntry = pickTelemetryEntry(teleLookup, r.workspace_id || currentWsId, r.layer, r.team_slug || '', r.slug);
+      return {
+        id: r.id,
+        slug: r.slug,
+        layer: r.layer,
+        team_slug: r.team_slug || '',
+        domain: r.domain,
+        type: r.type,
+        verified: r.verified,
+        description: r.description,
+        applied_count: tEntry?.applied_count || 0,
+        recalled_count: tEntry?.recalled_count || 0,
+        test_pass_count: tEntry?.test_pass_count || 0,
+        test_fail_count: tEntry?.test_fail_count || 0,
+        efficacy_score: typeof tEntry?.efficacy_score === 'number' ? tEntry.efficacy_score : 1.0
+      };
+    });
 
     rawLinks = db.prepare(`
       SELECT DISTINCT source_layer, source_team_slug, source_slug as source, target_slug as target, rel_type as type
@@ -45,21 +59,10 @@ export function getKnowledgeGraphData(workspaceRoot) {
     `).all(currentWsId);
   } else {
     const { activeEntries } = scanLayerEntries(workspaceRoot, 'all');
-    const tele = readTelemetryJson();
-    if (db) {
-      try {
-        for (const row of db.prepare('SELECT * FROM telemetry').all()) {
-          if (row && row.slug) tele[row.slug] = row;
-        }
-      } catch {}
-    }
-    const teleLower = {};
-    for (const [k, v] of Object.entries(tele)) {
-      teleLower[k.toLowerCase()] = v;
-    }
 
     rawNodes = activeEntries.map(e => {
-      const tEntry = tele[e.slug] || teleLower[e.slug.toLowerCase()];
+      const entryWsId = e.layerKey === 'workspace' ? currentWsId : 'global';
+      const tEntry = pickTelemetryEntry(teleLookup, entryWsId, e.layerKey, e.teamSlug || '', e.slug);
       return {
         id: e.slug,
         slug: e.slug,

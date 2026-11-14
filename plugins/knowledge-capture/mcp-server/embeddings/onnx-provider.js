@@ -32,15 +32,16 @@ export function resetOnnxState() {
  * only if @xenova/transformers is installed and otherwise defaults to 'heuristic' (128-d).
  */
 export function getActiveEmbeddingConfig() {
-  const onnxAvailable = isOnnxPackageAvailable() && !onnxLoadFailed;
+  const onnxPackageInstalled = isOnnxPackageAvailable();
+  const onnxReady = onnxPackageInstalled && !onnxLoadFailed;
   const envChoice = typeof process.env.KC_EMBEDDING_ENGINE === 'string'
     ? process.env.KC_EMBEDDING_ENGINE.trim().toLowerCase()
     : '';
   if (envChoice) {
     if (envChoice === 'onnx') {
-      return { engine: 'onnx', dimensions: 384, onnxAvailable, fallbackActive: !onnxAvailable };
+      return { engine: 'onnx', dimensions: 384, onnxAvailable: onnxReady, fallbackActive: !onnxReady };
     }
-    return { engine: 'heuristic', dimensions: 128, onnxAvailable, fallbackActive: false };
+    return { engine: 'heuristic', dimensions: 128, onnxAvailable: onnxReady, fallbackActive: false };
   }
 
   try {
@@ -51,16 +52,16 @@ export function getActiveEmbeddingConfig() {
         ? settings.embeddingEngine.trim().toLowerCase()
         : '';
       if (settingEngine === 'onnx') {
-        return { engine: 'onnx', dimensions: 384, onnxAvailable, fallbackActive: !onnxAvailable };
+        return { engine: 'onnx', dimensions: 384, onnxAvailable: onnxReady, fallbackActive: !onnxReady };
       }
       if (settingEngine === 'heuristic') {
-        return { engine: 'heuristic', dimensions: 128, onnxAvailable, fallbackActive: false };
+        return { engine: 'heuristic', dimensions: 128, onnxAvailable: onnxReady, fallbackActive: false };
       }
     }
   } catch {}
 
-  if (onnxAvailable) {
-    return { engine: 'onnx', dimensions: 384, onnxAvailable: true, fallbackActive: false };
+  if (onnxPackageInstalled) {
+    return { engine: 'onnx', dimensions: 384, onnxAvailable: onnxReady, fallbackActive: !onnxReady };
   }
   return { engine: 'heuristic', dimensions: 128, onnxAvailable: false, fallbackActive: false };
 }

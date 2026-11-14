@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { getDatabase } from './connection.js';
-import { getTelemetryJsonPath } from '../core/storage-paths.js';
+import { getTelemetryJsonPath, normalizeWorkspaceId } from '../core/storage-paths.js';
 
 export function readTelemetryJson() {
   const p = getTelemetryJsonPath();
@@ -24,6 +24,128 @@ export function writeTelemetryJson(data) {
   } catch {}
 }
 
+function makeScopedJsonKey(workspaceId, layer, teamSlug, canonSlug) {
+  if (workspaceId === 'global' && !layer && !teamSlug) {
+    return canonSlug;
+  }
+  return `${workspaceId}::${layer || ''}::${teamSlug || ''}::${canonSlug}`;
+}
+
+/**
+ * Resolves the canonical telemetry partition key `(workspaceId, layer, teamSlug)` for a memory slug.
+ */
+export function resolveTelemetryPartition(slug, details = {}, db = null) {
+  const canonSlug = String(slug || '').trim().toLowerCase();
+  const safeDetails = (details && typeof details === 'object' && !Array.isArray(details)) ? details : {};
+  const workspaceRoot = safeDetails.workspaceRoot;
+  const explicitlyScopedLayer = typeof safeDetails.layer === 'string' ? safeDetails.layer.toLowerCase() : '';
+  const explicitTeamSlug = typeof safeDetails.teamSlug === 'string' ? safeDetails.teamSlug : '';
+
+  if (explicitlyScopedLayer === 'workspace') {
+    return {
+      workspaceId: normalizeWorkspaceId(workspaceRoot || process.cwd()),
+      layer: 'workspace',
+      teamSlug: ''
+    };
+  }
+  if (explicitlyScopedLayer === 'private') {
+    return { workspaceId: 'global', layer: 'private', teamSlug: '' };
+  }
+  if (explicitlyScopedLayer === 'team') {
+    return { workspaceId: 'global', layer: 'team', teamSlug: explicitTeamSlug };
+  }
+
+  if (workspaceRoot) {
+    const wsId = normalizeWorkspaceId(workspaceRoot);
+    if (db) {
+      try {
+        const memRow = db.prepare(`
+          SELECT workspace_id, layer, team_slug
+          FROM memories
+          WHERE (workspace_id = ? OR workspace_id = 'global') AND LOWER(slug) = ?
+          ORDER BY CASE layer WHEN 'workspace' THEN 3 WHEN 'private' THEN 2 WHEN 'team' THEN 1 ELSE 0 END DESC
+          LIMIT 1
+        `).get(wsId, canonSlug);
+        if (memRow) {
+          return {
+            workspaceId: memRow.workspace_id || wsId,
+            layer: memRow.layer || '',
+            teamSlug: memRow.team_slug || ''
+          };
+        }
+      } catch {}
+    }
+    const wsMemFile = path.join(workspaceRoot, '.agents', 'rules', 'memory', `${canonSlug}.md`);
+    if (fs.existsSync(wsMemFile)) {
+      return { workspaceId: wsId, layer: 'workspace', teamSlug: '' };
+    }
+    return { workspaceId: wsId, layer: '', teamSlug: '' };
+  }
+
+  return { workspaceId: 'global', layer: '', teamSlug: '' };
+}
+
+/**
+ * Loads telemetry lookup map for a workspace (own workspace rows + shared 'global' rows).
+ */
+export function loadScopedTelemetryMap(workspaceRoot = process.cwd(), dbInstance = null) {
+  const db = dbInstance || getDatabase();
+  const wsId = normalizeWorkspaceId(workspaceRoot);
+  const byFullKey = new Map();
+
+  if (db) {
+    try {
+      const rows = db.prepare(`
+        SELECT * FROM telemetry
+        WHERE workspace_id = ? OR workspace_id = 'global'
+      `).all(wsId);
+      for (const row of rows) {
+        if (!row || !row.slug) continue;
+        const key = `${row.workspace_id || 'global'}::${row.layer || ''}::${row.team_slug || ''}::${String(row.slug).toLowerCase()}`;
+        byFullKey.set(key, row);
+      }
+      return byFullKey;
+    } catch {}
+  }
+
+  const jsonData = readTelemetryJson();
+  for (const [k, v] of Object.entries(jsonData)) {
+    if (!v || typeof v !== 'object') continue;
+    if (k.includes('::')) {
+      const parts = k.split('::');
+      if (parts.length >= 4) {
+        const rowWs = parts[0];
+        if (rowWs === wsId || rowWs === 'global') {
+          byFullKey.set(k.toLowerCase(), { slug: parts.slice(3).join('::'), ...v });
+        }
+      }
+    } else {
+      byFullKey.set(`global::::::${k.toLowerCase()}`, { slug: k, ...v });
+    }
+  }
+  return byFullKey;
+}
+
+/**
+ * Picks the best matching telemetry record for a specific memory partition, preventing cross-repo bleed.
+ */
+export function pickTelemetryEntry(teleLookup, workspaceId, layer, teamSlug, slug) {
+  if (!teleLookup || !slug) return null;
+  const sLower = String(slug).trim().toLowerCase();
+  const ws = workspaceId || 'global';
+  const l = layer || '';
+  const ts = teamSlug || '';
+
+  return (
+    teleLookup.get(`${ws}::${l}::${ts}::${sLower}`) ||
+    teleLookup.get(`${ws}::${l}::::${sLower}`) ||
+    teleLookup.get(`${ws}::::::${sLower}`) ||
+    (ws !== 'global' ? teleLookup.get(`global::::::${sLower}`) : teleLookup.get(`global::${l}::${ts}::${sLower}`)) ||
+    teleLookup.get(`global::::::${sLower}`) ||
+    null
+  );
+}
+
 /**
  * Records telemetry events and verification feedback for memory utility and efficacy scoring.
  */
@@ -31,40 +153,49 @@ export function recordTelemetryEvent(slug, eventType = 'recall', details = {}) {
   if (!slug) return;
   const canonSlug = String(slug).trim().toLowerCase();
   if (!canonSlug) return;
+  const safeDetails = (details && typeof details === 'object' && !Array.isArray(details)) ? details : {};
   const db = getDatabase();
+  const partition = resolveTelemetryPartition(canonSlug, safeDetails, db);
   const nowIso = new Date().toISOString();
 
   if (db) {
     try {
       db.prepare(`
-        INSERT OR IGNORE INTO telemetry (slug, recalled_count, applied_count, test_pass_count, test_fail_count, efficacy_score)
-        VALUES (?, 0, 0, 0, 0, 1.0)
-      `).run(canonSlug);
+        INSERT OR IGNORE INTO telemetry (
+          workspace_id, layer, team_slug, slug,
+          recalled_count, applied_count, test_pass_count, test_fail_count, efficacy_score
+        )
+        VALUES (?, ?, ?, ?, 0, 0, 0, 0, 1.0)
+      `).run(partition.workspaceId, partition.layer, partition.teamSlug, canonSlug);
 
       if (eventType === 'apply') {
         db.prepare(`
-          UPDATE telemetry SET applied_count = applied_count + 1, last_applied = ? WHERE slug = ?
-        `).run(nowIso, canonSlug);
+          UPDATE telemetry
+          SET applied_count = applied_count + 1, last_applied = ?
+          WHERE workspace_id = ? AND layer = ? AND team_slug = ? AND slug = ?
+        `).run(nowIso, partition.workspaceId, partition.layer, partition.teamSlug, canonSlug);
       } else if (eventType === 'test_pass') {
         db.prepare(`
-          UPDATE telemetry 
+          UPDATE telemetry
           SET test_pass_count = test_pass_count + 1,
               efficacy_score = MIN(1.0, efficacy_score + 0.05),
               last_feedback = ?
-          WHERE slug = ?
-        `).run(details?.message || 'test_passed', canonSlug);
+          WHERE workspace_id = ? AND layer = ? AND team_slug = ? AND slug = ?
+        `).run(safeDetails.message || 'test_passed', partition.workspaceId, partition.layer, partition.teamSlug, canonSlug);
       } else if (eventType === 'test_fail') {
         db.prepare(`
-          UPDATE telemetry 
+          UPDATE telemetry
           SET test_fail_count = test_fail_count + 1,
               efficacy_score = MAX(0.1, efficacy_score - 0.20),
               last_feedback = ?
-          WHERE slug = ?
-        `).run(details?.message || 'test_failed', canonSlug);
+          WHERE workspace_id = ? AND layer = ? AND team_slug = ? AND slug = ?
+        `).run(safeDetails.message || 'test_failed', partition.workspaceId, partition.layer, partition.teamSlug, canonSlug);
       } else {
         db.prepare(`
-          UPDATE telemetry SET recalled_count = recalled_count + 1, last_recalled = ? WHERE slug = ?
-        `).run(nowIso, canonSlug);
+          UPDATE telemetry
+          SET recalled_count = recalled_count + 1, last_recalled = ?
+          WHERE workspace_id = ? AND layer = ? AND team_slug = ? AND slug = ?
+        `).run(nowIso, partition.workspaceId, partition.layer, partition.teamSlug, canonSlug);
       }
       return;
     } catch {}
@@ -72,8 +203,13 @@ export function recordTelemetryEvent(slug, eventType = 'recall', details = {}) {
 
   // Fallback to telemetry.json
   const data = readTelemetryJson();
-  if (!data[canonSlug]) {
-    data[canonSlug] = {
+  const jsonKey = makeScopedJsonKey(partition.workspaceId, partition.layer, partition.teamSlug, canonSlug);
+  if (!data[jsonKey]) {
+    data[jsonKey] = {
+      workspace_id: partition.workspaceId,
+      layer: partition.layer,
+      team_slug: partition.teamSlug,
+      slug: canonSlug,
       recalled_count: 0,
       applied_count: 0,
       test_pass_count: 0,
@@ -85,19 +221,19 @@ export function recordTelemetryEvent(slug, eventType = 'recall', details = {}) {
     };
   }
   if (eventType === 'apply') {
-    data[canonSlug].applied_count = (data[canonSlug].applied_count || 0) + 1;
-    data[canonSlug].last_applied = nowIso;
+    data[jsonKey].applied_count = (data[jsonKey].applied_count || 0) + 1;
+    data[jsonKey].last_applied = nowIso;
   } else if (eventType === 'test_pass') {
-    data[canonSlug].test_pass_count = (data[canonSlug].test_pass_count || 0) + 1;
-    data[canonSlug].efficacy_score = Math.min(1.0, (data[canonSlug].efficacy_score || 1.0) + 0.05);
-    data[canonSlug].last_feedback = details?.message || 'test_passed';
+    data[jsonKey].test_pass_count = (data[jsonKey].test_pass_count || 0) + 1;
+    data[jsonKey].efficacy_score = Math.min(1.0, (data[jsonKey].efficacy_score || 1.0) + 0.05);
+    data[jsonKey].last_feedback = safeDetails.message || 'test_passed';
   } else if (eventType === 'test_fail') {
-    data[canonSlug].test_fail_count = (data[canonSlug].test_fail_count || 0) + 1;
-    data[canonSlug].efficacy_score = Math.max(0.1, (data[canonSlug].efficacy_score || 1.0) - 0.20);
-    data[canonSlug].last_feedback = details?.message || 'test_failed';
+    data[jsonKey].test_fail_count = (data[jsonKey].test_fail_count || 0) + 1;
+    data[jsonKey].efficacy_score = Math.max(0.1, (data[jsonKey].efficacy_score || 1.0) - 0.20);
+    data[jsonKey].last_feedback = safeDetails.message || 'test_failed';
   } else {
-    data[canonSlug].recalled_count = (data[canonSlug].recalled_count || 0) + 1;
-    data[canonSlug].last_recalled = nowIso;
+    data[jsonKey].recalled_count = (data[jsonKey].recalled_count || 0) + 1;
+    data[jsonKey].last_recalled = nowIso;
   }
   writeTelemetryJson(data);
 }
@@ -122,16 +258,25 @@ export function emitTelemetryEvent(slug, eventType = 'recall', details = {}) {
  */
 export function recordMemoryEfficacy(slug, feedbackType, details = {}) {
   const canonSlug = String(slug || '').trim().toLowerCase();
-  recordTelemetryEvent(canonSlug, feedbackType, details);
+  const safeDetails = (details && typeof details === 'object' && !Array.isArray(details)) ? details : {};
+  recordTelemetryEvent(canonSlug, feedbackType, safeDetails);
   const db = getDatabase();
+  const partition = resolveTelemetryPartition(canonSlug, safeDetails, db);
+
   if (db) {
     try {
-      const row = db.prepare('SELECT * FROM telemetry WHERE LOWER(slug) = ?').get(canonSlug);
+      const row = db.prepare(`
+        SELECT * FROM telemetry
+        WHERE workspace_id = ? AND layer = ? AND team_slug = ? AND LOWER(slug) = ?
+      `).get(partition.workspaceId, partition.layer, partition.teamSlug, canonSlug);
       if (row) return row;
     } catch {}
   }
   const data = readTelemetryJson();
-  return data[canonSlug] ? { slug: canonSlug, ...data[canonSlug] } : { slug: canonSlug, efficacy_score: 1.0 };
+  const jsonKey = makeScopedJsonKey(partition.workspaceId, partition.layer, partition.teamSlug, canonSlug);
+  return data[jsonKey]
+    ? { slug: canonSlug, ...data[jsonKey] }
+    : { slug: canonSlug, efficacy_score: 1.0 };
 }
 
 /**
@@ -141,6 +286,7 @@ export function recordMemoryEfficacy(slug, feedbackType, details = {}) {
 export function correlateTestExecutionEfficacy(workspaceRoot = process.cwd(), options = {}) {
   const { command = '', exitCode = 0, stdout = '', stderr = '', slugs = [] } = options;
   const db = getDatabase();
+  const currentWsId = normalizeWorkspaceId(workspaceRoot);
 
   let targetSlugs = Array.isArray(slugs) && slugs.length > 0 ? slugs : [];
   const explicitSlugsProvided = Array.isArray(slugs) && slugs.length > 0;
@@ -149,20 +295,28 @@ export function correlateTestExecutionEfficacy(workspaceRoot = process.cwd(), op
     if (db) {
       try {
         const rows = db.prepare(`
-          SELECT slug FROM telemetry 
-          WHERE last_applied IS NOT NULL OR last_recalled IS NOT NULL
+          SELECT slug FROM telemetry
+          WHERE (workspace_id = ? OR workspace_id = 'global')
+            AND (last_applied IS NOT NULL OR last_recalled IS NOT NULL)
           ORDER BY COALESCE(last_applied, last_recalled) DESC
           LIMIT 5
-        `).all();
-        targetSlugs = rows.map(r => r.slug);
+        `).all(currentWsId);
+        targetSlugs = Array.from(new Set(rows.map(r => r.slug)));
       } catch {}
     } else {
       const data = readTelemetryJson();
       targetSlugs = Object.entries(data)
-        .filter(([, entry]) => entry && (entry.last_applied || entry.last_recalled))
+        .filter(([k, entry]) => {
+          if (!entry || (!entry.last_applied && !entry.last_recalled)) return false;
+          if (k.includes('::')) {
+            const ws = k.split('::')[0];
+            return ws === currentWsId || ws === 'global';
+          }
+          return true;
+        })
         .sort(([, a], [, b]) => String(b.last_applied || b.last_recalled).localeCompare(String(a.last_applied || a.last_recalled)))
         .slice(0, 5)
-        .map(([slug]) => slug);
+        .map(([k, entry]) => entry.slug || k);
     }
   }
 
@@ -178,7 +332,11 @@ export function correlateTestExecutionEfficacy(workspaceRoot = process.cwd(), op
 
   if (exitCode === 0) {
     for (const s of targetSlugs) {
-      const updated = recordMemoryEfficacy(s, 'test_pass', { command, message: 'Verified by automated test pass' });
+      const updated = recordMemoryEfficacy(s, 'test_pass', {
+        workspaceRoot,
+        command,
+        message: 'Verified by automated test pass'
+      });
       results.correlatedSlugs.push(s);
       results.updatedScores[s] = updated.efficacy_score;
     }
@@ -188,7 +346,7 @@ export function correlateTestExecutionEfficacy(workspaceRoot = process.cwd(), op
     for (const s of targetSlugs) {
       const slugKey = s.replace(/-/g, ' ');
       const slugTokens = s.split('-').filter(t => t.length > 2);
-      
+
       const textCorrelates = failureText.includes(s.toLowerCase()) ||
         failureText.includes(slugKey.toLowerCase()) ||
         (slugTokens.length >= 2 && slugTokens.filter(t => failureText.includes(t.toLowerCase())).length >= 2);
@@ -200,6 +358,7 @@ export function correlateTestExecutionEfficacy(workspaceRoot = process.cwd(), op
       if (isCorrelated) {
         const rawSnippet = stderr !== undefined && stderr !== null && stderr !== '' ? stderr : (stdout ?? '');
         const updated = recordMemoryEfficacy(s, 'test_fail', {
+          workspaceRoot,
           command,
           message: `Correlated with test failure: ${String(rawSnippet).slice(0, 200)}`
         });
@@ -213,4 +372,3 @@ export function correlateTestExecutionEfficacy(workspaceRoot = process.cwd(), op
 
   return results;
 }
-

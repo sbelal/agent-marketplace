@@ -379,17 +379,20 @@ export function resolveSingleMemoryContent(workspaceRoot, layer, slug, activeInd
 
   let filePath = null;
   let resolvedLayer = normalizedLayer;
+  let resolvedTeamSlug = '';
 
   if (normalizedLayer === 'all') {
     const active = activeIndex ? (activeIndex.get(slugKey) || activeIndex.get(cleanSlug)) : null;
     if (active && fs.existsSync(active.file)) {
       filePath = active.file;
       resolvedLayer = active.layerKey;
+      resolvedTeamSlug = active.teamSlug || '';
     } else {
       const match = layerProvider.findMemoryFile(cleanSlug, 'all');
       if (match) {
         filePath = match.path;
         resolvedLayer = match.layer;
+        resolvedTeamSlug = match.teamSlug || '';
       }
     }
     if (!filePath) {
@@ -402,10 +405,11 @@ export function resolveSingleMemoryContent(workspaceRoot, layer, slug, activeInd
     }
     filePath = match.path;
     resolvedLayer = match.layer;
+    resolvedTeamSlug = match.teamSlug || '';
   }
 
   // Asynchronous non-blocking telemetry emitter (preserves CQS while recording recall metrics)
-  emitTelemetryEvent(slugKey, 'recall');
+  emitTelemetryEvent(slugKey, 'recall', { workspaceRoot, layer: resolvedLayer, teamSlug: resolvedTeamSlug });
 
   const rawContent = fs.readFileSync(filePath, 'utf8');
   const parsed = parseYamlFrontmatter(rawContent);
@@ -689,10 +693,11 @@ export function saveMemoryEntry(workspaceRoot, params = {}) {
     if (howToApply) markdownBody += `## How to apply\n${howToApply.trim()}\n`;
   }
 
+  const normalizedType = type === 'personal-preference' ? 'preference' : (type || 'convention');
   const frontmatter = {
     name: cleanSlug,
-    type,
-    domain: domain.toLowerCase(),
+    type: normalizedType,
+    domain: String(domain || 'general').trim().toLowerCase() || 'general',
     description: description || trigger || 'Engineering guideline',
     verified: verified || new Date().toISOString().slice(0, 10),
     related: Array.isArray(related) ? related.map(r => String(r).replace(/\.md$/i, '').trim()).filter(Boolean) : []
@@ -1150,12 +1155,16 @@ export function applyMemoryPatch(workspaceRoot = process.cwd(), patchData = {}) 
       results.errors.push(`Memory slug '${slug}' not found on disk.`);
       continue;
     }
+    if (existing.layerKey === 'team') {
+      results.errors.push(`Cannot directly modify read-only Team memory '${slug}'; create an override in Private/Workspace or promote via /kc-promote.`);
+      continue;
+    }
     const filePath = existing.file || existing.path;
     try {
       const raw = fs.readFileSync(filePath, 'utf8');
       const parsed = parseYamlFrontmatter(raw);
-      if (mod.domain) parsed.frontmatter.domain = mod.domain;
-      if (mod.type) parsed.frontmatter.type = mod.type;
+      if (mod.domain) parsed.frontmatter.domain = String(mod.domain).trim().toLowerCase();
+      if (mod.type) parsed.frontmatter.type = mod.type === 'personal-preference' ? 'preference' : mod.type;
       if (mod.description) {
         parsed.frontmatter.description = mod.description;
         delete parsed.frontmatter.trigger;
@@ -1181,6 +1190,10 @@ export function applyMemoryPatch(workspaceRoot = process.cwd(), patchData = {}) 
     const sourceEntry = entryMap.get(sourceSlug) || entryMap.get(String(sourceSlug).toLowerCase());
     if (!sourceEntry) {
       results.errors.push(`Source memory '${sourceSlug}' not found.`);
+      continue;
+    }
+    if (sourceEntry.layerKey === 'team') {
+      results.errors.push(`Cannot add links from read-only Team memory '${sourceSlug}'; create an override in Private/Workspace or promote via /kc-promote.`);
       continue;
     }
 
@@ -1221,6 +1234,10 @@ export function applyMemoryPatch(workspaceRoot = process.cwd(), patchData = {}) 
 
     const sourceEntry = entryMap.get(sourceSlug) || entryMap.get(String(sourceSlug).toLowerCase());
     if (!sourceEntry) continue;
+    if (sourceEntry.layerKey === 'team') {
+      results.errors.push(`Cannot remove links from read-only Team memory '${sourceSlug}'; Team layer is read-only locally.`);
+      continue;
+    }
 
     const sourceFilePath = sourceEntry.file || sourceEntry.path;
     try {

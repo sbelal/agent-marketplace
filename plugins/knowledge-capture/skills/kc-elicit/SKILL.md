@@ -27,12 +27,12 @@ If changes were found, present the structured proposals:
 | Action | Target Slug | Layer | Domain | Type | Proposed Description |
 | :--- | :--- | :---: | :---: | :---: | :--- |
 | `ELICIT-SAVE` | `session-dependency-updates` | `workspace` | `architecture` | `convention` | When updating project package dependencies or runtime toolchains |
-| `ELICIT-SAVE` | `session-test-regression-rules` | `workspace` | `testing` | `gotcha` | When running or writing test suites for recently modified modules |
+| `ELICIT-SAVE` | `session-test-regression-rules` | `workspace` | `testing` | `tool-gotcha` | When running or writing test suites for recently modified modules |
 ```
 
 **Developer Interaction:**
 Ask the developer:
-> *"Active changes were detected in this session. Would you like to capture any of these proposed memories into Workspace (`.agents/rules/memory/`) or Private (`~/.gemini/knowledge-capture/private/`) storage?"*
+> *"Active changes were detected in this session. Would you like to capture any of these proposed memories into Workspace (`.agents/rules/memory/`) or Private (`paths.privateDir` from `get_layer_statistics`, default `~/.gemini/knowledge-capture/private/`) storage?"*
 > Wait for confirmation before creating entries. Never commit or write files without explicit approval.
 
 

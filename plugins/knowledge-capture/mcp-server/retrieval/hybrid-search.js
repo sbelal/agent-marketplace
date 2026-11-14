@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import path from 'node:path';
 import { getDatabase } from '../db/connection.js';
 import { normalizeWorkspaceId } from '../core/storage-paths.js';
 import { parseYamlFrontmatter } from '../core/yaml-parser.js';
@@ -6,13 +7,20 @@ import { findMarkdownFiles, scanLayerEntries } from './shadow-resolver.js';
 import { tokenizeText, computeCosineSimilarity } from '../embeddings/heuristic-provider.js';
 import { getActiveEmbeddingConfig, generateEmbedding } from '../embeddings/onnx-provider.js';
 import { generateMultiVector, generateMultiVectorAsync, computeMultiVectorSimilarity } from '../embeddings/multi-vector.js';
-import { readTelemetryJson, emitTelemetryEvent } from '../db/telemetry.js';
+import { emitTelemetryEvent, loadScopedTelemetryMap, pickTelemetryEntry } from '../db/telemetry.js';
 import { syncSqliteCore, getIndexLayerDirs, bufferOrJsonToArray } from '../db/indexer.js';
-import path from 'node:path';
+
+function isVectorTupleValidForDim(tVal, cVal, eVal, dim) {
+  if (!tVal || !cVal || !eVal) return false;
+  const tv = bufferOrJsonToArray(tVal);
+  const cv = bufferOrJsonToArray(cVal);
+  const ev = bufferOrJsonToArray(eVal);
+  return Boolean(tv && cv && ev && tv.length === dim && cv.length === dim && ev.length === dim);
+}
 
 /**
- * Checks if the SQLite cache is dirty (files modified, added, deleted, or embedding dimension changed).
- * Pure query, side-effect free.
+ * Checks if the SQLite cache is dirty (files modified, added, deleted, or missing active-dimension vectors).
+ * Pure query, side-effect free. Uses bulk SQLite queries (no N+1 per-file SELECTs).
  */
 export function isIndexDirty(workspaceRoot = process.cwd()) {
   const db = getDatabase();
@@ -21,18 +29,32 @@ export function isIndexDirty(workspaceRoot = process.cwd()) {
   const { layerDirs, currentWsId } = getIndexLayerDirs(workspaceRoot);
   const activeConfig = getActiveEmbeddingConfig();
 
+  let rowMap = new Map();
+  let vecMap = new Map();
+  let dbCount = 0;
+
   try {
-    const dimRow = db.prepare('SELECT val FROM meta WHERE key = ?').get('embedding_dim');
-    if (!dimRow || parseInt(dimRow.val, 10) !== activeConfig.dimensions) {
-      return true;
+    const memRows = db.prepare(`
+      SELECT workspace_id, layer, team_slug, path, mtime, trigger_vector, content_vector, entity_vector
+      FROM memories
+      WHERE workspace_id = ? OR workspace_id = 'global'
+    `).all(currentWsId);
+    dbCount = memRows.length;
+    for (const r of memRows) {
+      rowMap.set(`${r.workspace_id}:${r.layer}:${r.team_slug || ''}:${r.path}`, r);
+    }
+
+    const dimRows = db.prepare(`
+      SELECT workspace_id, layer, team_slug, path, mtime, trigger_vector, content_vector, entity_vector
+      FROM memory_vectors
+      WHERE (workspace_id = ? OR workspace_id = 'global') AND dimensions = ?
+    `).all(currentWsId, activeConfig.dimensions);
+    for (const vr of dimRows) {
+      vecMap.set(`${vr.workspace_id}:${vr.layer}:${vr.team_slug || ''}:${vr.path}`, vr);
     }
   } catch {
     return true;
   }
-
-  const checkRowStmt = db.prepare(
-    'SELECT mtime, (trigger_vector IS NOT NULL AND content_vector IS NOT NULL AND entity_vector IS NOT NULL) AS has_vec FROM memories WHERE workspace_id = ? AND layer = ? AND team_slug = ? AND path = ?'
-  );
 
   let diskCount = 0;
   for (const { dir, wsId, layer, teamSlug } of layerDirs) {
@@ -44,9 +66,18 @@ export function isIndexDirty(workspaceRoot = process.cwd()) {
       try {
         const stats = fs.statSync(f);
         const mtime = Math.floor(stats.mtimeMs);
-        const row = checkRowStmt.get(wsId, layer, teamSlug, f);
-        if (!row || row.mtime !== mtime || !row.has_vec) {
+        const key = `${wsId}:${layer}:${teamSlug || ''}:${f}`;
+        const row = rowMap.get(key);
+        if (!row || row.mtime !== mtime) {
           return true;
+        }
+        const hasMainVec = isVectorTupleValidForDim(row.trigger_vector, row.content_vector, row.entity_vector, activeConfig.dimensions);
+        if (!hasMainVec) {
+          const dimRow = vecMap.get(key);
+          const hasCachedDimVec = dimRow && dimRow.mtime === mtime && dimRow.trigger_vector && dimRow.content_vector && dimRow.entity_vector;
+          if (!hasCachedDimVec) {
+            return true;
+          }
         }
       } catch {
         return true;
@@ -54,12 +85,7 @@ export function isIndexDirty(workspaceRoot = process.cwd()) {
     }
   }
 
-  try {
-    const countRow = db.prepare(`SELECT count(*) as c FROM memories WHERE workspace_id = ? OR workspace_id = 'global'`).get(currentWsId);
-    if ((countRow ? countRow.c : 0) !== diskCount) {
-      return true;
-    }
-  } catch {
+  if (dbCount !== diskCount) {
     return true;
   }
 
@@ -82,11 +108,8 @@ export function searchMemoriesFileBasedFallback(workspaceRoot, queryText, option
   const tokens = tokenizeText(queryText);
   if (!tokens.length) return [];
 
-  const tele = readTelemetryJson();
-  const teleLower = {};
-  for (const [k, v] of Object.entries(tele)) {
-    teleLower[k.toLowerCase()] = v;
-  }
+  const currentWsId = normalizeWorkspaceId(workspaceRoot);
+  const teleLookup = loadScopedTelemetryMap(workspaceRoot, null);
 
   const scored = [];
   const precedence = { workspace: 3, private: 2, team: 1 };
@@ -108,7 +131,8 @@ export function searchMemoriesFileBasedFallback(workspaceRoot, queryText, option
     const combinedScore = (sim * 0.6) + (keywordBoost * 0.4);
 
     if (combinedScore > 0.05) {
-      const tEntry = tele[entry.slug] || teleLower[entry.slug.toLowerCase()];
+      const entryWsId = entry.layerKey === 'workspace' ? currentWsId : 'global';
+      const tEntry = pickTelemetryEntry(teleLookup, entryWsId, entry.layerKey, entry.teamSlug || '', entry.slug);
       const efficacyScore = typeof tEntry?.efficacy_score === 'number' ? tEntry.efficacy_score : 1.0;
       const baseConfidence = Math.round(Math.min(1.0, combinedScore * 1.5) * 100);
       const modulatedConfidence = Math.round(baseConfidence * (0.6 + 0.4 * efficacyScore));
@@ -152,7 +176,7 @@ export function searchMemoriesFileBasedFallback(workspaceRoot, queryText, option
 /**
  * Multi-Vector Hybrid Semantic Retrieval with Reciprocal Rank Fusion (RRF).
  * Respects CQS: Only syncs index if files have changed or if options.sync === true.
- * Supports token-budgeted hierarchical recall ('compact' vs 'full' format).
+ * Resolves precedence & active partitions directly from SQLite when clean (no full-file YAML re-reads).
  */
 export async function searchMemoriesHybrid(workspaceRoot, queryText, options = {}) {
   if (!queryText || typeof queryText !== 'string' || !queryText.trim()) {
@@ -164,8 +188,8 @@ export async function searchMemoriesHybrid(workspaceRoot, queryText, options = {
     return searchMemoriesFileBasedFallback(workspaceRoot, queryText, options);
   }
 
-  // CQS & Dirty Check: only sync if explicitly requested or if files have changed
-  if (options.sync === true || isIndexDirty(workspaceRoot)) {
+  // CQS & Dirty Check: only sync if explicitly requested or (not disabled and index is dirty)
+  if (options.sync === true || (options.sync !== false && isIndexDirty(workspaceRoot))) {
     await syncSqliteIndex(workspaceRoot);
   }
 
@@ -175,57 +199,98 @@ export async function searchMemoriesHybrid(workspaceRoot, queryText, options = {
 
   const activeConfig = getActiveEmbeddingConfig();
   const queryVec = await generateEmbedding(cleanQuery, activeConfig.dimensions);
-  const currentWsId = normalizeWorkspaceId(workspaceRoot);
+  const { layerDirs, currentWsId } = getIndexLayerDirs(workspaceRoot);
+  const teleLookup = loadScopedTelemetryMap(workspaceRoot, db);
 
-  const { activeEntries, shadowedEntries } = scanLayerEntries(workspaceRoot, 'all');
-  const activeKeySet = new Set();
-  for (const entry of activeEntries) {
-    activeKeySet.add(`${entry.layerKey}:${entry.teamSlug || ''}:${entry.file}`);
-  }
+  // Build active layer partition rank map matching shadow-resolver precedence (Workspace > Private > Team in order)
+  const partitionOrderMap = new Map();
+  layerDirs.forEach((ld, idx) => {
+    const pKey = `${ld.wsId}:${ld.layer}:${ld.teamSlug || ''}`;
+    if (!partitionOrderMap.has(pKey)) {
+      partitionOrderMap.set(pKey, { order: idx, resolvedDir: path.resolve(ld.dir) });
+    }
+  });
 
-  const shadowedSet = new Set();
-  for (const shadowed of shadowedEntries) {
-    shadowedSet.add(`${shadowed.layerKey}:${shadowed.teamSlug || ''}:${shadowed.file}`);
-    shadowedSet.add(`${shadowed.layerKey}:${shadowed.slug.toLowerCase()}`);
-  }
-
-  const allRows = db.prepare(`
-    SELECT m.slug, m.layer, m.team_slug, m.workspace_id, m.domain, m.type, m.trigger, m.path,
-           m.trigger_vector, m.content_vector, m.entity_vector,
-           COALESCE(t.efficacy_score, 1.0) as efficacy_score,
-           COALESCE(t.test_pass_count, 0) as test_pass_count,
-           COALESCE(t.test_fail_count, 0) as test_fail_count
+  const rawMemRows = db.prepare(`
+    SELECT m.slug, m.layer, m.team_slug, m.workspace_id, m.domain, m.type, m.trigger, m.path, m.mtime,
+           m.trigger_vector, m.content_vector, m.entity_vector
     FROM memories m
-    LEFT JOIN telemetry t ON LOWER(m.slug) = LOWER(t.slug)
     WHERE (m.workspace_id = ? OR m.workspace_id = 'global')
   `).all(currentWsId);
 
+  const dimVecMap = new Map();
+  try {
+    const dimRows = db.prepare(`
+      SELECT workspace_id, layer, team_slug, path, mtime, trigger_vector, content_vector, entity_vector
+      FROM memory_vectors
+      WHERE (workspace_id = ? OR workspace_id = 'global') AND dimensions = ?
+    `).all(currentWsId, activeConfig.dimensions);
+    for (const vr of dimRows) {
+      dimVecMap.set(`${vr.workspace_id}:${vr.layer}:${vr.team_slug || ''}:${vr.path}`, vr);
+    }
+  } catch {}
+
+  const overrideMap = new Map();
+  try {
+    const overrideRows = db.prepare(`
+      SELECT source_layer, source_team_slug, source_slug, target_slug
+      FROM memories_graph
+      WHERE (workspace_id = ? OR workspace_id = 'global') AND rel_type = 'overrides'
+    `).all(currentWsId);
+    for (const ov of overrideRows) {
+      const ovKey = `${ov.source_layer}:${ov.source_team_slug || ''}:${String(ov.source_slug || '').toLowerCase()}`;
+      if (!overrideMap.has(ovKey)) overrideMap.set(ovKey, []);
+      overrideMap.get(ovKey).push(String(ov.target_slug || '').toLowerCase());
+    }
+  } catch {}
+
+  // Filter rows to currently active partitions & existing disk paths (stat only, zero YAML reads)
+  const eligibleRows = [];
+  for (const r of rawMemRows) {
+    const teamSlug = r.team_slug || '';
+    const pKey = `${r.workspace_id}:${r.layer}:${teamSlug}`;
+    const partInfo = partitionOrderMap.get(pKey);
+    if (!partInfo) continue;
+    if (!r.path || !fs.existsSync(r.path)) continue;
+    eligibleRows.push({ row: r, order: partInfo.order });
+  }
+  eligibleRows.sort((a, b) => a.order - b.order);
+
+  // Resolve shadowing identically to shadow-resolver.js without reading markdown files
   const precedence = { workspace: 3, private: 2, team: 1 };
+  const seenSlugs = new Set();
+  const overriddenSlugs = new Set();
   const allRowsMap = new Map();
   const activeRows = [];
 
-  for (const r of allRows) {
-    const teamSlug = r.team_slug || '';
-    const fileKey = `${r.layer}:${teamSlug}:${r.path}`;
-    if (!activeKeySet.has(fileKey)) {
+  for (const { row: r } of eligibleRows) {
+    const slugLower = r.slug.toLowerCase();
+    if (seenSlugs.has(slugLower) || overriddenSlugs.has(slugLower)) {
       continue;
     }
-    activeRows.push(r);
-    const slugLower = r.slug.toLowerCase();
-    const existing = allRowsMap.get(slugLower);
-    if (!existing || (precedence[r.layer] || 0) > (precedence[existing.layer] || 0)) {
-      allRowsMap.set(slugLower, r);
+    seenSlugs.add(slugLower);
+    const ovKey = `${r.layer}:${r.team_slug || ''}:${slugLower}`;
+    const targets = overrideMap.get(ovKey) || [];
+    for (const t of targets) {
+      if (t) overriddenSlugs.add(t);
     }
+    activeRows.push(r);
+    allRowsMap.set(slugLower, r);
   }
 
   const vecCandidates = [];
   for (const row of activeRows) {
     let multiVec = null;
     try {
-      if (row.trigger_vector && row.content_vector && row.entity_vector) {
-        const tVec = bufferOrJsonToArray(row.trigger_vector);
-        const cVec = bufferOrJsonToArray(row.content_vector);
-        const eVec = bufferOrJsonToArray(row.entity_vector);
+      const dimKey = `${row.workspace_id}:${row.layer}:${row.team_slug || ''}:${row.path}`;
+      const dimRow = dimVecMap.get(dimKey);
+      const tRaw = isVectorTupleValidForDim(row.trigger_vector, row.content_vector, row.entity_vector, activeConfig.dimensions)
+        ? row
+        : (dimRow && dimRow.mtime === row.mtime ? dimRow : null);
+      if (tRaw && tRaw.trigger_vector && tRaw.content_vector && tRaw.entity_vector) {
+        const tVec = bufferOrJsonToArray(tRaw.trigger_vector);
+        const cVec = bufferOrJsonToArray(tRaw.content_vector);
+        const eVec = bufferOrJsonToArray(tRaw.entity_vector);
         if (tVec && cVec && eVec && tVec.length === activeConfig.dimensions) {
           multiVec = {
             trigger_vector: tVec,
@@ -272,10 +337,8 @@ export async function searchMemoriesHybrid(workspaceRoot, queryText, options = {
   let ftsMatches = [];
   try {
     const stmt = db.prepare(`
-      SELECT f.slug, f.layer, f.team_slug, f.workspace_id, f.domain, f.type, f.trigger, f.content, bm25(memories_fts) as bm25_score,
-             COALESCE(t.efficacy_score, 1.0) as efficacy_score
+      SELECT f.slug, f.layer, f.team_slug, f.workspace_id, f.domain, f.type, f.trigger, f.content, bm25(memories_fts) as bm25_score
       FROM memories_fts f
-      LEFT JOIN telemetry t ON LOWER(f.slug) = LOWER(t.slug)
       WHERE memories_fts MATCH ?
         AND (f.workspace_id = ? OR f.workspace_id = 'global')
       ORDER BY bm25_score ASC
@@ -341,7 +404,14 @@ export async function searchMemoriesHybrid(workspaceRoot, queryText, options = {
 
     const graphRows = graphStmt.all(currentWsId, baseRow.layer, baseRow.team_slug || '', slugLower);
 
-    const efficacyScore = typeof baseRow.efficacy_score === 'number' ? baseRow.efficacy_score : 1.0;
+    const tEntry = pickTelemetryEntry(
+      teleLookup,
+      baseRow.workspace_id || currentWsId,
+      baseRow.layer,
+      baseRow.team_slug || '',
+      baseRow.slug
+    );
+    const efficacyScore = typeof tEntry?.efficacy_score === 'number' ? tEntry.efficacy_score : 1.0;
     const baseConfidence = Math.round(confidenceDecimal * 100);
     const modulatedConfidence = Math.round(baseConfidence * (0.6 + 0.4 * efficacyScore));
 
@@ -390,7 +460,13 @@ export async function searchMemoriesHybrid(workspaceRoot, queryText, options = {
 
   // Asynchronous non-blocking telemetry emitter (preserves CQS while recording recall metrics)
   for (const item of topResults) {
-    if (item.slug) emitTelemetryEvent(item.slug, 'recall');
+    if (item.slug) {
+      emitTelemetryEvent(item.slug, 'recall', {
+        workspaceRoot,
+        layer: item.layer,
+        teamSlug: item.teamSlug || ''
+      });
+    }
   }
 
   return topResults;

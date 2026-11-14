@@ -213,6 +213,21 @@ function analyzeContradictionsAndDrifts(workspaceRoot, entryVectors, allKnownSlu
       }
     } catch {}
   }
+  if (!targetNodeEngine) {
+    for (const verFile of ['.nvmrc', '.node-version']) {
+      const verPath = path.join(workspaceRoot, verFile);
+      if (fs.existsSync(verPath)) {
+        try {
+          const rawVer = fs.readFileSync(verPath, 'utf8').trim();
+          const numMatch = rawVer.match(/^v?([0-9]+(?:\.[0-9]+)*)/i);
+          if (numMatch) {
+            targetNodeEngine = `>=${numMatch[1]} (${verFile})`;
+            break;
+          }
+        } catch {}
+      }
+    }
+  }
 
   const now = Date.now();
   const ONE_DAY_MS = 24 * 3600 * 1000;

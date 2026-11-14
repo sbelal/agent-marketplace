@@ -147,7 +147,9 @@ export function setupEnvironment(options = {}) {
     }
   }
 
-  fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf8');
+  const tempSettingsPath = path.join(path.dirname(settingsPath), `.${path.basename(settingsPath)}.tmp.${process.pid}.${Date.now()}`);
+  fs.writeFileSync(tempSettingsPath, JSON.stringify(settings, null, 2), 'utf8');
+  fs.renameSync(tempSettingsPath, settingsPath);
 
   // If ONNX engine chosen and installation requested, ensure @xenova/transformers is ready
   if (settings.embeddingEngine === 'onnx' && options.installDependencies !== false) {

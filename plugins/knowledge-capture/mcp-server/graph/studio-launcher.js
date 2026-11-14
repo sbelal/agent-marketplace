@@ -36,10 +36,11 @@ export async function renderVisualMemoryStudio(workspaceRoot = process.cwd(), op
   const paths = resolveStoragePaths(resolvedWorkspace);
 
   // Determine artifact directory for HTML persistence
-  let artifactDir = options.artifactDir || process.env.ARTIFACT_DIR;
+  let artifactDir = options.artifactDir || process.env.ARTIFACT_DIR || process.env.JETSKI_BRAIN_DIR;
   if (!artifactDir) {
     if (process.env.ANTIGRAVITY_CONVERSATION_ID) {
-      artifactDir = path.join(os.homedir(), '.gemini', 'jetski', 'brain', process.env.ANTIGRAVITY_CONVERSATION_ID);
+      const appDataBase = process.env.GEMINI_APP_DATA_DIR || path.join(os.homedir(), '.gemini', 'jetski');
+      artifactDir = path.join(appDataBase, 'brain', process.env.ANTIGRAVITY_CONVERSATION_ID);
     } else if (process.env.GEMINI_HOME) {
       artifactDir = path.join(process.env.GEMINI_HOME, 'artifacts');
     } else {
@@ -116,7 +117,7 @@ export async function renderVisualMemoryStudio(workspaceRoot = process.cwd(), op
         domains: graphData.summary.domains
       },
       message: serverStarted
-        ? `Visual Memory Studio active at ${serverInfo.url}. Browser launched with direct browser-to-disk persistence via /api/patch.`
+        ? `Visual Memory Studio listening on ${serverInfo.url} with direct persistence via /api/patch (use port forwarding or open offlineHtmlPath ${htmlPath} when running on a remote VM).`
         : `Visual Memory Studio HTTP server could not start (${serverInfo?.error || 'unknown error'}). Generated offline HTML at ${htmlPath}.`
     };
   }
