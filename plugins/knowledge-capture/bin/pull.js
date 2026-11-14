@@ -85,7 +85,7 @@ export function pullSingleRepo(repoDir, label, repoUrl) {
       encoding: 'utf8',
       env: GIT_EXEC_ENV
     }).trim() || detectDefaultBranch(repoDir);
-    if (branch.startsWith('promote/')) {
+    if (branch.startsWith('promote/') || branch.startsWith('adr/')) {
       const baseBranch = detectDefaultBranch(repoDir);
       console.warn(`Warning: ${label} is currently on a promotion branch: '${branch}'.`);
       console.warn(`Run 'git -C "${repoDir}" checkout ${baseBranch}' before pulling upstream updates.`);

@@ -81,15 +81,26 @@ export function queryGitRepoStatus(repoDir) {
     };
   }
   try {
-    const branch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
-      cwd: repoDir,
-      encoding: 'utf8',
-      timeout: 2000,
-      env: GIT_EXEC_ENV,
-      stdio: ['ignore', 'pipe', 'ignore']
-    }).trim();
+    let branch = '';
+    try {
+      branch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
+        cwd: repoDir,
+        encoding: 'utf8',
+        timeout: 2000,
+        env: GIT_EXEC_ENV,
+        stdio: ['ignore', 'pipe', 'ignore']
+      }).trim();
+    } catch {
+      branch = execFileSync('git', ['symbolic-ref', '--short', 'HEAD'], {
+        cwd: repoDir,
+        encoding: 'utf8',
+        timeout: 2000,
+        env: GIT_EXEC_ENV,
+        stdio: ['ignore', 'pipe', 'ignore']
+      }).trim();
+    }
 
-    const isPromoteBranch = branch.startsWith('promote/');
+    const isPromoteBranch = branch.startsWith('promote/') || branch.startsWith('adr/');
 
     const porcelain = execFileSync('git', ['status', '--porcelain', '-z'], {
       cwd: repoDir,
@@ -881,7 +892,7 @@ export function syncMemoryLayer(workspaceRoot, params = {}) {
         timeout: 3000,
         env: GIT_EXEC_ENV
       }).trim();
-      if (branch.startsWith('promote/')) {
+      if (branch.startsWith('promote/') || branch.startsWith('adr/')) {
         return { success: false, status: 'on-promote-branch', branch };
       }
       try {
@@ -977,9 +988,13 @@ function detectTeamDefaultBranch(targetTeamDir) {
 
 export function prepareTeamPromotion(workspaceRoot, params = {}) {
   const { slug, content: customContent, frontmatter: customFm, teamSlug } = params;
-  if (!slug) throw new Error('A memory slug is required for promotion.');
+  if (!slug || typeof slug !== 'string') throw new Error('A memory slug is required for promotion.');
 
-  const cleanSlug = path.basename(slug.trim()).replace(/\.md$/i, '');
+  const rawSlug = slug.trim().replace(/\.md$/i, '');
+  const cleanSlug = path.basename(rawSlug);
+  if (!cleanSlug || cleanSlug !== rawSlug || cleanSlug.includes('..')) {
+    throw new Error('Invalid memory slug. Directory traversal is prohibited.');
+  }
   const paths = resolveStoragePaths(workspaceRoot);
   const lp = createLayerProvider(workspaceRoot);
   const privMatch = lp.findMemoryFile(cleanSlug, 'private');
@@ -1044,6 +1059,13 @@ export function prepareTeamPromotion(workspaceRoot, params = {}) {
   } catch {}
 
   if (hasOrigin) {
+    try {
+      execFileSync('git', ['branch', `--set-upstream-to=origin/${defaultBranch}`, defaultBranch], {
+        cwd: targetTeamDir,
+        env: GIT_EXEC_ENV,
+        stdio: 'ignore'
+      });
+    } catch {}
     execFileSync('git', ['pull', '--ff-only'], {
       cwd: targetTeamDir,
       env: GIT_EXEC_ENV,

@@ -246,13 +246,23 @@ export function parseYamlFrontmatter(fileContent) {
   }
 
   if (!frontmatter.slug && frontmatter.name) {
-    frontmatter.slug = frontmatter.name;
+    Object.defineProperty(frontmatter, 'slug', {
+      value: frontmatter.name,
+      enumerable: false,
+      writable: true,
+      configurable: true
+    });
   }
   if (!frontmatter.name && frontmatter.slug) {
     frontmatter.name = frontmatter.slug;
   }
   if (!frontmatter.trigger && frontmatter.description) {
-    frontmatter.trigger = frontmatter.description;
+    Object.defineProperty(frontmatter, 'trigger', {
+      value: frontmatter.description,
+      enumerable: false,
+      writable: true,
+      configurable: true
+    });
   }
   if (!frontmatter.description && frontmatter.trigger) {
     frontmatter.description = frontmatter.trigger;
@@ -326,6 +336,8 @@ export function serializeYamlFrontmatter(frontmatter, body) {
   }
 
   for (const [k, v] of Object.entries(frontmatter)) {
+    if (k === 'slug' && frontmatter.name && v === frontmatter.name) continue;
+    if (k === 'trigger' && frontmatter.description && v === frontmatter.description) continue;
     if (!keys.includes(k) && v !== undefined && v !== null) {
       if (Array.isArray(v)) {
         lines.push(`${k}: [${v.map(item => formatYamlArrayItem(item)).filter(Boolean).join(', ')}]`);

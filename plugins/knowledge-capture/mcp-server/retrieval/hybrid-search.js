@@ -8,7 +8,7 @@ import { tokenizeText, computeCosineSimilarity } from '../embeddings/heuristic-p
 import { getActiveEmbeddingConfig, generateEmbedding } from '../embeddings/onnx-provider.js';
 import { generateMultiVector, generateMultiVectorAsync, computeMultiVectorSimilarity } from '../embeddings/multi-vector.js';
 import { emitTelemetryEvent, loadScopedTelemetryMap, pickTelemetryEntry } from '../db/telemetry.js';
-import { syncSqliteCore, getIndexLayerDirs, bufferOrJsonToArray } from '../db/indexer.js';
+import { syncSqliteCore, getIndexLayerDirs, bufferOrJsonToArray, has384ProviderMismatch } from '../db/indexer.js';
 
 function isVectorTupleValidForDim(tVal, cVal, eVal, dim) {
   if (!tVal || !cVal || !eVal) return false;
@@ -19,7 +19,7 @@ function isVectorTupleValidForDim(tVal, cVal, eVal, dim) {
 }
 
 /**
- * Checks if the SQLite cache is dirty (files modified, added, deleted, or missing active-dimension vectors).
+ * Checks if the SQLite cache is dirty (files modified, added, deleted, or missing active-dimension/provider vectors).
  * Pure query, side-effect free. Uses bulk SQLite queries (no N+1 per-file SELECTs).
  */
 export function isIndexDirty(workspaceRoot = process.cwd()) {
@@ -28,6 +28,9 @@ export function isIndexDirty(workspaceRoot = process.cwd()) {
 
   const { layerDirs, currentWsId } = getIndexLayerDirs(workspaceRoot);
   const activeConfig = getActiveEmbeddingConfig();
+  if (has384ProviderMismatch(db, activeConfig)) {
+    return true;
+  }
 
   let rowMap = new Map();
   let vecMap = new Map();
@@ -218,17 +221,20 @@ export async function searchMemoriesHybrid(workspaceRoot, queryText, options = {
     WHERE (m.workspace_id = ? OR m.workspace_id = 'global')
   `).all(currentWsId);
 
+  const provider384Mismatch = has384ProviderMismatch(db, activeConfig);
   const dimVecMap = new Map();
-  try {
-    const dimRows = db.prepare(`
-      SELECT workspace_id, layer, team_slug, path, mtime, trigger_vector, content_vector, entity_vector
-      FROM memory_vectors
-      WHERE (workspace_id = ? OR workspace_id = 'global') AND dimensions = ?
-    `).all(currentWsId, activeConfig.dimensions);
-    for (const vr of dimRows) {
-      dimVecMap.set(`${vr.workspace_id}:${vr.layer}:${vr.team_slug || ''}:${vr.path}`, vr);
-    }
-  } catch {}
+  if (!provider384Mismatch) {
+    try {
+      const dimRows = db.prepare(`
+        SELECT workspace_id, layer, team_slug, path, mtime, trigger_vector, content_vector, entity_vector
+        FROM memory_vectors
+        WHERE (workspace_id = ? OR workspace_id = 'global') AND dimensions = ?
+      `).all(currentWsId, activeConfig.dimensions);
+      for (const vr of dimRows) {
+        dimVecMap.set(`${vr.workspace_id}:${vr.layer}:${vr.team_slug || ''}:${vr.path}`, vr);
+      }
+    } catch {}
+  }
 
   const overrideMap = new Map();
   try {
@@ -281,25 +287,27 @@ export async function searchMemoriesHybrid(workspaceRoot, queryText, options = {
   const vecCandidates = [];
   for (const row of activeRows) {
     let multiVec = null;
-    try {
-      const dimKey = `${row.workspace_id}:${row.layer}:${row.team_slug || ''}:${row.path}`;
-      const dimRow = dimVecMap.get(dimKey);
-      const tRaw = isVectorTupleValidForDim(row.trigger_vector, row.content_vector, row.entity_vector, activeConfig.dimensions)
-        ? row
-        : (dimRow && dimRow.mtime === row.mtime ? dimRow : null);
-      if (tRaw && tRaw.trigger_vector && tRaw.content_vector && tRaw.entity_vector) {
-        const tVec = bufferOrJsonToArray(tRaw.trigger_vector);
-        const cVec = bufferOrJsonToArray(tRaw.content_vector);
-        const eVec = bufferOrJsonToArray(tRaw.entity_vector);
-        if (tVec && cVec && eVec && tVec.length === activeConfig.dimensions) {
-          multiVec = {
-            trigger_vector: tVec,
-            content_vector: cVec,
-            entity_vector: eVec
-          };
+    if (!provider384Mismatch) {
+      try {
+        const dimKey = `${row.workspace_id}:${row.layer}:${row.team_slug || ''}:${row.path}`;
+        const dimRow = dimVecMap.get(dimKey);
+        const tRaw = isVectorTupleValidForDim(row.trigger_vector, row.content_vector, row.entity_vector, activeConfig.dimensions)
+          ? row
+          : (dimRow && dimRow.mtime === row.mtime ? dimRow : null);
+        if (tRaw && tRaw.trigger_vector && tRaw.content_vector && tRaw.entity_vector) {
+          const tVec = bufferOrJsonToArray(tRaw.trigger_vector);
+          const cVec = bufferOrJsonToArray(tRaw.content_vector);
+          const eVec = bufferOrJsonToArray(tRaw.entity_vector);
+          if (tVec && cVec && eVec && tVec.length === activeConfig.dimensions) {
+            multiVec = {
+              trigger_vector: tVec,
+              content_vector: cVec,
+              entity_vector: eVec
+            };
+          }
         }
-      }
-    } catch {}
+      } catch {}
+    }
 
     if (!multiVec) {
       if (activeConfig.engine === 'onnx') {

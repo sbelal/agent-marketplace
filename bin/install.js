@@ -74,6 +74,43 @@ function resolveSourceRegistrationPath(rootDir, homeDir) {
   return path.join(rootDir, 'plugins');
 }
 
+/**
+ * Resolves all git-backed marketplace source plugin directories to update.
+ * Prefers registered git clone sources in workspace/global plugins.json before falling back
+ * to the local/npx default registration path.
+ *
+ * @param {string} repoRoot
+ * @param {string} workspaceDir
+ * @param {string} homeDir
+ * @returns {string[]}
+ */
+function resolveUpdateSourceTargets(repoRoot, workspaceDir, homeDir) {
+  const targets = [];
+  const seen = new Set();
+
+  for (const scope of ['workspace', 'global']) {
+    const configPath = resolveSourceConfigPath(scope, workspaceDir, homeDir);
+    if (!configPath) continue;
+    const matched = findMarketplaceSourceEntry(getPluginsConfig(configPath), repoRoot, homeDir);
+    if (!matched || !matched.path) continue;
+    const resolvedPluginsPath = path.resolve(matched.path);
+    const repoDir = path.dirname(resolvedPluginsPath);
+    if (fs.existsSync(path.join(repoDir, '.git'))) {
+      const normKey = normalizePath(resolvedPluginsPath).toLowerCase();
+      if (!seen.has(normKey)) {
+        seen.add(normKey);
+        targets.push(resolvedPluginsPath);
+      }
+    }
+  }
+
+  if (targets.length === 0) {
+    targets.push(resolveSourceRegistrationPath(repoRoot, homeDir));
+  }
+
+  return targets;
+}
+
 // ==========================================
 // COMMAND PROCEDURES (State Mutation & I/O)
 // ==========================================
@@ -725,10 +762,10 @@ Options:
   }
 
   if (hasFlag('--update-source')) {
-    const targetSourcePath = resolveSourceRegistrationPath(REPO_ROOT, HOME_DIR);
+    const targets = resolveUpdateSourceTargets(REPO_ROOT, WORKSPACE_DIR, HOME_DIR);
     console.log(`\x1b[36mSynchronizing marketplace source repository...\x1b[0m`);
-    const success = ensurePermanentSourceClone(targetSourcePath);
-    if (success) {
+    const allSucceeded = targets.every(targetSourcePath => ensurePermanentSourceClone(targetSourcePath));
+    if (allSucceeded) {
       console.log('\x1b[32m✔ Source repository successfully updated.\x1b[0m');
       process.exit(0);
     } else {
@@ -828,5 +865,6 @@ if (require.main === module) {
 
 module.exports = {
   isNpxExecution,
-  resolveSourceRegistrationPath
+  resolveSourceRegistrationPath,
+  resolveUpdateSourceTargets
 };

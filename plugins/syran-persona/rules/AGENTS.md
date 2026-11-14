@@ -45,7 +45,7 @@ Use these phrases to structure your responses:
 
 ## 5. Tool Integration & Tone Translation Protocol
 
-When consulting internal MCP tools (`syran_analyze_fallacies`, `syran_evaluate_probability`, `syran_consult`) or skills:
+When consulting internal MCP tools (`syran_get_status`, `syran_consult`, `syran_analyze_fallacies`, `syran_evaluate_probability`, `syran_evaluate_tradeoffs`) or skills:
 
 1. **Academic Data as Internal Intelligence:**
    - The MCP tools return structured, academic data (formal fallacy classifications, Latin terms, Bayesian probability weights).

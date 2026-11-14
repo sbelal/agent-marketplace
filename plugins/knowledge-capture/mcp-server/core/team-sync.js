@@ -368,7 +368,7 @@ export function syncTeamRepositories(arg1 = process.cwd(), arg2 = {}) {
         env: GIT_EXEC_ENV,
         stdio: ['ignore', 'pipe', 'ignore']
       }).trim();
-      if (branch.startsWith('promote/')) {
+      if (branch.startsWith('promote/') || branch.startsWith('adr/')) {
         syncResults.push({ slug: repo.slug, status: 'on-promote-branch', branch });
         continue;
       }

@@ -41,6 +41,14 @@ export function resolveTelemetryPartition(slug, details = {}, db = null) {
   const explicitlyScopedLayer = typeof safeDetails.layer === 'string' ? safeDetails.layer.toLowerCase() : '';
   const explicitTeamSlug = typeof safeDetails.teamSlug === 'string' ? safeDetails.teamSlug : '';
 
+  if (typeof safeDetails.workspaceId === 'string' && typeof safeDetails.layer === 'string') {
+    return {
+      workspaceId: safeDetails.workspaceId || 'global',
+      layer: explicitlyScopedLayer,
+      teamSlug: explicitTeamSlug
+    };
+  }
+
   if (explicitlyScopedLayer === 'workspace') {
     return {
       workspaceId: normalizeWorkspaceId(workspaceRoot || process.cwd()),
@@ -168,7 +176,7 @@ export function recordTelemetryEvent(slug, eventType = 'recall', details = {}) {
         VALUES (?, ?, ?, ?, 0, 0, 0, 0, 1.0)
       `).run(partition.workspaceId, partition.layer, partition.teamSlug, canonSlug);
 
-      if (eventType === 'apply') {
+      if (eventType === 'apply' || eventType === 'applied') {
         db.prepare(`
           UPDATE telemetry
           SET applied_count = applied_count + 1, last_applied = ?
@@ -220,7 +228,7 @@ export function recordTelemetryEvent(slug, eventType = 'recall', details = {}) {
       last_feedback: null
     };
   }
-  if (eventType === 'apply') {
+  if (eventType === 'apply' || eventType === 'applied') {
     data[jsonKey].applied_count = (data[jsonKey].applied_count || 0) + 1;
     data[jsonKey].last_applied = nowIso;
   } else if (eventType === 'test_pass') {
@@ -288,24 +296,41 @@ export function correlateTestExecutionEfficacy(workspaceRoot = process.cwd(), op
   const db = getDatabase();
   const currentWsId = normalizeWorkspaceId(workspaceRoot);
 
-  let targetSlugs = Array.isArray(slugs) && slugs.length > 0 ? slugs : [];
   const explicitSlugsProvided = Array.isArray(slugs) && slugs.length > 0;
+  let targetTargets = explicitSlugsProvided
+    ? slugs.map(s => ({ slug: s, partition: null }))
+    : [];
 
-  if (targetSlugs.length === 0) {
+  if (targetTargets.length === 0) {
     if (db) {
       try {
         const rows = db.prepare(`
-          SELECT slug FROM telemetry
+          SELECT workspace_id, layer, team_slug, slug FROM telemetry
           WHERE (workspace_id = ? OR workspace_id = 'global')
             AND (last_applied IS NOT NULL OR last_recalled IS NOT NULL)
           ORDER BY COALESCE(last_applied, last_recalled) DESC
           LIMIT 5
         `).all(currentWsId);
-        targetSlugs = Array.from(new Set(rows.map(r => r.slug)));
+        const seen = new Set();
+        for (const r of rows) {
+          if (!r || !r.slug) continue;
+          const partKey = `${r.workspace_id || 'global'}::${r.layer || ''}::${r.team_slug || ''}::${String(r.slug).toLowerCase()}`;
+          if (!seen.has(partKey)) {
+            seen.add(partKey);
+            targetTargets.push({
+              slug: r.slug,
+              partition: {
+                workspaceId: r.workspace_id || 'global',
+                layer: r.layer || '',
+                teamSlug: r.team_slug || ''
+              }
+            });
+          }
+        }
       } catch {}
     } else {
       const data = readTelemetryJson();
-      targetSlugs = Object.entries(data)
+      const entries = Object.entries(data)
         .filter(([k, entry]) => {
           if (!entry || (!entry.last_applied && !entry.last_recalled)) return false;
           if (k.includes('::')) {
@@ -315,8 +340,29 @@ export function correlateTestExecutionEfficacy(workspaceRoot = process.cwd(), op
           return true;
         })
         .sort(([, a], [, b]) => String(b.last_applied || b.last_recalled).localeCompare(String(a.last_applied || a.last_recalled)))
-        .slice(0, 5)
-        .map(([k, entry]) => entry.slug || k);
+        .slice(0, 5);
+      for (const [k, entry] of entries) {
+        if (k.includes('::')) {
+          const parts = k.split('::');
+          targetTargets.push({
+            slug: entry.slug || parts.slice(3).join('::'),
+            partition: {
+              workspaceId: parts[0] || 'global',
+              layer: parts[1] || '',
+              teamSlug: parts[2] || ''
+            }
+          });
+        } else {
+          targetTargets.push({
+            slug: entry.slug || k,
+            partition: {
+              workspaceId: 'global',
+              layer: '',
+              teamSlug: ''
+            }
+          });
+        }
+      }
     }
   }
 
@@ -331,19 +377,23 @@ export function correlateTestExecutionEfficacy(workspaceRoot = process.cwd(), op
   };
 
   if (exitCode === 0) {
-    for (const s of targetSlugs) {
-      const updated = recordMemoryEfficacy(s, 'test_pass', {
+    for (const target of targetTargets) {
+      const s = target.slug;
+      const details = {
         workspaceRoot,
         command,
-        message: 'Verified by automated test pass'
-      });
+        message: 'Verified by automated test pass',
+        ...(target.partition || {})
+      };
+      const updated = recordMemoryEfficacy(s, 'test_pass', details);
       results.correlatedSlugs.push(s);
       results.updatedScores[s] = updated.efficacy_score;
     }
     results.correlated = results.correlatedSlugs.length > 0;
   } else {
     const failureText = `${stdout ?? ''}\n${stderr ?? ''}`.toLowerCase();
-    for (const s of targetSlugs) {
+    for (const target of targetTargets) {
+      const s = target.slug;
       const slugKey = s.replace(/-/g, ' ');
       const slugTokens = s.split('-').filter(t => t.length > 2);
 
@@ -352,16 +402,18 @@ export function correlateTestExecutionEfficacy(workspaceRoot = process.cwd(), op
         (slugTokens.length >= 2 && slugTokens.filter(t => failureText.includes(t.toLowerCase())).length >= 2);
 
       // Avoid false-negative penalties: only penalize if error text correlates,
-      // or if targetSlugs <= 2 and explicit attribution was intended.
-      const isCorrelated = textCorrelates || (explicitSlugsProvided && targetSlugs.length <= 2 && options.explicitAttribution !== false);
+      // or if targetTargets <= 2 and explicit attribution was intended.
+      const isCorrelated = textCorrelates || (explicitSlugsProvided && targetTargets.length <= 2 && options.explicitAttribution !== false);
 
       if (isCorrelated) {
         const rawSnippet = stderr !== undefined && stderr !== null && stderr !== '' ? stderr : (stdout ?? '');
-        const updated = recordMemoryEfficacy(s, 'test_fail', {
+        const details = {
           workspaceRoot,
           command,
-          message: `Correlated with test failure: ${String(rawSnippet).slice(0, 200)}`
-        });
+          message: `Correlated with test failure: ${String(rawSnippet).slice(0, 200)}`,
+          ...(target.partition || {})
+        };
+        const updated = recordMemoryEfficacy(s, 'test_fail', details);
         results.correlatedSlugs.push(s);
         results.updatedScores[s] = updated.efficacy_score;
       }

@@ -67,6 +67,7 @@ Syran provides a stdio JSON-RPC 2.0 MCP server (`mcp-server/index.js`) available
 | **`syran_consult`** | Deconstructs a proposition into formal logic components, flags hidden assumptions, and delivers objective counsel without contractions. |
 | **`syran_analyze_fallacies`** | Scans an argument for formal/informal fallacies (Sunk Cost, Ad Hominem, False Dilemma, Appeal to Emotion, Circular Reasoning, Hasty Generalization). |
 | **`syran_evaluate_probability`** | Computes normalized probability estimates, Bayesian likelihoods, and expected-value risk scores across competing implementation courses. |
+| **`syran_evaluate_tradeoffs`** | Evaluates architectural candidates across weighted criteria, computes normalized multi-attribute utility, detects Pareto dominance, and identifies pivot trade-offs. |
 | **`syran_get_status`** | Audits the Logic Officer operational readiness, active directives, and tool configurations. |
 
 ---

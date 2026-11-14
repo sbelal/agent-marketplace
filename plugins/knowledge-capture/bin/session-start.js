@@ -48,7 +48,7 @@ function safeGitPullAsync(repoDir) {
     }, (err, branchOut) => {
       if (err) return resolve('failed');
       const branch = (branchOut || '').trim();
-      if (branch.startsWith('promote/')) {
+      if (branch.startsWith('promote/') || branch.startsWith('adr/')) {
         return resolve('on-promote-branch');
       }
 
@@ -223,6 +223,7 @@ async function main(hookState = {}) {
     pullTasks.push(
       safeGitPullAsync(privateDir).then((res) => {
         if (res === 'success') privateSyncStatus = 'Synchronized (Git pull successful)';
+        else if (res === 'on-promote-branch') privateSyncStatus = 'On promotion branch (manual pull required)';
         else if (res === 'dirty') privateSyncStatus = 'Uncommitted changes present (skipped pull)';
         else privateSyncStatus = 'Offline / Remote unavailable';
       })
