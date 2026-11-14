@@ -224,7 +224,7 @@ export function analyzeLogicalFallacies(text) {
  * @param {number} [prior=0.5] Prior probability (0.0 to 1.0)
  * @returns {Object} Probabilistic analysis
  */
-export function evaluateProbability(hypotheses = [], prior = 0.5) {
+export function evaluateProbability(hypotheses = [], prior = undefined) {
   if (!Array.isArray(hypotheses) || hypotheses.length === 0) {
     return {
       error: 'At least one hypothesis is required for probability calculation.'
@@ -236,21 +236,43 @@ export function evaluateProbability(hypotheses = [], prior = 0.5) {
     };
   }
 
+  const hasExplicitTopPrior = prior !== undefined && prior !== null && prior !== '';
   const parsedPrior = typeof prior === 'number'
     ? prior
     : (typeof prior === 'string' && prior.trim() !== '' ? Number(prior) : NaN);
-  const numPrior = Number.isFinite(parsedPrior) ? parsedPrior : 0.5;
+  const numPrior = Number.isFinite(parsedPrior) ? parsedPrior : (1 / hypotheses.length);
   const sanitizedPrior = Math.max(0.01, Math.min(0.99, numPrior));
+
+  const explicitPriors = hypotheses.map(h =>
+    (typeof h.prior === 'number' && Number.isFinite(h.prior))
+      ? Math.max(0.01, Math.min(0.99, h.prior))
+      : null
+  );
+  const hasAnyPerHypothesisPrior = explicitPriors.some(p => p !== null);
+  const unspecifiedCount = explicitPriors.filter(p => p === null).length;
+  const sumExplicitPriors = explicitPriors.reduce((acc, p) => acc + (p ?? 0), 0);
+  const remainingPriorPerUnspecified = unspecifiedCount > 0
+    ? Math.max(0.01, Math.min(0.99, (1.0 - sumExplicitPriors) / unspecifiedCount))
+    : 0;
+
   let totalLikelihood = 0;
 
   // Compute empirical likelihoods scaled by prior distribution
   const rawHypotheses = hypotheses.map((h, idx) => {
     const rawWeight = (typeof h.weight === 'number' && Number.isFinite(h.weight) && h.weight >= 0) ? h.weight : 1.0;
     const riskFactor = (typeof h.risk === 'number' && Number.isFinite(h.risk)) ? Math.max(0.0, Math.min(1.0, h.risk)) : 0.5;
-    // Bayesian prior weighting: modulate baseline likelihood with prior probability (supports hypothesis-level prior or prior parameter)
-    const priorWeight = (typeof h.prior === 'number' && Number.isFinite(h.prior))
-      ? Math.max(0.01, Math.min(0.99, h.prior))
-      : (idx === 0 ? sanitizedPrior : (1.0 - sanitizedPrior) / Math.max(1, hypotheses.length - 1));
+    let priorWeight;
+    if (explicitPriors[idx] !== null) {
+      priorWeight = explicitPriors[idx];
+    } else if (hasAnyPerHypothesisPrior) {
+      priorWeight = remainingPriorPerUnspecified;
+    } else if (hasExplicitTopPrior && Number.isFinite(parsedPrior)) {
+      priorWeight = idx === 0
+        ? sanitizedPrior
+        : (1.0 - sanitizedPrior) / Math.max(1, hypotheses.length - 1);
+    } else {
+      priorWeight = 1.0 / hypotheses.length;
+    }
     const likelihood = rawWeight * priorWeight;
     totalLikelihood += likelihood;
     return { label: h.label || 'Unlabeled hypothesis', likelihood, riskFactor };
@@ -275,7 +297,7 @@ export function evaluateProbability(hypotheses = [], prior = 0.5) {
 
   return {
     officer: 'Syran',
-    prior_probability: sanitizedPrior,
+    prior_probability: Number(sanitizedPrior.toFixed(4)),
     evaluated_hypotheses_count: hypotheses.length,
     optimal_hypothesis: evaluations[0] ? evaluations[0].label : 'None',
     evaluations,

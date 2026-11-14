@@ -24,14 +24,14 @@ Run initial scaffolding to guarantee the base directory structure exists:
 ```bash
 node "<plugin-root>/bin/setup.js"
 ```
-Ensures:
-- `~/.gemini/knowledge-capture/private/`
-- `~/.gemini/knowledge-capture/team/`
-- `~/.gemini/knowledge-capture/settings.json`
+Ensures (inside `<storage-dir>` = `$KC_STORAGE_DIR`, else `$GEMINI_HOME/knowledge-capture`, else `~/.gemini/knowledge-capture`, as reported by `status.js`):
+- `<storage-dir>/private/`
+- `<storage-dir>/team/`
+- `<storage-dir>/settings.json`
 
 ### 3. State-Aware Harness-Native Interactive Choices
 
-Inspect the current configuration in `~/.gemini/knowledge-capture/settings.json`.
+Inspect the current configuration in `<storage-dir>/settings.json`.
 
 #### Under Google Antigravity:
 Use the **`ask_question`** tool to present native interactive modal choice dialogs to the user.
@@ -47,7 +47,7 @@ Use the **`ask_question`** tool to present native interactive modal choice dialo
     - `question`: "Where should your Private Memory Layer (Personal Engineering Learnings) be stored?"
     - `options`:
       - "(Recommended) GitHub Private Repository - Syncs memories across machines and remote agents"
-      - "Local Machine Only - Store in ~/.gemini/knowledge-capture/private/ without remote sync"
+      - "Local Machine Only - Store locally in <storage-dir>/private/ without remote sync"
 
 - **Step 3B: Team Memory Layer Question:**
   - If already configured:
@@ -70,7 +70,7 @@ Present the same state-aware multiple-choice options using Claude Code's interac
 If the user chooses to connect or add a Team Git repository:
 - The slug is **automatically derived** from the repository URL as `<org_id>-<repo_slug>` or `<account_id>-<repo_slug>` (e.g. `git@github.com:acme-corp/platform-rules.git` -> `acme-corp-platform-rules`, `https://github.com/my-org/backend-memory` -> `my-org-backend-memory`).
 - The user can optionally supply a custom slug identifier.
-- Repositories are cloned and partitioned cleanly under `~/.gemini/knowledge-capture/team/<slug>/`.
+- Repositories are cloned and partitioned cleanly under `<storage-dir>/team/<slug>/`.
 
 ### 4. Validate Remote Connectivity
 When the developer provides a repository URL:

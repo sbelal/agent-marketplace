@@ -207,13 +207,24 @@ export function bootstrapRepoMemories(workspaceRoot = process.cwd()) {
     });
   }
 
-  // 3. Scan Linters & Formatters
+  // 3. Scan Linters, Formatters & Runtime / Language Tooling
   const linterMap = [
     { file: '.golangci.yml', slug: 'go-linter-standards', domain: 'go', title: 'GolangCI Linting & Code Hygiene Standards' },
     { file: '.golangci.yaml', slug: 'go-linter-standards', domain: 'go', title: 'GolangCI Linting & Code Hygiene Standards' },
+    { file: 'go.mod', slug: 'go-module-toolchain', domain: 'go', title: 'Go Module & Toolchain Standards' },
     { file: 'ruff.toml', slug: 'python-ruff-standards', domain: 'python', title: 'Python Ruff Formatting & Linting Governance' },
+    { file: 'pyproject.toml', slug: 'python-project-standards', domain: 'python', title: 'Python Project Configuration & Packaging Standards' },
+    { file: 'Cargo.toml', slug: 'rust-cargo-standards', domain: 'rust', title: 'Rust Cargo Workspace & Build Standards' },
+    { file: 'tsconfig.json', slug: 'typescript-compiler-standards', domain: 'typescript', title: 'TypeScript Compiler Strictness & Module Standards' },
     { file: '.eslintrc.json', slug: 'eslint-code-standards', domain: 'typescript', title: 'ESLint Coding Standards & Best Practices' },
-    { file: 'biome.json', slug: 'biome-formatting-governance', domain: 'typescript', title: 'Biome Formatting & Linting Governance' }
+    { file: '.eslintrc.js', slug: 'eslint-code-standards', domain: 'typescript', title: 'ESLint Coding Standards & Best Practices' },
+    { file: '.eslintrc.yml', slug: 'eslint-code-standards', domain: 'typescript', title: 'ESLint Coding Standards & Best Practices' },
+    { file: 'eslint.config.js', slug: 'eslint-code-standards', domain: 'javascript', title: 'ESLint Flat Config Standards & Best Practices' },
+    { file: 'eslint.config.mjs', slug: 'eslint-code-standards', domain: 'javascript', title: 'ESLint Flat Config Standards & Best Practices' },
+    { file: 'eslint.config.cjs', slug: 'eslint-code-standards', domain: 'javascript', title: 'ESLint Flat Config Standards & Best Practices' },
+    { file: 'biome.json', slug: 'biome-formatting-governance', domain: 'typescript', title: 'Biome Formatting & Linting Governance' },
+    { file: '.nvmrc', slug: 'node-runtime-version-pin', domain: 'javascript', title: 'Pinned Node.js Runtime Version Standard' },
+    { file: '.node-version', slug: 'node-runtime-version-pin', domain: 'javascript', title: 'Pinned Node.js Runtime Version Standard' }
   ];
 
   for (const lint of linterMap) {
@@ -223,9 +234,9 @@ export function bootstrapRepoMemories(workspaceRoot = process.cwd()) {
         title: lint.title,
         domain: lint.domain,
         type: 'convention',
-        description: `When formatting or linting ${lint.domain} codebase files`,
-        why: `Repository enforces strict static analysis via ${lint.file}.`,
-        howToApply: `Verify clean execution with project linter before committing changes.`,
+        description: `When configuring, formatting, or linting ${lint.domain} codebase files`,
+        why: `Repository enforces strict tooling configuration via ${lint.file}.`,
+        howToApply: `Verify clean execution against ${lint.file} before committing changes.`,
         sourceFile: lint.file
       });
     }

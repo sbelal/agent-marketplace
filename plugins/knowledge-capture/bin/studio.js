@@ -37,16 +37,14 @@ function isAuthorizedRequest(req, studioToken) {
   }
 
   const tokenHeader = req.headers['x-studio-token'];
-  if (tokenHeader !== undefined) {
-    if (typeof tokenHeader !== 'string' || !studioToken || tokenHeader !== studioToken) {
-      return false;
-    }
+  if (typeof tokenHeader !== 'string' || !studioToken || tokenHeader !== studioToken) {
+    return false;
   }
 
   const origin = req.headers.origin;
   if (origin !== undefined) {
     if (origin === 'null') {
-      return typeof tokenHeader === 'string' && Boolean(studioToken) && tokenHeader === studioToken;
+      return true;
     }
     return isLoopbackOrigin(origin);
   }
@@ -345,19 +343,24 @@ if (isDirectCli) {
     console.error(`Invalid arguments: ${err.message}`);
     process.exit(1);
   }
-  startStudioServer(cliOptions).then(({ url }) => {
+  startStudioServer(cliOptions).then((instance) => {
     console.log(`
 🧠 Knowledge Capture Studio
 ----------------------------------------
-✔ Studio running at: ${url}
+✔ Studio running at: ${instance.url}
 ✔ Workspace: ${cliOptions.workspace}
 ✔ Persistence: DIRECT BROWSER SAVE ENABLED (/api/patch)
 
 Press Ctrl+C to stop the studio server.
 `);
 
-    const shutdown = () => {
+    const shutdown = async () => {
       console.log('\nStopping Knowledge Capture Studio...');
+      const timer = setTimeout(() => process.exit(0), 500);
+      if (typeof timer.unref === 'function') timer.unref();
+      try {
+        await instance.close();
+      } catch {}
       process.exit(0);
     };
     process.on('SIGINT', shutdown);

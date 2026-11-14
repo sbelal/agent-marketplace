@@ -837,7 +837,10 @@ Test only.
 
     const patchRes = await fetch(`${studioServer.url}/api/patch`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Studio-Token': studioServer.studioToken
+      },
       body: JSON.stringify(directPatchPayload)
     });
     assert.equal(patchRes.status, 200, 'POST /api/patch must return 200 OK');
@@ -1252,7 +1255,7 @@ Always execute tests with timeout guards.
   assert.ok(fs.existsSync(inChatResult.artifactPath), 'HTML artifact must be saved to disk');
   const inChatHtml = fs.readFileSync(inChatResult.artifactPath, 'utf8');
   assert.ok(inChatHtml.includes('MiniD3'), 'Self-contained MiniD3 engine must be embedded for CSP compliance');
-  assert.ok(inChatHtml.includes('https://www.gstatic.com/antigravity/web/dev/tailwindcss.min.js'), 'Antigravity Tailwind script must be referenced');
+  assert.equal(inChatHtml.includes('tailwindcss.min.js'), false, 'Studio HTML must have zero external Tailwind CDN dependency');
   assert.ok(inChatHtml.includes('var(--background'), 'Antigravity theme token must be styled');
 
   // Test automatic artifact directory resolution via ANTIGRAVITY_CONVERSATION_ID
@@ -1370,7 +1373,7 @@ description: Beta team security standard
 
   const v2Db = getDatabase();
   const schemaVer = v2Db.prepare("SELECT val FROM meta WHERE key = 'schema_version'").get();
-  assert.equal(schemaVer?.val, '2', 'SQLite schema_version must be 2');
+  assert.ok(Number(schemaVer?.val) >= 3, `SQLite schema_version must be >= 3 (got ${schemaVer?.val})`);
 
   const v2WsId = normalizeWorkspaceId(v2Ws);
   const v2Rows = v2Db.prepare("SELECT layer, team_slug, path, slug, trigger_vector FROM memories WHERE workspace_id = ? OR workspace_id = 'global'").all(v2WsId);
@@ -3098,6 +3101,276 @@ meta:
   }
 
   console.log('  ✔ Passed: Final round hardening across UI, DB, scanners, CLIs, Syran & installer verified.\n');
+
+  // ==========================================
+  // TEST 52: Audit Bug Fixes Regression Suite (11 Issues)
+  // ==========================================
+  console.log('Test 52: Audit Regression Suite (Team Read-Only, Scoped Telemetry, Vector Cache, Studio Auth, Scanners, Syran)...');
+  {
+    const { getDatabase, resetDatabaseInstance, getDbPath } = await import('../plugins/knowledge-capture/mcp-server/db/connection.js');
+    const vm = await import('node:vm');
+
+    // 52.1 Hook character budget (< 9,500 chars)
+    const kcAgentsMd = fs.readFileSync(path.resolve(process.cwd(), 'plugins', 'knowledge-capture', 'rules', 'AGENTS.md'), 'utf8');
+    const syranAgentsMd = fs.readFileSync(path.resolve(process.cwd(), 'plugins', 'syran-persona', 'rules', 'AGENTS.md'), 'utf8');
+    assert.ok(kcAgentsMd.length < 9500, `knowledge-capture AGENTS.md must stay under 9500 chars (got ${kcAgentsMd.length})`);
+    assert.ok(syranAgentsMd.length < 9500, `syran-persona AGENTS.md must stay under 9500 chars (got ${syranAgentsMd.length})`);
+
+    // 52.2 Team layer read-only enforcement in applyMemoryPatch & Studio HTML
+    const roWs = path.join(tempRoot, 'ro-team-ws');
+    fs.mkdirSync(path.join(roWs, '.agents', 'rules', 'memory'), { recursive: true });
+    const roTeamRepo = addTeamRepository('ro-org', 'https://github.com/org/ro-org.git', 'RO Org', roWs);
+    saveMemoryEntry(roWs, {
+      layer: 'workspace',
+      slug: 'local-ws-rule',
+      domain: 'Backend',
+      type: 'personal-preference',
+      description: 'Local rule checking normalization and safe linking',
+      why: 'Normalize type & domain',
+      howToApply: 'Keep types canonical.'
+    });
+    const savedLocal = getMemoryContent(roWs, 'workspace', 'local-ws-rule');
+    assert.equal(parseYamlFrontmatter(savedLocal.content).frontmatter.type, 'preference', 'saveMemoryEntry must normalize personal-preference to preference');
+    assert.equal(parseYamlFrontmatter(savedLocal.content).frontmatter.domain, 'backend', 'saveMemoryEntry must lowercase domain');
+
+    const teamRulePath = path.join(roTeamRepo.dir, 'team-immutable-rule.md');
+    const originalTeamContent = '---\nname: team-immutable-rule\ndomain: security\ntype: convention\ndescription: Immutable shared rule\nverified: 2026-01-01\n---\n# Team Immutable Rule\nShared convention.\n';
+    fs.writeFileSync(teamRulePath, originalTeamContent, 'utf8');
+
+    const teamModRes = applyMemoryPatch(roWs, {
+      modified_nodes: [{ slug: 'team-immutable-rule', domain: 'hacked', description: 'Tampered' }],
+      added_links: [{ source: 'team-immutable-rule', target: 'local-ws-rule', type: 'related' }]
+    });
+    assert.equal(teamModRes.ok, false, 'applyMemoryPatch must reject modifications to team layer nodes');
+    assert.ok(teamModRes.errors.length >= 2, 'applyMemoryPatch must report errors for both team node edit and outgoing team link');
+    assert.equal(fs.readFileSync(teamRulePath, 'utf8'), originalTeamContent, 'Team markdown file must remain untouched on disk');
+
+    // Linking from workspace -> team target must still succeed
+    const wsToTeamLink = applyMemoryPatch(roWs, {
+      added_links: [{ source: 'local-ws-rule', target: 'team-immutable-rule', type: 'related' }]
+    });
+    assert.equal(wsToTeamLink.ok, true, 'Linking workspace node -> team target must remain allowed');
+
+    // Schema normalization & Studio UI read-only/general cleanup
+    const studioHtml52 = generateKnowledgeGraphHtml(roWs);
+    assert.ok(studioHtml52.includes('ins-readonly-banner'), 'Studio HTML must include Team read-only banner');
+    assert.ok(studioHtml52.includes('isReadOnlyTeam'), 'Studio HTML must disable controls for Team nodes');
+    assert.equal(studioHtml52.includes('<option value="general">general</option>'), false, 'Studio HTML must not offer legacy general option in type selector');
+
+    const elicitSkill = fs.readFileSync(path.resolve(process.cwd(), 'plugins', 'knowledge-capture', 'skills', 'kc-elicit', 'SKILL.md'), 'utf8');
+    const promoteSkill = fs.readFileSync(path.resolve(process.cwd(), 'plugins', 'knowledge-capture', 'skills', 'kc-promote', 'SKILL.md'), 'utf8');
+    assert.equal(/`gotcha`/.test(elicitSkill), false, 'kc-elicit must not reference stale `gotcha` type');
+    assert.ok(promoteSkill.includes('teamSlug'), 'kc-promote must document teamSlug targeting');
+
+    // 52.3 Workspace-partitioned telemetry & schema v3 migration
+    const repoA = path.join(tempRoot, 'tele-repo-a');
+    const repoB = path.join(tempRoot, 'tele-repo-b');
+    fs.mkdirSync(path.join(repoA, '.agents', 'rules', 'memory'), { recursive: true });
+    fs.mkdirSync(path.join(repoB, '.agents', 'rules', 'memory'), { recursive: true });
+    saveMemoryEntry(repoA, { layer: 'workspace', slug: 'shared-tele-slug', domain: 'api', description: 'Shared slug in Repo A', why: 'A', howToApply: 'Rule A' });
+    saveMemoryEntry(repoB, { layer: 'workspace', slug: 'shared-tele-slug', domain: 'api', description: 'Shared slug in Repo B', why: 'B', howToApply: 'Rule B' });
+    await syncSqliteIndex(repoA, { engine: 'heuristic' });
+    await syncSqliteIndex(repoB, { engine: 'heuristic' });
+
+    recordMemoryEfficacy('shared-tele-slug', 'test_fail', { workspaceRoot: repoA, layer: 'workspace', message: 'Failed in Repo A only' });
+    recordMemoryEfficacy('shared-tele-slug', 'test_fail', { workspaceRoot: repoA, layer: 'workspace', message: 'Failed twice in Repo A' });
+    const searchA = await searchMemoriesHybrid(repoA, 'Shared slug', { sync: false, limit: 20 });
+    const searchB = await searchMemoriesHybrid(repoB, 'Shared slug', { sync: false, limit: 20 });
+    const hitA = searchA.find(r => r.slug === 'shared-tele-slug');
+    const hitB = searchB.find(r => r.slug === 'shared-tele-slug');
+    const nodeA = getKnowledgeGraphData(repoA).nodes.find(n => n.slug === 'shared-tele-slug');
+    const nodeB = getKnowledgeGraphData(repoB).nodes.find(n => n.slug === 'shared-tele-slug');
+    assert.ok(hitA && hitA.efficacyScore < 1.0, `Repo A test failures must reduce Repo A efficacyScore (got ${hitA?.efficacyScore})`);
+    assert.equal(hitB?.efficacyScore, 1.0, 'Repo A test failures must NOT contaminate Repo B search efficacyScore');
+    assert.equal(nodeB?.efficacy_score, 1.0, 'Repo A test failures must NOT contaminate Repo B graph efficacy_score');
+    assert.ok(nodeA && nodeA.efficacy_score < 1.0, 'Repo A graph node must reflect Repo A efficacy degradation');
+
+    // Verify clean sync: false & isIndexDirty without N+1 re-parses
+    assert.equal(isIndexDirty(repoA), false, 'Synced Repo A must report isIndexDirty === false');
+    assert.equal(isIndexDirty(repoB), false, 'Synced Repo B must report isIndexDirty === false');
+
+    // Verify legacy v2 telemetry(slug PRIMARY KEY) migration to schema v3
+    const legacyDbStorage = path.join(tempRoot, 'legacy-v2-storage');
+    fs.mkdirSync(legacyDbStorage, { recursive: true });
+    const savedStorageEnv52 = process.env.KC_STORAGE_DIR;
+    process.env.KC_STORAGE_DIR = legacyDbStorage;
+    resetDatabaseInstance();
+    try {
+      const { DatabaseSync } = await import('node:sqlite');
+      const legacyDb = new DatabaseSync(getDbPath());
+      legacyDb.exec(`
+        CREATE TABLE meta (key TEXT PRIMARY KEY, val TEXT);
+        INSERT INTO meta (key, val) VALUES ('schema_version', '2');
+        CREATE TABLE memories (workspace_id TEXT NOT NULL, layer TEXT NOT NULL, team_slug TEXT NOT NULL DEFAULT '', path TEXT NOT NULL, slug TEXT NOT NULL, domain TEXT, type TEXT, verified TEXT, trigger TEXT, mtime INTEGER, trigger_vector BLOB, content_vector BLOB, entity_vector BLOB, PRIMARY KEY (workspace_id, layer, team_slug, path));
+        CREATE TABLE telemetry (slug TEXT PRIMARY KEY, recalled_count INTEGER DEFAULT 0, applied_count INTEGER DEFAULT 0, test_pass_count INTEGER DEFAULT 0, test_fail_count INTEGER DEFAULT 0, efficacy_score REAL DEFAULT 1.0, last_recalled TEXT, last_applied TEXT, last_feedback TEXT);
+        INSERT INTO telemetry (slug, recalled_count, test_fail_count, efficacy_score) VALUES ('legacy-rule', 4, 1, 0.75);
+      `);
+      legacyDb.close();
+      const migratedDb = getDatabase();
+      const verRow = migratedDb.prepare("SELECT val FROM meta WHERE key = 'schema_version'").get();
+      assert.equal(verRow.val, '3', 'Legacy telemetry DB must upgrade to schema_version 3');
+      const migratedTele = migratedDb.prepare("SELECT workspace_id, recalled_count, efficacy_score FROM telemetry WHERE slug = 'legacy-rule'").get();
+      assert.equal(migratedTele.workspace_id, 'global', 'Legacy telemetry row must migrate into workspace_id = global');
+      assert.equal(migratedTele.recalled_count, 4, 'Legacy telemetry recalled_count must be preserved');
+    } finally {
+      resetDatabaseInstance();
+      process.env.KC_STORAGE_DIR = savedStorageEnv52;
+      resetDatabaseInstance();
+    }
+
+    // 52.4 Dimension-partitioned memory_vectors cache & ONNX stable dimensions
+    const activeCfg52 = getActiveEmbeddingConfig();
+    assert.ok(activeCfg52.dimensions === 384 || activeCfg52.dimensions === 128);
+    const db52 = getDatabase();
+    const vecRows52 = db52.prepare('SELECT DISTINCT dimensions FROM memory_vectors').all();
+    assert.ok(vecRows52.length >= 1, 'memory_vectors table must cache per-dimension embeddings');
+    const aVecBefore = db52.prepare('SELECT COUNT(*) AS c FROM memories WHERE workspace_id = ? AND trigger_vector IS NOT NULL').get(normalizeWorkspaceId(repoA)).c;
+    assert.ok(aVecBefore >= 1, 'Repo A vectors must be stored in SQLite');
+
+    // 52.5 Studio auth: missing X-Studio-Token without Origin must return 403 + MiniD3 zoom/drag math
+    const authStudio = await startStudioServer(roWs, { port: 0, autoOpen: false });
+    try {
+      const noTokenNoOrigin = await fetch(`${authStudio.url}/api/patch`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ modified_nodes: [] })
+      });
+      assert.equal(noTokenNoOrigin.status, 403, 'POST /api/patch without X-Studio-Token and without Origin must return 403');
+    } finally {
+      await authStudio.close();
+    }
+
+    // Verify MiniD3 zoomed drag coordinate inversion
+    const matchZoom = studioHtml52.match(/window\.__MINI_D3__ = true;\s*window\.d3 = \(function\(\) \{[\s\S]*?\}\)\(\);/);
+    assert.ok(matchZoom, 'MiniD3 block must be present in Studio HTML');
+    const listeners = {};
+    const mockSvg = {
+      __zoomTransform: { scale: 1, tx: 0, ty: 0 },
+      addEventListener: (ev, cb) => { listeners[`svg:${ev}`] = cb; },
+      getBoundingClientRect: () => ({ left: 100, top: 50 })
+    };
+    const mockNodeEl = {
+      __data__: { id: 'n1', x: 0, y: 0 },
+      addEventListener: (ev, cb) => { listeners[`node:${ev}`] = cb; }
+    };
+    const sandbox52 = {
+      window: {
+        addEventListener: (ev, cb) => { listeners[`win:${ev}`] = cb; }
+      },
+      document: {
+        getElementById: (id) => (id === 'canvas' ? mockSvg : null)
+      }
+    };
+    vm.runInNewContext(matchZoom[0], sandbox52);
+    const zoomBehavior = sandbox52.window.d3.zoom().scaleExtent([0.2, 3]).on('zoom', () => {});
+    zoomBehavior({ _elements: [mockSvg] });
+    mockSvg.__zoomTransform = { scale: 2, tx: 50, ty: 20 };
+    let draggedCoords = null;
+    const dragBehavior = sandbox52.window.d3.drag()
+      .on('start', () => {})
+      .on('drag', (ev) => { draggedCoords = { x: ev.x, y: ev.y }; })
+      .on('end', () => {});
+    dragBehavior({ _elements: [mockNodeEl] });
+    listeners['node:mousedown']({ stopPropagation: () => {} });
+    listeners['win:mousemove']({ clientX: 250, clientY: 170 });
+    assert.equal(draggedCoords.x, 50, 'MiniD3 zoomed drag X must invert (250 - 100 - 50) / 2 = 50');
+    assert.equal(draggedCoords.y, 50, 'MiniD3 zoomed drag Y must invert (170 - 50 - 20) / 2 = 50');
+
+    // 52.6 Syran uniform prior & mixed h.prior mass distribution
+    const uniformSyran = evaluateProbability([
+      { label: 'Hyp A', weight: 0.6 },
+      { label: 'Hyp B', weight: 0.6 },
+      { label: 'Hyp C', weight: 0.6 }
+    ]);
+    assert.equal(uniformSyran.evaluations[0].probability, '33.33%', '3 hypotheses with omitted prior must evaluate to 33.33% each');
+    assert.equal(uniformSyran.evaluations[1].probability, '33.33%');
+    assert.equal(uniformSyran.evaluations[2].probability, '33.33%');
+
+    const mixedSyran = evaluateProbability([
+      { label: 'Known', prior: 0.6, weight: 0.5 },
+      { label: 'Unknown 1', weight: 0.5 },
+      { label: 'Unknown 2', weight: 0.5 }
+    ]);
+    const u1 = mixedSyran.evaluations.find(h => h.label === 'Unknown 1');
+    const u2 = mixedSyran.evaluations.find(h => h.label === 'Unknown 2');
+    assert.equal(u1.posterior_probability, 0.2, 'Remaining prior mass (0.4) must be split evenly across unspecified hypotheses');
+    assert.equal(u2.posterior_probability, 0.2);
+
+    // 52.7 MCP schema enum + JSON-RPC error response
+    const kcMcp52 = path.resolve(process.cwd(), 'plugins', 'knowledge-capture', 'mcp-server', 'index.js');
+    const mcpRun52 = spawnSync(process.execPath, [kcMcp52], {
+      input: [
+        '{bad json',
+        JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
+        JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'unknown/method' })
+      ].join('\n') + '\n',
+      env: { ...process.env, KC_STORAGE_DIR: process.env.KC_STORAGE_DIR },
+      encoding: 'utf8'
+    });
+    const mcpLines52 = mcpRun52.stdout.trim().split('\n').map(l => JSON.parse(l));
+    assert.equal(mcpLines52[0].error.code, -32700, 'Malformed JSON-RPC input must return -32700');
+    const mergeToolDef = mcpLines52[1].result.tools.find(t => t.name === 'merge_memory_entries');
+    assert.ok(mergeToolDef.inputSchema.properties.type.enum.includes('preference'), 'merge_memory_entries enum must contain preference');
+    assert.equal(mergeToolDef.inputSchema.properties.type.enum.includes('personal-preference'), false, 'merge_memory_entries enum must not contain personal-preference');
+    assert.equal(mcpLines52[2].error.code, -32601, 'Unknown JSON-RPC method must return -32601');
+
+    // 52.8 Archeology priority scoring + session sentinel directives/errors + bootstrap + nvmrc drift
+    const arch52Repo = path.join(tempRoot, 'arch-52-repo');
+    fs.mkdirSync(arch52Repo, { recursive: true });
+    execFileSync('git', ['init'], { cwd: arch52Repo, stdio: 'ignore' });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: arch52Repo, stdio: 'ignore' });
+    execFileSync('git', ['config', 'user.name', 'Test User'], { cwd: arch52Repo, stdio: 'ignore' });
+    fs.writeFileSync(path.join(arch52Repo, 'app.js'), '0\n', 'utf8');
+    execFileSync('git', ['add', '.'], { cwd: arch52Repo, stdio: 'ignore' });
+    execFileSync('git', ['commit', '-m', 'revert: roll back broken deploy script after oom deadlock'], { cwd: arch52Repo, stdio: 'ignore' });
+    for (let i = 1; i <= 12; i++) {
+      fs.writeFileSync(path.join(arch52Repo, 'app.js'), `${i}\n`, 'utf8');
+      execFileSync('git', ['add', '.'], { cwd: arch52Repo, stdio: 'ignore' });
+      execFileSync('git', ['commit', '-m', `fix: minor tweak ${i}`], { cwd: arch52Repo, stdio: 'ignore' });
+    }
+    const arch52Res = mineGitHistoryMemories(arch52Repo, { maxCommits: 20, limit: 5 });
+    assert.ok(arch52Res.candidates.some(c => c.description.includes('revert: roll back broken deploy')),
+      'Archeology scanner must surface older high-signal revert commit ahead of routine fix commits');
+
+    const sentinel52Ws = path.join(tempRoot, 'sentinel-52-ws');
+    fs.mkdirSync(path.join(sentinel52Ws, '.agents', 'rules', 'memory'), { recursive: true });
+    const sentinel52Res = autoElicitSessionKnowledge(sentinel52Ws, {
+      userFeedback: ['Always use uv for Python packaging instead of pip', 'Never use var in JavaScript'],
+      transcript: [
+        'Error: ECONNREFUSED 127.0.0.1:5432',
+        'TypeError: Cannot read properties of undefined (reading foo)'
+      ].join('\n')
+    });
+    assert.ok(sentinel52Res.suggested_candidates.some(c => c.slug.includes('directive') || c.slug.includes('preference')),
+      'Session sentinel must capture Always/Never user directives');
+    const debugCands = sentinel52Res.suggested_candidates.filter(c => c.elicited_from === 'zero_code_debugging');
+    assert.equal(debugCands.length, 2, 'Session sentinel must capture up to 2 distinct debug error candidates');
+
+    const boot52Ws = path.join(tempRoot, 'boot-52-ws');
+    fs.mkdirSync(path.join(boot52Ws, '.agents', 'rules', 'memory'), { recursive: true });
+    fs.writeFileSync(path.join(boot52Ws, 'go.mod'), 'module example.com/app\ngo 1.22\n', 'utf8');
+    fs.writeFileSync(path.join(boot52Ws, 'tsconfig.json'), '{ "compilerOptions": { "strict": true } }\n', 'utf8');
+    fs.writeFileSync(path.join(boot52Ws, 'eslint.config.mjs'), 'export default [];\n', 'utf8');
+    fs.writeFileSync(path.join(boot52Ws, '.nvmrc'), 'v20.11.0\n', 'utf8');
+    const boot52 = bootstrapRepoMemories(boot52Ws);
+    assert.ok(boot52.some(c => c.slug === 'go-module-toolchain'), 'Bootstrap scanner must detect go.mod');
+    assert.ok(boot52.some(c => c.slug === 'typescript-compiler-standards'), 'Bootstrap scanner must detect tsconfig.json');
+    assert.ok(boot52.some(c => c.slug === 'eslint-code-standards'), 'Bootstrap scanner must detect eslint.config.mjs');
+    assert.ok(boot52.some(c => c.slug === 'node-runtime-version-pin'), 'Bootstrap scanner must detect .nvmrc');
+
+    saveMemoryEntry(boot52Ws, {
+      layer: 'workspace',
+      slug: 'legacy-node-rule',
+      domain: 'tooling',
+      description: 'When running local scripts',
+      why: 'Runtime alignment',
+      howToApply: 'Requires Node 16 for build scripts.'
+    });
+    const drift52 = detectContradictionsAndDrift(boot52Ws);
+    assert.ok(drift52.drifts.some(d => d.slug === 'legacy-node-rule' && /20/.test(d.detail)),
+      'Drift detector must detect Node runtime drift from .nvmrc when package.json lacks engines.node');
+  }
+  console.log('  ✔ Passed: All 11 audit regression checks verified.\n');
 
   console.log('============================================================');
   console.log('🎉 ALL TESTS PASSED SUCCESSFULLY!');

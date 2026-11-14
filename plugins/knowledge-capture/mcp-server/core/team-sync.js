@@ -10,7 +10,7 @@ export { deriveTeamRepoSlug };
 
 function saveSettings(settings, storageDir = getStorageDir()) {
   const p = path.join(storageDir, 'settings.json');
-  fs.writeFileSync(p, JSON.stringify(settings, null, 2), 'utf8');
+  atomicWriteFileSync(p, JSON.stringify(settings, null, 2), 'utf8');
 }
 
 function validateSafeGitUrl(url) {

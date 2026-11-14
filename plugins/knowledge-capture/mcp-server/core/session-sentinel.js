@@ -277,6 +277,29 @@ export function autoElicitSessionKnowledge(workspaceRoot = process.cwd(), option
           elicited_from: 'user_feedback'
         });
       }
+    } else {
+      const directiveMatch = text.match(/\b(always\s+use|never\s+use|avoid\s+using|do\s+not\s+use|don't\s+use)\s+([^,.;\n!?]{2,60})/i);
+      if (directiveMatch) {
+        userPrefSignals++;
+        result.signal_evidence.user_preference_excerpts.push(text.slice(0, 200));
+        const verb = directiveMatch[1].trim().toLowerCase();
+        const subject = directiveMatch[2].trim();
+        const isPositive = verb.startsWith('always');
+        const subPart = subject.replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase().replace(/--+/g, '-').slice(0, 24).replace(/^-+|-+$/g, '') || 'directive';
+        const slug = `user-preference-${subPart}`.slice(0, 40).replace(/-+$/g, '');
+        if (!result.suggested_candidates.some(c => c.slug === slug)) {
+          result.suggested_candidates.push({
+            slug,
+            title: `User Preference: ${isPositive ? 'Always use' : 'Avoid'} ${subject}`,
+            domain: 'workflow',
+            type: 'preference',
+            layer: 'private',
+            description: `When selecting tools or approaches involving ${subject}`,
+            suggested_body: `# User Preference: ${isPositive ? 'Always use' : 'Avoid'} ${subject}\n\n## Preferred Way of Working\n- ${isPositive ? `Always use \`${subject}\`.` : `Never/avoid using \`${subject}\`.`}\n\n## How to Apply\n- Follow this workflow preference across future sessions unless overridden.`,
+            elicited_from: 'user_feedback'
+          });
+        }
+      }
     }
   }
 
@@ -343,7 +366,7 @@ export function autoElicitSessionKnowledge(workspaceRoot = process.cwd(), option
           elicited_from: 'zero_code_debugging'
         });
       }
-      break; // One debugging breakthrough candidate is sufficient per session
+      if (debugSignals >= 2) break;
     }
   }
 

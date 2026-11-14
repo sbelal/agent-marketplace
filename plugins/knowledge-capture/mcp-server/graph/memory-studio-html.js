@@ -40,7 +40,6 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd(), option
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Knowledge Capture Graph Visualizer & Memory Studio</title>
-  <script src="https://www.gstatic.com/antigravity/web/dev/tailwindcss.min.js"></script>
   <script src="https://d3js.org/d3.v7.min.js"></script>
   <style>
     :root {
@@ -355,6 +354,10 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd(), option
       <button class="close-btn" id="ins-close">&times;</button>
     </div>
 
+    <div id="ins-readonly-banner" style="display:none; font-size:11px; padding:6px 10px; border-radius:6px; background:rgba(16,185,129,0.12); border:1px solid rgba(16,185,129,0.4); color:#34d399;">
+      🔒 Team layer is read-only locally. Override in Private/Workspace or promote via <code>/kc-promote</code>.
+    </div>
+
     <div class="inspector-field">
       <span class="inspector-label">Domain</span>
       <input type="text" id="edit-domain" class="inspector-input">
@@ -367,7 +370,6 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd(), option
         <option value="platform-fact">platform-fact</option>
         <option value="tool-gotcha">tool-gotcha</option>
         <option value="preference">preference</option>
-        <option value="general">general</option>
       </select>
     </div>
 
@@ -679,22 +681,24 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd(), option
           forceCollide: () => ({ radius: () => ({}) }),
           zoom: () => {
             let zoomHandler = () => {};
-            const zoomObj = {
-              scaleExtent: () => zoomObj,
-              on: (ev, cb) => { zoomHandler = cb; return zoomObj; }
-            };
-            return (selection) => {
+            let minScale = 0.2, maxScale = 3;
+            const zoomFn = (selection) => {
               const svg = selection._elements[0];
               if (!svg) return;
               let scale = 1, tx = 0, ty = 0;
+              svg.__zoomTransform = { scale, tx, ty };
               let isPanning = false, startX = 0, startY = 0;
+              const emitTransform = () => {
+                svg.__zoomTransform = { scale, tx, ty };
+                zoomHandler({ transform: "translate(" + tx + "," + ty + ") scale(" + scale + ")" });
+              };
               svg.addEventListener("wheel", (e) => {
                 e.preventDefault();
-                scale = Math.max(0.2, Math.min(3, scale * (e.deltaY < 0 ? 1.1 : 0.9)));
-                zoomHandler({ transform: "translate(" + tx + "," + ty + ") scale(" + scale + ")" });
+                scale = Math.max(minScale, Math.min(maxScale, scale * (e.deltaY < 0 ? 1.1 : 0.9)));
+                emitTransform();
               }, { passive: false });
               svg.addEventListener("mousedown", (e) => {
-                if (e.target.tagName === 'circle' || e.target.closest('#controls') || e.target.closest('#inspector')) return;
+                if (e.target.tagName === 'circle' || (e.target.closest && (e.target.closest('#controls') || e.target.closest('#inspector')))) return;
                 isPanning = true;
                 startX = e.clientX - tx;
                 startY = e.clientY - ty;
@@ -703,22 +707,26 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd(), option
                 if (!isPanning) return;
                 tx = e.clientX - startX;
                 ty = e.clientY - startY;
-                zoomHandler({ transform: "translate(" + tx + "," + ty + ") scale(" + scale + ")" });
+                emitTransform();
               });
               window.addEventListener("mouseup", () => { isPanning = false; });
             };
+            zoomFn.scaleExtent = (ext) => {
+              if (Array.isArray(ext) && ext.length >= 2) {
+                minScale = Number(ext[0]) || 0.2;
+                maxScale = Number(ext[1]) || 3;
+              }
+              return zoomFn;
+            };
+            zoomFn.on = (ev, cb) => {
+              if (ev === "zoom") zoomHandler = cb;
+              return zoomFn;
+            };
+            return zoomFn;
           },
           drag: () => {
             let startCb = () => {}, dragCb = () => {}, endCb = () => {};
-            const dragObj = {
-              on: (ev, cb) => {
-                if (ev === "start") startCb = cb;
-                if (ev === "drag") dragCb = cb;
-                if (ev === "end") endCb = cb;
-                return dragObj;
-              }
-            };
-            return (selection) => {
+            const dragFn = (selection) => {
               selection._elements.forEach(el => {
                 el.addEventListener("mousedown", (e) => {
                   e.stopPropagation();
@@ -726,9 +734,12 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd(), option
                   if (!d) return;
                   startCb(e, d);
                   const onMove = (me) => {
-                    const svg = document.getElementById("canvas");
-                    const rect = svg.getBoundingClientRect();
-                    dragCb({ x: me.clientX - rect.left, y: me.clientY - rect.top }, d);
+                    const svg = document.getElementById("canvas") || (el.closest ? el.closest("svg") : null);
+                    const rect = svg ? svg.getBoundingClientRect() : { left: 0, top: 0 };
+                    const z = (svg && svg.__zoomTransform) ? svg.__zoomTransform : { scale: 1, tx: 0, ty: 0 };
+                    const localX = (me.clientX - (rect.left || 0) - (z.tx || 0)) / (z.scale || 1);
+                    const localY = (me.clientY - (rect.top || 0) - (z.ty || 0)) / (z.scale || 1);
+                    dragCb({ x: localX, y: localY }, d);
                   };
                   const onUp = (ue) => {
                     window.removeEventListener("mousemove", onMove);
@@ -740,6 +751,13 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd(), option
                 });
               });
             };
+            dragFn.on = (ev, cb) => {
+              if (ev === "start") startCb = cb;
+              if (ev === "drag") dragCb = cb;
+              if (ev === "end") endCb = cb;
+              return dragFn;
+            };
+            return dragFn;
           }
         };
       })();
@@ -867,6 +885,10 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd(), option
       e.stopPropagation();
       if (connectMode) {
         if (!connectSourceNode) {
+          if (d.layer === 'team') {
+            showToast("Cannot start a link from read-only Team node '" + d.slug + "'. Start from Workspace or Private instead.", true);
+            return;
+          }
           connectSourceNode = d;
           nodeElements.classed("node-connect-source", n => n.id === d.id);
         } else if (connectSourceNode.id === d.id) {
@@ -901,12 +923,24 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd(), option
     }
 
     function openInspector(node) {
+      const validTypes = ['convention', 'platform-fact', 'tool-gotcha', 'preference'];
+      const isReadOnlyTeam = node.layer === 'team';
+
       document.getElementById('ins-slug').textContent = node.slug;
       document.getElementById('ins-layer').textContent = node.layer;
       document.getElementById('edit-domain').value = node.domain;
-      document.getElementById('edit-type').value = node.type || "convention";
+      document.getElementById('edit-type').value = validTypes.includes(node.type) ? node.type : "convention";
       document.getElementById('edit-trigger').value = node.description || "";
       document.getElementById('edit-verified').value = node.verified || "";
+
+      const banner = document.getElementById('ins-readonly-banner');
+      if (banner) {
+        banner.style.display = isReadOnlyTeam ? 'block' : 'none';
+      }
+      ['edit-domain', 'edit-type', 'edit-trigger', 'edit-verified', 'btn-bump-today', 'btn-save-node', 'btn-delink-node'].forEach(elId => {
+        const el = document.getElementById(elId);
+        if (el) el.disabled = isReadOnlyTeam;
+      });
 
       const linksDiv = document.getElementById('ins-links');
       linksDiv.textContent = '';
@@ -969,12 +1003,19 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd(), option
     };
 
     document.getElementById('btn-bump-today').onclick = () => {
+      if (!selectedNode || selectedNode.layer === 'team') {
+        if (selectedNode) showToast("Team layer nodes are read-only locally.", true);
+        return;
+      }
       const today = new Date().toISOString().slice(0, 10);
       document.getElementById('edit-verified').value = today;
     };
 
     document.getElementById('btn-delink-node').onclick = () => {
-      if (!selectedNode) return;
+      if (!selectedNode || selectedNode.layer === 'team') {
+        if (selectedNode) showToast("Team layer nodes are read-only locally.", true);
+        return;
+      }
       const nodeId = selectedNode.id;
       const nodeSlug = selectedNode.slug;
       let clearedCount = 0;
@@ -1012,7 +1053,10 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd(), option
     };
 
     document.getElementById('btn-save-node').onclick = () => {
-      if (!selectedNode) return;
+      if (!selectedNode || selectedNode.layer === 'team') {
+        if (selectedNode) showToast("Team layer nodes are read-only locally.", true);
+        return;
+      }
       selectedNode.domain = document.getElementById('edit-domain').value;
       selectedNode.type = document.getElementById('edit-type').value;
       selectedNode.description = document.getElementById('edit-trigger').value;

@@ -54,6 +54,9 @@ export function mineGitHistoryMemories(workspaceRoot = process.cwd(), options = 
     /\b(deprecat(?:ed|ion)|breaking change)\b/i
   ];
 
+  const maxResults = Math.max(1, Math.min(50, parseInt(options.limit, 10) || 10));
+  let orderIdx = 0;
+
   for (const block of commitBlocks) {
     const lines = block.split(/\r?\n/);
     const header = lines[0] || '';
@@ -85,6 +88,12 @@ export function mineGitHistoryMemories(workspaceRoot = process.cwd(), options = 
     const type = (/\b(revert|workaround|gotcha)\b/i.test(lowerMsg))
       ? 'tool-gotcha'
       : 'convention';
+
+    let signalScore = 1;
+    if (/\b(revert(?:ed|s)?|workaround|gotcha|caveat|quirk)\b/i.test(lowerMsg)) signalScore += 3;
+    if (/\b(race condition|deadlock|memory leak|oom|breaking change)\b/i.test(lowerMsg)) signalScore += 3;
+    if (/\b(deprecat(?:ed|ion)|timeout|hotfix)\b/i.test(lowerMsg)) signalScore += 2;
+    if (bodyLines.length > 0) signalScore += 1;
 
     const cleanSubject = subject
       .toLowerCase()
@@ -119,16 +128,19 @@ export function mineGitHistoryMemories(workspaceRoot = process.cwd(), options = 
         author,
         date,
         subject
-      }
+      },
+      _signalScore: signalScore,
+      _orderIdx: orderIdx++
     });
-
-    if (candidates.length >= 10) break;
   }
+
+  candidates.sort((a, b) => (b._signalScore - a._signalScore) || (a._orderIdx - b._orderIdx));
+  const topCandidates = candidates.slice(0, maxResults).map(({ _signalScore, _orderIdx, ...rest }) => rest);
 
   return {
     status: 'SUCCESS',
     commits_analyzed: commitBlocks.length,
-    candidates_found: candidates.length,
-    candidates
+    candidates_found: topCandidates.length,
+    candidates: topCandidates
   };
 }

@@ -12,9 +12,9 @@ This skill performs a comprehensive 4-point **"Lint & Dream"** pass across memor
 
 ### 1. Identify Scope & Inspect Layer Statistics
 Determine the target memory store or domain from arguments (`/kc-consolidate [layer|domain]`):
-- **Private Layer:** `~/.gemini/knowledge-capture/private/` (default write target)
+- **Private Layer:** Resolved via `get_layer_statistics().paths.privateDir` (default `~/.gemini/knowledge-capture/private/`, default write target)
 - **Workspace Layer:** `.agents/rules/memory/`
-- **Team Layer:** `~/.gemini/knowledge-capture/team/` (read-only locally; consolidated via promotion branch)
+- **Team Layer:** Resolved via `manage_team_repositories({ action: 'list' })` (`<storage-dir>/team/<slug>/`, read-only locally; updated via `/kc-promote`)
 - **Domain Filter:** If a domain name (e.g., `kubernetes`, `terraform`, `go`) is passed, focus the consolidation pass on that domain while cross-checking all layers.
 
 Call `get_layer_statistics` and `get_memory_summary(layer="all")` first to obtain the full domain index, precedence shadowing map, and staleness report.
