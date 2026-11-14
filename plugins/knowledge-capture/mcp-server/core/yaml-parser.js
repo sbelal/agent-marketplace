@@ -1,10 +1,16 @@
 export function stripQuotes(str) {
   const s = String(str || '').trim();
-  if (
-    (s.startsWith('"') && s.endsWith('"')) ||
-    (s.startsWith("'") && s.endsWith("'"))
-  ) {
+  if (s.startsWith('"') && s.endsWith('"') && s.length >= 2) {
+    try {
+      const parsed = JSON.parse(s);
+      if (typeof parsed === 'string') {
+        return parsed;
+      }
+    } catch {}
     return s.slice(1, -1).trim();
+  }
+  if (s.startsWith("'") && s.endsWith("'") && s.length >= 2) {
+    return s.slice(1, -1).replace(/''/g, "'").trim();
   }
   return s;
 }
@@ -25,8 +31,37 @@ export function parseInlineArrayOrList(rawVal) {
   if (!inner) {
     return [];
   }
-  return inner
-    .split(',')
+  const items = [];
+  let current = '';
+  let inQuote = null;
+  for (let i = 0; i < inner.length; i++) {
+    const ch = inner[i];
+    if (inQuote) {
+      if (ch === '\\' && inQuote === '"' && i + 1 < inner.length) {
+        current += ch + inner[++i];
+      } else if (ch === inQuote) {
+        if (inQuote === "'" && inner[i + 1] === "'") {
+          current += "''";
+          i++;
+        } else {
+          inQuote = null;
+          current += ch;
+        }
+      } else {
+        current += ch;
+      }
+    } else if (ch === '"' || ch === "'") {
+      inQuote = ch;
+      current += ch;
+    } else if (ch === ',') {
+      items.push(current);
+      current = '';
+    } else {
+      current += ch;
+    }
+  }
+  items.push(current);
+  return items
     .map((item) => stripQuotes(item).replace(/\.md$/i, ''))
     .filter(Boolean);
 }
@@ -75,26 +110,62 @@ export function parseYamlFrontmatter(fileContent) {
   let currentKey = null;
   let currentSubKey = null;
   let isSubMap = false;
+  let blockStyle = null;
+  let subBlockStyle = null;
+  let subKeyIndent = null;
+  let pendingBlankLines = 0;
+
+  const appendBlockSegment = (existing, segment, style) => {
+    if (!existing) {
+      pendingBlankLines = 0;
+      return segment;
+    }
+    const blankCount = pendingBlankLines;
+    pendingBlankLines = 0;
+    if (style === 'literal') {
+      return existing + '\n'.repeat(1 + blankCount) + segment;
+    }
+    // Folded ('>') scalar: single newline folds to space; blank lines become newlines
+    const sep = blankCount > 0 ? '\n'.repeat(blankCount) : ' ';
+    return existing + sep + segment;
+  };
 
   for (let i = 0; i < lines.length; i++) {
     const rawLine = lines[i];
     const trimmedLine = rawLine.trim();
-    if (!trimmedLine || trimmedLine.startsWith('#')) {
+    const indent = rawLine.search(/\S/);
+    const activeBlock = (isSubMap && currentSubKey) ? subBlockStyle : blockStyle;
+
+    if (!trimmedLine) {
+      if (activeBlock && currentKey) {
+        const curVal = (isSubMap && currentSubKey) ? frontmatter[currentKey][currentSubKey] : frontmatter[currentKey];
+        if (typeof curVal === 'string' && curVal.length > 0) {
+          pendingBlankLines++;
+        }
+      }
       continue;
     }
 
-    const indent = rawLine.search(/\S/);
+    if (trimmedLine.startsWith('#') && !(activeBlock && indent > 0)) {
+      continue;
+    }
 
     if (indent === 0) {
       currentSubKey = null;
       isSubMap = false;
+      blockStyle = null;
+      subBlockStyle = null;
+      subKeyIndent = null;
+      pendingBlankLines = 0;
       const colonIndex = rawLine.indexOf(':');
       if (colonIndex > 0) {
         const key = rawLine.slice(0, colonIndex).trim();
         let value = rawLine.slice(colonIndex + 1).trim();
 
-        if (value === '' || value === '>' || value === '|') {
-          frontmatter[key] = (value === '>' || value === '|') ? '' : null;
+        if (value === '' || value === '>' || value === '|' || value === '|-' || value === '>-') {
+          const isBlock = value.startsWith('>') || value.startsWith('|');
+          frontmatter[key] = isBlock ? '' : null;
+          blockStyle = value.startsWith('|') ? 'literal' : (value.startsWith('>') ? 'folded' : null);
           currentKey = key;
         } else if (value.startsWith('[') && value.endsWith(']')) {
           frontmatter[key] = parseInlineArrayOrList(value);
@@ -106,7 +177,11 @@ export function parseYamlFrontmatter(fileContent) {
       }
     } else if (currentKey) {
       const colonIndex = trimmedLine.indexOf(':');
-      if (colonIndex > 0 && !trimmedLine.startsWith('-')) {
+      if (isSubMap && subBlockStyle !== null && subKeyIndent !== null && indent <= subKeyIndent && colonIndex > 0 && !trimmedLine.startsWith('-')) {
+        subBlockStyle = null;
+        pendingBlankLines = 0;
+      }
+      if (blockStyle === null && subBlockStyle === null && colonIndex > 0 && !trimmedLine.startsWith('-')) {
         const subKey = trimmedLine.slice(0, colonIndex).trim();
         let subVal = trimmedLine.slice(colonIndex + 1).trim();
 
@@ -115,15 +190,20 @@ export function parseYamlFrontmatter(fileContent) {
         }
         isSubMap = true;
         currentSubKey = subKey;
+        subKeyIndent = indent;
+        subBlockStyle = null;
+        pendingBlankLines = 0;
 
         if (subVal.startsWith('[') && subVal.endsWith(']')) {
           frontmatter[currentKey][subKey] = parseInlineArrayOrList(subVal);
-        } else if (subVal === '' || subVal === '>' || subVal === '|') {
-          frontmatter[currentKey][subKey] = (subVal === '>' || subVal === '|') ? '' : [];
+        } else if (subVal === '' || subVal === '>' || subVal === '|' || subVal === '|-' || subVal === '>-') {
+          const isBlock = subVal.startsWith('>') || subVal.startsWith('|');
+          frontmatter[currentKey][subKey] = isBlock ? '' : [];
+          subBlockStyle = subVal.startsWith('|') ? 'literal' : (subVal.startsWith('>') ? 'folded' : null);
         } else {
           frontmatter[currentKey][subKey] = stripQuotes(subVal);
         }
-      } else if (trimmedLine.startsWith('-')) {
+      } else if (blockStyle === null && subBlockStyle === null && trimmedLine.startsWith('-')) {
         const item = stripQuotes(trimmedLine.replace(/^-\s*/, '').trim());
         if (isSubMap && currentSubKey) {
           if (!Array.isArray(frontmatter[currentKey][currentSubKey])) {
@@ -139,14 +219,21 @@ export function parseYamlFrontmatter(fileContent) {
       } else {
         if (isSubMap && currentSubKey) {
           if (typeof frontmatter[currentKey][currentSubKey] === 'string') {
-            const sep = frontmatter[currentKey][currentSubKey] ? ' ' : '';
-            frontmatter[currentKey][currentSubKey] += sep + trimmedLine;
+            frontmatter[currentKey][currentSubKey] = appendBlockSegment(
+              frontmatter[currentKey][currentSubKey],
+              trimmedLine,
+              subBlockStyle || 'folded'
+            );
           }
         } else {
           if (typeof frontmatter[currentKey] === 'string') {
-            const sep = frontmatter[currentKey] ? ' ' : '';
-            frontmatter[currentKey] += sep + trimmedLine;
+            frontmatter[currentKey] = appendBlockSegment(
+              frontmatter[currentKey],
+              trimmedLine,
+              blockStyle || 'folded'
+            );
           } else if (frontmatter[currentKey] === null) {
+            pendingBlankLines = 0;
             frontmatter[currentKey] = trimmedLine;
           }
         }
@@ -189,6 +276,27 @@ export function parseYamlFrontmatter(fileContent) {
   return { frontmatter, body };
 }
 
+function formatYamlScalar(val) {
+  const str = String(val);
+  if (!str) return '""';
+  const needsQuoting =
+    /[\r\n]/.test(str) ||
+    str !== str.trim() ||
+    /[:#]/.test(str) && (str.includes(': ') || str.endsWith(':') || str.includes(' #') || str.startsWith('#')) ||
+    /^[\[{}\-*&!>|'"@`%,?]/.test(str) ||
+    /["']/.test(str);
+  return needsQuoting ? JSON.stringify(str) : str;
+}
+
+function formatYamlArrayItem(val) {
+  const str = String(val).trim();
+  if (!str) return '""';
+  if (/[,[\]{}:#"']/.test(str) || /\s/.test(str)) {
+    return JSON.stringify(str);
+  }
+  return str;
+}
+
 export function serializeYamlFrontmatter(frontmatter, body) {
   const lines = ['---'];
   const keys = ['name', 'type', 'domain', 'description', 'verified', 'overrides', 'related'];
@@ -200,7 +308,7 @@ export function serializeYamlFrontmatter(frontmatter, body) {
         if (val.length === 0) {
           lines.push(`${k}: []`);
         } else {
-          lines.push(`${k}: [${val.map(v => String(v).trim()).join(', ')}]`);
+          lines.push(`${k}: [${val.map(v => formatYamlArrayItem(v)).filter(Boolean).join(', ')}]`);
         }
       } else if (typeof val === 'object') {
         lines.push(`${k}:`);
@@ -212,17 +320,19 @@ export function serializeYamlFrontmatter(frontmatter, body) {
           }
         }
       } else {
-        lines.push(`${k}: ${val}`);
+        lines.push(`${k}: ${formatYamlScalar(val)}`);
       }
     }
   }
 
   for (const [k, v] of Object.entries(frontmatter)) {
     if (!keys.includes(k) && v !== undefined && v !== null) {
-      if (typeof v === 'object') {
+      if (Array.isArray(v)) {
+        lines.push(`${k}: [${v.map(item => formatYamlArrayItem(item)).filter(Boolean).join(', ')}]`);
+      } else if (typeof v === 'object') {
         lines.push(`${k}: ${JSON.stringify(v)}`);
       } else {
-        lines.push(`${k}: ${v}`);
+        lines.push(`${k}: ${formatYamlScalar(v)}`);
       }
     }
   }

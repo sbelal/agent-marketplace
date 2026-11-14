@@ -1,16 +1,40 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { resolveStoragePaths, getStorageDir, getSettings, deriveTeamRepoSlug, GIT_EXEC_ENV } from './storage-paths.js';
 import { findMarkdownFiles } from '../retrieval/shadow-resolver.js';
-import { parseYamlFrontmatter, serializeYamlFrontmatter } from './yaml-parser.js';
-import { atomicWriteFileSync } from './memory-store.js';
+import { parseYamlFrontmatter, serializeYamlFrontmatter, parseInlineArrayOrList } from './yaml-parser.js';
+import { atomicWriteFileSync, cleanDanglingReferences } from './memory-store.js';
 
 export { deriveTeamRepoSlug };
 
 function saveSettings(settings, storageDir = getStorageDir()) {
   const p = path.join(storageDir, 'settings.json');
   fs.writeFileSync(p, JSON.stringify(settings, null, 2), 'utf8');
+}
+
+function validateSafeGitUrl(url) {
+  if (url && url.trim().startsWith('-')) {
+    throw new Error('Invalid repository URL: must not start with "-".');
+  }
+}
+
+function assertContainment(targetPath, rootDir, label = 'path') {
+  const resolvedRoot = path.resolve(rootDir);
+  const resolvedTarget = path.resolve(targetPath);
+  const rel = path.relative(resolvedRoot, resolvedTarget);
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) {
+    throw new Error(`Security error: ${label} "${targetPath}" must resolve inside "${resolvedRoot}".`);
+  }
+  if (fs.existsSync(resolvedRoot) && fs.existsSync(resolvedTarget)) {
+    const realRoot = fs.realpathSync(resolvedRoot);
+    const realTarget = fs.realpathSync(resolvedTarget);
+    const realRel = path.relative(realRoot, realTarget);
+    if (!realRel || realRel.startsWith('..') || path.isAbsolute(realRel)) {
+      throw new Error(`Security error: ${label} symlink resolves outside "${realRoot}".`);
+    }
+  }
+  return resolvedTarget;
 }
 
 /**
@@ -24,15 +48,19 @@ export function getTeamRepositories(workspaceRoot = process.cwd()) {
   const results = [];
 
   for (const repo of settings.teamRepos) {
-    const repoDir = path.join(teamBaseDir, repo.slug);
+    const slug = repo && typeof repo.slug === 'string' ? repo.slug.trim() : '';
+    if (!slug || !/^[a-z0-9_-]+$/i.test(slug)) continue;
+
+    const defaultSubDir = path.join(teamBaseDir, slug);
+    const repoDir = (repo._legacyRoot && !fs.existsSync(defaultSubDir)) ? teamBaseDir : defaultSubDir;
     const gitDir = path.join(repoDir, '.git');
     const isGit = fs.existsSync(gitDir);
 
     let entriesCount = 0;
     if (fs.existsSync(repoDir)) {
       try {
-        const files = fs.readdirSync(repoDir);
-        entriesCount = files.filter(f => f.endsWith('.md') && f.toUpperCase() !== 'README.MD').length;
+        const files = findMarkdownFiles(repoDir);
+        entriesCount = files.filter(f => path.basename(f, '.md').toUpperCase() !== 'README').length;
       } catch {}
     }
 
@@ -40,23 +68,26 @@ export function getTeamRepositories(workspaceRoot = process.cwd()) {
     let uncommittedCount = 0;
     if (isGit) {
       try {
-        const status = execSync('git status --porcelain', {
+        const status = execFileSync('git', ['status', '--porcelain', '-z'], {
           cwd: repoDir,
           encoding: 'utf8',
           timeout: 2000,
           env: GIT_EXEC_ENV,
           stdio: ['ignore', 'pipe', 'ignore']
-        }).trim();
+        });
         if (status) {
-          isClean = false;
-          uncommittedCount = status.split('\n').filter(Boolean).length;
+          const entries = status.split('\0').filter(Boolean);
+          if (entries.length > 0) {
+            isClean = false;
+            uncommittedCount = entries.length;
+          }
         }
       } catch {}
     }
 
     results.push({
-      slug: repo.slug,
-      name: repo.name || repo.slug,
+      slug,
+      name: repo.name || slug,
       url: repo.url || '',
       active: repo.active !== false,
       path: repoDir,
@@ -76,7 +107,7 @@ export function getTeamRepositories(workspaceRoot = process.cwd()) {
  * - addTeamRepository(slug, url, name, workspaceRoot)
  * - addTeamRepository(workspaceRoot, { slug, url, name, active })
  */
-export function addTeamRepository(arg1 = process.cwd(), arg2 = {}, arg3 = null, arg4 = null) {
+export function addTeamRepository(arg1 = process.cwd(), arg2 = undefined, arg3 = undefined, arg4 = undefined) {
   let workspaceRoot = process.cwd();
   let options = {};
 
@@ -106,21 +137,28 @@ export function addTeamRepository(arg1 = process.cwd(), arg2 = {}, arg3 = null, 
     options.slug = deriveTeamRepoSlug(options.url);
   }
 
-  const rawSlug = String(options.slug || '').trim().toLowerCase().replace(/[^a-z0-9_-]/g, '-');
-  if (!rawSlug) {
+  const rawSlug = String(options.slug || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]/g, '-')
+    .replace(/--+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  if (!rawSlug || !/^[a-z0-9_-]+$/.test(rawSlug)) {
     throw new Error('Team repository slug is required or must be derivable from Git URL (<org_id>-<repo_slug>).');
   }
+
+  const url = (options.url || '').trim();
+  validateSafeGitUrl(url);
 
   const paths = resolveStoragePaths(workspaceRoot);
   const settings = getSettings(paths.baseDir);
   const teamBaseDir = paths.teamDir;
-  const targetDir = path.join(teamBaseDir, rawSlug);
+  const targetDir = assertContainment(path.join(teamBaseDir, rawSlug), teamBaseDir, 'team directory');
 
   if (!fs.existsSync(targetDir)) {
     fs.mkdirSync(targetDir, { recursive: true });
   }
 
-  const url = (options.url || '').trim();
   const name = options.name || rawSlug;
   const active = options.active !== false;
 
@@ -129,7 +167,7 @@ export function addTeamRepository(arg1 = process.cwd(), arg2 = {}, arg3 = null, 
     const gitDir = path.join(targetDir, '.git');
     if (!fs.existsSync(gitDir)) {
       try {
-        execSync(`git clone "${url}" .`, {
+        execFileSync('git', ['clone', '--', url, '.'], {
           cwd: targetDir,
           timeout: 15000,
           env: GIT_EXEC_ENV,
@@ -138,13 +176,13 @@ export function addTeamRepository(arg1 = process.cwd(), arg2 = {}, arg3 = null, 
       } catch {
         // Fallback: init empty repo with remote
         try {
-          execSync('git init', { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
-          execSync(`git remote add origin "${url}"`, { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
+          execFileSync('git', ['init'], { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
+          execFileSync('git', ['remote', 'add', 'origin', url], { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
         } catch {}
       }
     } else {
       try {
-        execSync(`git remote set-url origin "${url}"`, { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
+        execFileSync('git', ['remote', 'set-url', 'origin', url], { cwd: targetDir, env: GIT_EXEC_ENV, stdio: 'ignore' });
       } catch {}
     }
   }
@@ -177,7 +215,7 @@ export function addTeamRepository(arg1 = process.cwd(), arg2 = {}, arg3 = null, 
  * - setTeamRepositoryActive(slug, active, workspaceRoot)
  * - setTeamRepositoryActive(workspaceRoot, { slug, active })
  */
-export function setTeamRepositoryActive(arg1 = process.cwd(), arg2 = {}, arg3 = null) {
+export function setTeamRepositoryActive(arg1 = process.cwd(), arg2 = undefined, arg3 = undefined) {
   let workspaceRoot = process.cwd();
   let slug = '';
   let active = true;
@@ -224,7 +262,7 @@ export function setTeamRepositoryActive(arg1 = process.cwd(), arg2 = {}, arg3 = 
  * - removeTeamRepository(slug, deleteFiles, workspaceRoot)
  * - removeTeamRepository(workspaceRoot, { slug, deleteFiles })
  */
-export function removeTeamRepository(arg1 = process.cwd(), arg2 = {}, arg3 = null) {
+export function removeTeamRepository(arg1 = process.cwd(), arg2 = undefined, arg3 = undefined) {
   let workspaceRoot = process.cwd();
   let slug = '';
   let deleteFiles = false;
@@ -244,7 +282,9 @@ export function removeTeamRepository(arg1 = process.cwd(), arg2 = {}, arg3 = nul
   }
 
   slug = String(slug || '').trim().toLowerCase();
-  if (!slug) throw new Error('Slug is required');
+  if (!slug || !/^[a-z0-9_-]+$/.test(slug)) {
+    throw new Error(`Invalid team repository slug: "${slug}". Only alphanumeric, "-", and "_" characters are permitted.`);
+  }
 
   const paths = resolveStoragePaths(workspaceRoot);
   const settings = getSettings(paths.baseDir);
@@ -254,16 +294,35 @@ export function removeTeamRepository(arg1 = process.cwd(), arg2 = {}, arg3 = nul
     throw new Error(`Team repository with slug "${slug}" not found.`);
   }
 
-  settings.teamRepos.splice(idx, 1);
+  const [removedRepo] = settings.teamRepos.splice(idx, 1);
+  if (
+    slug === 'default' ||
+    removedRepo?._legacyRoot ||
+    (settings.teamRepos.length === 0 && settings.teamRepoUrl && removedRepo?.url === settings.teamRepoUrl)
+  ) {
+    settings.teamRepoUrl = '';
+  }
   saveSettings(settings, paths.baseDir);
 
   if (deleteFiles) {
-    const targetDir = path.join(paths.teamDir, slug);
-    try {
-      if (fs.existsSync(targetDir)) {
+    const subDir = path.join(paths.teamDir, slug);
+    if (fs.existsSync(subDir)) {
+      const targetDir = assertContainment(subDir, paths.teamDir, 'team directory');
+      try {
         fs.rmSync(targetDir, { recursive: true, force: true });
-      }
-    } catch {}
+      } catch {}
+    } else if (removedRepo?._legacyRoot && fs.existsSync(paths.teamDir)) {
+      try {
+        const entries = fs.readdirSync(paths.teamDir, { withFileTypes: true });
+        for (const entry of entries) {
+          if (entry.isFile() && entry.name.endsWith('.md')) {
+            fs.unlinkSync(path.join(paths.teamDir, entry.name));
+          } else if (entry.isDirectory() && entry.name === '.git' && settings.teamRepos.length === 0) {
+            fs.rmSync(path.join(paths.teamDir, '.git'), { recursive: true, force: true });
+          }
+        }
+      } catch {}
+    }
   }
 
   return {
@@ -296,8 +355,24 @@ export function syncTeamRepositories(arg1 = process.cwd(), arg2 = {}) {
     if (targetSlug && repo.slug !== targetSlug) continue;
     if (!repo.active || !repo.isGit || !repo.url) continue;
 
+    if (!repo.isClean) {
+      syncResults.push({ slug: repo.slug, status: 'dirty-working-copy' });
+      continue;
+    }
+
     try {
-      execSync('git pull --ff-only', {
+      const branch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
+        cwd: repo.path,
+        encoding: 'utf8',
+        timeout: 2000,
+        env: GIT_EXEC_ENV,
+        stdio: ['ignore', 'pipe', 'ignore']
+      }).trim();
+      if (branch.startsWith('promote/')) {
+        syncResults.push({ slug: repo.slug, status: 'on-promote-branch', branch });
+        continue;
+      }
+      execFileSync('git', ['pull', '--ff-only'], {
         cwd: repo.path,
         timeout: 8000,
         env: GIT_EXEC_ENV,
@@ -343,7 +418,7 @@ export function auditTeamConflicts(workspaceRoot = process.cwd()) {
       };
       privateMap.set(slug.toLowerCase(), data);
       if (parsed.frontmatter.overrides) {
-        const ovs = Array.isArray(parsed.frontmatter.overrides) ? parsed.frontmatter.overrides : [parsed.frontmatter.overrides];
+        const ovs = parseInlineArrayOrList(parsed.frontmatter.overrides);
         for (const ov of ovs) {
           privateMap.set(String(ov).toLowerCase(), data);
         }
@@ -353,7 +428,9 @@ export function auditTeamConflicts(workspaceRoot = process.cwd()) {
 
   const teamRepos = paths.activeTeamDirs && paths.activeTeamDirs.length > 0
     ? paths.activeTeamDirs
-    : [{ slug: 'default', name: 'Default Team', dir: paths.teamDir }];
+    : ((!paths.settings?.teamRepos || paths.settings.teamRepos.length === 0)
+        ? [{ slug: 'default', name: 'Default Team', dir: paths.teamDir }]
+        : []);
 
   for (const tRepo of teamRepos) {
     const teamFiles = findMarkdownFiles(tRepo.dir);
@@ -383,11 +460,12 @@ export function auditTeamConflicts(workspaceRoot = process.cwd()) {
 
             const teamVerified = Date.parse(teamFm.verified || '') || 0;
             const privVerified = Date.parse(privFm.verified || '') || 0;
+            const privOverrides = parseInlineArrayOrList(privFm.overrides).map(o => String(o).trim().toLowerCase());
 
             if (teamVerified > privVerified && (teamVerified - privVerified) > 14 * 24 * 3600 * 1000) {
               divergenceType = 'upstream_updated_ahead';
               recommendedResolution = 'adopt_team';
-            } else if (privFm.overrides === slug) {
+            } else if (privOverrides.includes(slugKey)) {
               divergenceType = 'intentional_private_override';
               recommendedResolution = 'keep_private';
             } else {
@@ -440,20 +518,23 @@ export function resolveTeamConflict(workspaceRoot = process.cwd(), options = {})
   const paths = resolveStoragePaths(workspaceRoot);
   const cleanSlug = path.basename(slug.trim()).replace(/\.md$/i, '');
   let resolvedPrivateSlug = cleanSlug;
-  let privateFile = path.join(paths.privateDir, `${cleanSlug}.md`);
+  let privateFile = assertContainment(path.join(paths.privateDir, `${cleanSlug}.md`), paths.privateDir, 'privateFile');
+
+  if (options.privatePath) {
+    const safePrivatePath = assertContainment(options.privatePath, paths.privateDir, 'privatePath');
+    if (!fs.existsSync(privateFile) && fs.existsSync(safePrivatePath)) {
+      privateFile = safePrivatePath;
+      resolvedPrivateSlug = path.basename(privateFile, '.md');
+    }
+  }
 
   if (!fs.existsSync(privateFile) && options.privateSlug) {
     const cleanPriv = path.basename(options.privateSlug.trim()).replace(/\.md$/i, '');
-    const altFile = path.join(paths.privateDir, `${cleanPriv}.md`);
+    const altFile = assertContainment(path.join(paths.privateDir, `${cleanPriv}.md`), paths.privateDir, 'privateSlug');
     if (fs.existsSync(altFile)) {
       privateFile = altFile;
       resolvedPrivateSlug = cleanPriv;
     }
-  }
-
-  if (!fs.existsSync(privateFile) && options.privatePath && fs.existsSync(options.privatePath)) {
-    privateFile = options.privatePath;
-    resolvedPrivateSlug = path.basename(privateFile, '.md');
   }
 
   if (!fs.existsSync(privateFile)) {
@@ -470,9 +551,7 @@ export function resolveTeamConflict(workspaceRoot = process.cwd(), options = {})
           break;
         }
         if (parsed.frontmatter.overrides) {
-          const ovs = Array.isArray(parsed.frontmatter.overrides)
-            ? parsed.frontmatter.overrides
-            : String(parsed.frontmatter.overrides).split(',').map(s => s.trim());
+          const ovs = parseInlineArrayOrList(parsed.frontmatter.overrides);
           if (ovs.map(s => s.toLowerCase()).includes(cleanSlug.toLowerCase())) {
             privateFile = pf;
             resolvedPrivateSlug = pSlug;
@@ -487,15 +566,22 @@ export function resolveTeamConflict(workspaceRoot = process.cwd(), options = {})
     throw new Error(`Private memory file not found: ${privateFile}`);
   }
 
+  privateFile = assertContainment(privateFile, paths.privateDir, 'privateFile');
+
   if (resolution === 'adopt_team') {
     fs.unlinkSync(privateFile);
+    let cleanedReferences = 0;
+    if (resolvedPrivateSlug.toLowerCase() !== cleanSlug.toLowerCase()) {
+      cleanedReferences = cleanDanglingReferences(workspaceRoot, resolvedPrivateSlug);
+    }
     return {
       ok: true,
       success: true,
       slug: cleanSlug,
       resolvedPrivateSlug,
       action: 'adopted_team_standard',
-      removedPrivateFile: privateFile
+      removedPrivateFile: privateFile,
+      cleanedReferences
     };
   }
 
@@ -529,8 +615,12 @@ export function resolveTeamConflict(workspaceRoot = process.cwd(), options = {})
       body = parsedContent.body || '';
     }
 
+    const baseFm = { ...parsed.frontmatter };
+    delete baseFm.trigger;
+    delete baseFm.slug;
+
     const fm = {
-      ...parsed.frontmatter,
+      ...baseFm,
       ...contentFm,
       ...(mergedFrontmatter || {}),
       verified: new Date().toISOString().slice(0, 10)

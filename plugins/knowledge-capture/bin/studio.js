@@ -2,28 +2,64 @@
 
 /**
  * Knowledge Capture - Standalone Memory Studio CLI
- * 
+ *
  * Launches a standalone, zero-dependency HTTP server (node:http) serving the interactive
  * Memory Studio UI with direct browser-to-disk persistence via /api/patch.
- * 
+ *
  * Usage:
  *   node ./bin/studio.js [--port 4242] [--host 127.0.0.1] [--workspace <path>] [--no-open]
  */
 
 import http from 'node:http';
+import crypto from 'node:crypto';
 import path from 'node:path';
-import fs from 'node:fs';
-import { exec } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 import {
   generateKnowledgeGraphHtml,
-  getKnowledgeGraphData
+  getKnowledgeGraphData,
+  syncSqliteIndex
 } from '../mcp-server/sqlite-index.js';
 import { applyMemoryPatch } from '../mcp-server/memory-service.js';
-import { syncSqliteIndex } from '../mcp-server/sqlite-index.js';
 
-function parseCliArgs(args) {
+const MAX_PATCH_BODY_BYTES = 1024 * 1024; // 1 MB limit
+const LOOPBACK_ORIGIN_RE = /^https?:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/i;
+
+function isLoopbackOrigin(origin) {
+  return typeof origin === 'string' && LOOPBACK_ORIGIN_RE.test(origin);
+}
+
+function isAuthorizedRequest(req, studioToken) {
+  const secFetchSite = req.headers['sec-fetch-site'];
+  if (secFetchSite === 'cross-site') {
+    return false;
+  }
+
+  const tokenHeader = req.headers['x-studio-token'];
+  if (tokenHeader !== undefined) {
+    if (typeof tokenHeader !== 'string' || !studioToken || tokenHeader !== studioToken) {
+      return false;
+    }
+  }
+
+  const origin = req.headers.origin;
+  if (origin !== undefined) {
+    if (origin === 'null') {
+      return typeof tokenHeader === 'string' && Boolean(studioToken) && tokenHeader === studioToken;
+    }
+    return isLoopbackOrigin(origin);
+  }
+
+  return true;
+}
+
+function formatUrlHost(host) {
+  if (!host || typeof host !== 'string') return '127.0.0.1';
+  return host.includes(':') && !host.startsWith('[') ? `[${host}]` : host;
+}
+
+export function parseCliArgs(args) {
   const options = {
     port: 4242,
     host: '127.0.0.1',
@@ -34,12 +70,52 @@ function parseCliArgs(args) {
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
-    if (arg === '--port' || arg === '-p') {
-      options.port = parseInt(args[++i], 10) || 4242;
-    } else if (arg === '--host' || arg === '-h') {
-      options.host = args[++i] || '127.0.0.1';
-    } else if (arg === '--workspace' || arg === '-w') {
-      options.workspace = path.resolve(args[++i]);
+    const eqIdx = arg.indexOf('=');
+    const flag = eqIdx !== -1 ? arg.slice(0, eqIdx) : arg;
+    const inlineVal = eqIdx !== -1 ? arg.slice(eqIdx + 1) : null;
+
+    if (flag === '--port' || flag === '-p') {
+      let rawPort;
+      if (inlineVal !== null) {
+        if (!inlineVal) throw new Error(`Missing value for ${flag}`);
+        rawPort = inlineVal;
+      } else {
+        if (i + 1 >= args.length || !args[i + 1]) {
+          throw new Error(`Missing value for ${arg}`);
+        }
+        rawPort = args[++i];
+      }
+      if (!/^\d+$/.test(rawPort)) {
+        throw new Error(`Invalid port number '${rawPort}'. Must be an integer between 0 and 65535.`);
+      }
+      const parsedPort = Number(rawPort);
+      if (!Number.isInteger(parsedPort) || parsedPort < 0 || parsedPort > 65535) {
+        throw new Error(`Invalid port number '${rawPort}'. Must be between 0 and 65535.`);
+      }
+      options.port = parsedPort;
+    } else if (flag === '--host' || flag === '-h') {
+      let hostVal;
+      if (inlineVal !== null) {
+        hostVal = inlineVal;
+      } else {
+        if (i + 1 >= args.length) {
+          throw new Error(`Missing value for ${arg}`);
+        }
+        hostVal = args[++i];
+      }
+      options.host = hostVal || '127.0.0.1';
+    } else if (flag === '--workspace' || flag === '-w') {
+      let wsVal;
+      if (inlineVal !== null) {
+        if (!inlineVal) throw new Error(`Missing path for ${flag}`);
+        wsVal = inlineVal;
+      } else {
+        if (i + 1 >= args.length || !args[i + 1]) {
+          throw new Error(`Missing path for ${arg}`);
+        }
+        wsVal = args[++i];
+      }
+      options.workspace = path.resolve(wsVal);
     } else if (arg === '--no-open') {
       options.autoOpen = false;
     } else if (arg === '--strict-port') {
@@ -49,7 +125,7 @@ function parseCliArgs(args) {
 Knowledge Capture Studio CLI
 
 Options:
-  --port, -p <number>       Port to listen on (default: 4242)
+  --port, -p <number>       Port to listen on (default: 4242, 0 for ephemeral)
   --host, -h <string>       Host to bind (default: 127.0.0.1)
   --workspace, -w <path>    Workspace root directory (default: current directory)
   --no-open                 Do not automatically open the browser
@@ -57,62 +133,94 @@ Options:
   --help                    Show this help message
 `);
       process.exit(0);
+    } else if (arg.startsWith('-')) {
+      throw new Error(`Unknown flag: ${arg}`);
     }
   }
 
   return options;
 }
 
-export function openBrowser(url) {
+export function openBrowser(rawUrl) {
   if (process.env.CI || process.env.NODE_ENV === 'test') return;
-  const platform = process.platform;
-  let cmd = null;
-  if (platform === 'darwin') {
-    cmd = `open "${url}"`;
-  } else if (platform === 'win32') {
-    cmd = `start "" "${url}"`;
-  } else if (platform === 'linux') {
-    if (process.env.DISPLAY || process.env.WAYLAND_DISPLAY) {
-      cmd = `xdg-open "${url}"`;
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(rawUrl);
+    if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
+      return;
     }
+  } catch {
+    return;
   }
 
-  if (cmd) {
-    exec(cmd, { stdio: 'ignore' }, () => {});
+  const safeHref = parsedUrl.href;
+  const platform = process.platform;
+  if (platform === 'darwin') {
+    execFile('open', [safeHref], { stdio: 'ignore' }, () => {});
+  } else if (platform === 'win32') {
+    execFile('cmd.exe', ['/c', 'start', '', safeHref], { stdio: 'ignore' }, () => {});
+  } else if (platform === 'linux') {
+    if (process.env.DISPLAY || process.env.WAYLAND_DISPLAY) {
+      execFile('xdg-open', [safeHref], { stdio: 'ignore' }, () => {});
+    }
   }
 }
 
 export function startStudioServer(options = {}) {
   const host = options.host || '127.0.0.1';
-  let initialPort = options.port || 4242;
+  const urlHost = formatUrlHost(host);
+  const initialPort = options.port ?? 4242;
   const workspaceRoot = options.workspaceRoot || options.workspace || process.cwd();
   const autoOpen = options.autoOpen ?? true;
   const strictPort = options.strictPort ?? false;
+  const studioToken = crypto.randomBytes(24).toString('hex');
 
   return new Promise((resolve, reject) => {
     let portAttempt = initialPort;
-    const maxPortAttempts = strictPort ? portAttempt : portAttempt + 20;
+    const maxPortAttempts = (strictPort || initialPort === 0) ? portAttempt : portAttempt + 20;
 
     function tryListen() {
       const server = http.createServer(async (req, res) => {
-        // Handle CORS
-        res.setHeader('Access-Control-Allow-Origin', '*');
+        const origin = req.headers.origin;
+        const hasValidToken = typeof req.headers['x-studio-token'] === 'string' && req.headers['x-studio-token'] === studioToken;
+        if (origin && (isLoopbackOrigin(origin) || hasValidToken)) {
+          res.setHeader('Access-Control-Allow-Origin', origin);
+          res.setHeader('Vary', 'Origin');
+        }
         res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-        res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+        res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Studio-Token');
 
         if (req.method === 'OPTIONS') {
+          if (origin && !isLoopbackOrigin(origin) && !hasValidToken) {
+            res.writeHead(403, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Forbidden origin' }));
+            return;
+          }
           res.writeHead(204);
           res.end();
           return;
         }
 
-        const url = new URL(req.url, `http://${host}:${portAttempt}`);
-        const pathname = url.pathname;
-
         try {
+          let url;
+          try {
+            url = new URL(req.url || '/', `http://${urlHost}:${portAttempt}`);
+          } catch {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Invalid request URL' }));
+            return;
+          }
+          const pathname = url.pathname;
+
           if (req.method === 'GET' && (pathname === '/' || pathname === '/index.html')) {
-            const html = generateKnowledgeGraphHtml(workspaceRoot);
-            res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+            const html = generateKnowledgeGraphHtml(workspaceRoot, {
+              serverUrl: `http://${urlHost}:${portAttempt}`,
+              studioToken
+            });
+            res.writeHead(200, {
+              'Content-Type': 'text/html; charset=utf-8',
+              'Cache-Control': 'no-store'
+            });
             res.end(html);
             return;
           }
@@ -137,18 +245,44 @@ export function startStudioServer(options = {}) {
           }
 
           if (req.method === 'POST' && pathname === '/api/patch') {
-            let body = '';
-            req.on('data', chunk => { body += chunk; });
+            if (!isAuthorizedRequest(req, studioToken)) {
+              res.writeHead(403, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ ok: false, success: false, errors: ['Forbidden: cross-site or unauthorized origin'] }));
+              return;
+            }
+
+            const chunks = [];
+            let totalBytes = 0;
+            let abortedTooLarge = false;
+
+            req.on('data', chunk => {
+              totalBytes += chunk.length;
+              if (totalBytes > MAX_PATCH_BODY_BYTES) {
+                abortedTooLarge = true;
+                if (!res.headersSent) {
+                  res.writeHead(413, { 'Content-Type': 'application/json' });
+                  res.end(JSON.stringify({ ok: false, success: false, errors: ['Payload too large (max 1MB)'] }));
+                }
+                req.destroy();
+                return;
+              }
+              chunks.push(chunk);
+            });
+
             req.on('end', async () => {
+              if (abortedTooLarge) return;
               try {
+                const body = Buffer.concat(chunks).toString('utf8');
                 const patchData = JSON.parse(body || '{}');
                 const patchResult = applyMemoryPatch(workspaceRoot, patchData);
                 await syncSqliteIndex(workspaceRoot);
                 res.writeHead(200, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify(patchResult));
               } catch (err) {
-                res.writeHead(400, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ ok: false, success: false, errors: [err.message] }));
+                if (!res.headersSent) {
+                  res.writeHead(400, { 'Content-Type': 'application/json' });
+                  res.end(JSON.stringify({ ok: false, success: false, errors: [err.message] }));
+                }
               }
             });
             return;
@@ -158,8 +292,10 @@ export function startStudioServer(options = {}) {
           res.writeHead(404, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'Not found' }));
         } catch (err) {
-          res.writeHead(500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: err.message }));
+          if (!res.headersSent) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: err.message }));
+          }
         }
       });
 
@@ -173,7 +309,11 @@ export function startStudioServer(options = {}) {
       });
 
       server.listen(portAttempt, host, () => {
-        const boundUrl = `http://${host}:${portAttempt}`;
+        const addr = server.address();
+        if (addr && typeof addr === 'object' && typeof addr.port === 'number') {
+          portAttempt = addr.port;
+        }
+        const boundUrl = `http://${urlHost}:${portAttempt}`;
         if (autoOpen) {
           openBrowser(boundUrl);
         }
@@ -182,6 +322,7 @@ export function startStudioServer(options = {}) {
           port: portAttempt,
           host,
           url: boundUrl,
+          studioToken,
           close: () => new Promise(r => server.close(r))
         });
       });
@@ -197,8 +338,14 @@ const isDirectCli = process.argv[1] && (
 );
 
 if (isDirectCli) {
-  const cliOptions = parseCliArgs(process.argv.slice(2));
-  startStudioServer(cliOptions).then(({ url, port, host }) => {
+  let cliOptions;
+  try {
+    cliOptions = parseCliArgs(process.argv.slice(2));
+  } catch (err) {
+    console.error(`Invalid arguments: ${err.message}`);
+    process.exit(1);
+  }
+  startStudioServer(cliOptions).then(({ url }) => {
     console.log(`
 🧠 Knowledge Capture Studio
 ----------------------------------------

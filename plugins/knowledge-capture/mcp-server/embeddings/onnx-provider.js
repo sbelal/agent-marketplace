@@ -1,41 +1,68 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { createRequire } from 'node:module';
 import { getStorageDir } from '../core/storage-paths.js';
 import { generateDenseEmbedding } from './heuristic-provider.js';
 
 let onnxPipelinePromise = null;
 let onnxLoadFailed = false;
+let onnxPackageChecked = null;
+
+export function isOnnxPackageAvailable() {
+  if (onnxPackageChecked !== null) return onnxPackageChecked;
+  try {
+    const req = createRequire(import.meta.url);
+    req.resolve('@xenova/transformers');
+    onnxPackageChecked = true;
+  } catch {
+    onnxPackageChecked = false;
+  }
+  return onnxPackageChecked;
+}
 
 export function resetOnnxState() {
   onnxPipelinePromise = null;
   onnxLoadFailed = false;
+  onnxPackageChecked = null;
 }
 
 /**
  * Returns active embedding configuration from environment or settings.json.
- * Defaults to 'onnx' (384 dimensions) with automatic graceful fallback to 'heuristic' (128 dimensions).
+ * Respects explicit 'onnx' / 'heuristic' selection; when unconfigured, uses 'onnx'
+ * only if @xenova/transformers is installed and otherwise defaults to 'heuristic' (128-d).
  */
 export function getActiveEmbeddingConfig() {
-  const envChoice = process.env.KC_EMBEDDING_ENGINE;
+  const onnxAvailable = isOnnxPackageAvailable() && !onnxLoadFailed;
+  const envChoice = typeof process.env.KC_EMBEDDING_ENGINE === 'string'
+    ? process.env.KC_EMBEDDING_ENGINE.trim().toLowerCase()
+    : '';
   if (envChoice) {
-    if (envChoice === 'onnx') return { engine: 'onnx', dimensions: 384 };
-    return { engine: 'heuristic', dimensions: 128 };
+    if (envChoice === 'onnx') {
+      return { engine: 'onnx', dimensions: 384, onnxAvailable, fallbackActive: !onnxAvailable };
+    }
+    return { engine: 'heuristic', dimensions: 128, onnxAvailable, fallbackActive: false };
   }
 
   try {
     const settingsPath = path.join(getStorageDir(), 'settings.json');
     if (fs.existsSync(settingsPath)) {
       const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
-      if (settings.embeddingEngine === 'onnx') {
-        return { engine: 'onnx', dimensions: 384 };
+      const settingEngine = typeof settings.embeddingEngine === 'string'
+        ? settings.embeddingEngine.trim().toLowerCase()
+        : '';
+      if (settingEngine === 'onnx') {
+        return { engine: 'onnx', dimensions: 384, onnxAvailable, fallbackActive: !onnxAvailable };
       }
-      if (settings.embeddingEngine === 'heuristic') {
-        return { engine: 'heuristic', dimensions: 128 };
+      if (settingEngine === 'heuristic') {
+        return { engine: 'heuristic', dimensions: 128, onnxAvailable, fallbackActive: false };
       }
     }
   } catch {}
 
-  return { engine: 'onnx', dimensions: 384 };
+  if (onnxAvailable) {
+    return { engine: 'onnx', dimensions: 384, onnxAvailable: true, fallbackActive: false };
+  }
+  return { engine: 'heuristic', dimensions: 128, onnxAvailable: false, fallbackActive: false };
 }
 
 /**

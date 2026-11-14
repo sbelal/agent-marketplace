@@ -4,9 +4,15 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { execSync, execFile } from 'node:child_process';
+import { execFileSync, execFile } from 'node:child_process';
 import { getLayerStatistics } from '../mcp-server/memory-service.js';
 import { resolveStoragePaths } from '../mcp-server/core/storage-paths.js';
+import {
+  getStdinPayload,
+  resolveHookWorkspace,
+  detectHookPlatform,
+  emitHookMessage
+} from './hook-runtime.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -46,15 +52,15 @@ function safeGitPullAsync(repoDir) {
         return resolve('on-promote-branch');
       }
 
-      execFile('git', ['status', '--porcelain'], {
+      execFile('git', ['status', '--porcelain', '-z'], {
         cwd: repoDir,
         encoding: 'utf8',
         timeout: 3000,
         env: GIT_EXEC_ENV
       }, (err2, dirtyOut) => {
         if (err2) return resolve('failed');
-        const dirty = (dirtyOut || '').trim();
-        if (dirty) {
+        const dirty = (dirtyOut || '').split('\0').filter(Boolean);
+        if (dirty.length > 0) {
           return resolve('dirty');
         }
 
@@ -72,47 +78,48 @@ function safeGitPullAsync(repoDir) {
   });
 }
 
-function safeGitPull(repoDir) {
-  if (!fs.existsSync(path.join(repoDir, '.git'))) {
-    return false;
-  }
+function detectDefaultUpstreamRef(repoDir) {
   try {
-    const branch = execSync('git rev-parse --abbrev-ref HEAD', {
+    const symRef = execFileSync('git', ['symbolic-ref', 'refs/remotes/origin/HEAD'], {
       cwd: repoDir,
+      timeout: 1000,
       encoding: 'utf8',
-      timeout: 3000,
       env: GIT_EXEC_ENV,
       stdio: ['ignore', 'pipe', 'ignore']
     }).trim();
-
-    if (branch.startsWith('promote/')) {
-      return 'on-promote-branch';
+    if (symRef.startsWith('refs/remotes/')) {
+      return symRef.slice('refs/remotes/'.length);
     }
+  } catch {}
 
-    const dirty = execSync('git status --porcelain', {
-      cwd: repoDir,
-      encoding: 'utf8',
-      timeout: 3000,
-      env: GIT_EXEC_ENV,
-      stdio: ['ignore', 'pipe', 'ignore']
-    }).trim();
-
-    if (dirty) {
-      return 'dirty';
-    }
-
-    execSync('git pull --ff-only', {
-      cwd: repoDir,
-      timeout: 3000,
-      env: GIT_EXEC_ENV,
-      stdio: ['ignore', 'ignore', 'ignore']
-    });
-    return 'success';
-  } catch {
-    return 'failed';
+  for (const candidate of ['origin/main', 'origin/master']) {
+    try {
+      execFileSync('git', ['rev-parse', '--verify', '--quiet', candidate], {
+        cwd: repoDir,
+        timeout: 1000,
+        env: GIT_EXEC_ENV,
+        stdio: 'ignore'
+      });
+      return candidate;
+    } catch {}
   }
+  return null;
 }
 
+function compareSemver(v1, v2) {
+  if (!v1 || v1 === 'unknown') return 1;
+  if (!v2 || v2 === 'unknown') return 0;
+  const p1 = String(v1).replace(/^v/, '').split('.').map(n => parseInt(n, 10) || 0);
+  const p2 = String(v2).replace(/^v/, '').split('.').map(n => parseInt(n, 10) || 0);
+  const len = Math.max(p1.length, p2.length);
+  for (let i = 0; i < len; i++) {
+    const a = p1[i] || 0;
+    const b = p2[i] || 0;
+    if (b > a) return 1;
+    if (b < a) return -1;
+  }
+  return 0;
+}
 
 function checkPluginUpdateNotice(pluginRoot, pluginName, homeDir) {
   try {
@@ -138,23 +145,26 @@ function checkPluginUpdateNotice(pluginRoot, pluginName, homeDir) {
     if (fs.existsSync(repoGit)) {
       try {
         const repoDir = path.dirname(repoGit);
-        execSync('git fetch --dry-run origin', {
+        execFileSync('git', ['fetch', '--quiet', 'origin'], {
           cwd: repoDir,
           timeout: 2000,
           env: GIT_EXEC_ENV,
           stdio: ['ignore', 'pipe', 'ignore']
         });
-        const behind = execSync('git rev-list HEAD..origin/main --count', {
-          cwd: repoDir,
-          timeout: 1000,
-          encoding: 'utf8',
-          env: GIT_EXEC_ENV,
-          stdio: ['ignore', 'pipe', 'ignore']
-        }).trim();
-        const count = parseInt(behind, 10) || 0;
-        if (count > 0) {
-          hasUpdate = true;
-          notice = `\n> [!NOTE]\n> 🚀 **Plugin Update Available:** ${count} new update(s) available for \`${pluginName}\` (and marketplace plugins).\n> Instruct me: **"Update ${pluginName}"** or **"Update all plugins"** to pull the latest changes.\n`;
+        const upstreamRef = detectDefaultUpstreamRef(repoDir);
+        if (upstreamRef) {
+          const behind = execFileSync('git', ['rev-list', `HEAD..${upstreamRef}`, '--count'], {
+            cwd: repoDir,
+            timeout: 1000,
+            encoding: 'utf8',
+            env: GIT_EXEC_ENV,
+            stdio: ['ignore', 'pipe', 'ignore']
+          }).trim();
+          const count = parseInt(behind, 10) || 0;
+          if (count > 0) {
+            hasUpdate = true;
+            notice = `\n> [!NOTE]\n> 🚀 **Plugin Update Available:** ${count} new update(s) available for \`${pluginName}\` (and marketplace plugins).\n> Instruct me: **"Update ${pluginName}"** or **"Update all plugins"** to pull the latest changes.\n`;
+          }
         }
       } catch {}
     } else {
@@ -166,7 +176,7 @@ function checkPluginUpdateNotice(pluginRoot, pluginName, homeDir) {
           const permManifest = path.join(homeDir, '.gemini', 'sources', 'agent-marketplace', 'plugins', pluginName, 'plugin.json');
           if (fs.existsSync(permManifest)) {
             const availVersion = JSON.parse(fs.readFileSync(permManifest, 'utf8')).version || currentVersion;
-            if (availVersion !== currentVersion) {
+            if (compareSemver(currentVersion, availVersion) > 0) {
               hasUpdate = true;
               notice = `\n> [!NOTE]\n> 🚀 **Plugin Update Available:** Version v${availVersion} is available for \`${pluginName}\` (installed: v${currentVersion}).\n> Instruct me: **"Update ${pluginName}"** or **"Update all plugins"** to upgrade.\n`;
             }
@@ -187,54 +197,21 @@ function checkPluginUpdateNotice(pluginRoot, pluginName, homeDir) {
   }
 }
 
-async function getStdinPayload() {
-  return new Promise((resolve) => {
-    if (process.stdin.isTTY) {
-      return resolve({});
-    }
-    let data = '';
-    const timer = setTimeout(() => {
-      process.stdin.pause();
-      resolve({});
-    }, 150);
-
-    process.stdin.setEncoding('utf8');
-    process.stdin.on('data', (chunk) => {
-      data += chunk;
-    });
-    process.stdin.on('end', () => {
-      clearTimeout(timer);
-      process.stdin.pause();
-      try {
-        resolve(data.trim() ? JSON.parse(data.trim()) : {});
-      } catch {
-        resolve({});
-      }
-    });
-    process.stdin.resume();
-  });
-}
-
-async function main() {
+async function main(hookState = {}) {
   // Read stdin context if piped (with 150ms fallback to prevent hangs)
-  let workspaceRoot = process.cwd();
   let payload = {};
   try {
     payload = await getStdinPayload();
-    if (Array.isArray(payload.workspacePaths) && payload.workspacePaths.length > 0) {
-      workspaceRoot = payload.workspacePaths[0];
-    }
   } catch {
     // Stdin reading fallback to process.cwd()
   }
-  if (process.env.WORKSPACE_DIR) {
-    workspaceRoot = process.env.WORKSPACE_DIR;
-  }
+  hookState.payload = payload;
+  const workspaceRoot = resolveHookWorkspace(payload);
 
   const paths = resolveStoragePaths(workspaceRoot);
   const settings = paths.settings;
   const privateDir = paths.privateDir;
-  const home = os.homedir();
+  const home = process.env.USERPROFILE || process.env.HOME || os.homedir();
 
   // Pull remote repositories concurrently if configured
   let privateSyncStatus = 'Not configured (Local store active)';
@@ -277,6 +254,8 @@ async function main() {
 
   if (teamStatuses.length > 0) {
     teamSyncStatus = teamStatuses.join(', ');
+  } else if (settings?.teamRepos && settings.teamRepos.length > 0) {
+    teamSyncStatus = 'Inactive (all configured team repositories disabled)';
   } else if (settings?.teamRepoUrl) {
     teamSyncStatus = 'Offline / Remote unavailable';
   }
@@ -318,9 +297,10 @@ async function main() {
   }
 
   if (team.isGit && team.isPromoteBranch) {
+    const baseBranch = team.defaultBranch || 'main';
     report += `\n> [!NOTE]\n`;
     report += `> Team clone is currently on promotion branch \`${team.branch}\`.\n`;
-    report += `> Once your Pull Request is merged, check out \`main\` via \`git checkout main\` and run \`/kc-pull\`.\n`;
+    report += `> Once your Pull Request is merged, check out \`${baseBranch}\` via \`git checkout ${baseBranch}\` and run \`/kc-pull\`.\n`;
   }
 
   if (team.isGit && team.upstreamBehind > 0) {
@@ -328,7 +308,7 @@ async function main() {
     report += `> Team memory clone is **${team.upstreamBehind} commit(s) behind** upstream. Run \`/kc-pull\` to fast-forward.\n`;
   }
 
-  if (!settings) {
+  if (!settings || !fs.existsSync(paths.settingsPath)) {
     report += `\n> [!NOTE]\n`;
     report += `> Settings file not detected at \`~/.gemini/knowledge-capture/settings.json\`.\n`;
     report += `> The Private layer operates locally without Git sync. Run \`/kc-init\` to configure remotes.\n`;
@@ -343,39 +323,20 @@ async function main() {
 
   // Dual-platform output formatting:
   // Antigravity passes stdin payload with conversationId and expects JSON injectSteps.
-  // Claude Code executes the hook command and injects raw stdout plain text.
-  const isClaudeCode = Boolean(process.env.CLAUDE_PLUGIN_ROOT || process.env.CLAUDE_CODE);
-  const isAntigravity = !isClaudeCode || Boolean(payload && payload.conversationId);
-
-  if (isAntigravity) {
-    const output = {
-      injectSteps: [
-        {
-          systemMessage: {
-            systemMessage: report
-          }
-        }
-      ]
-    };
-    process.stdout.write(JSON.stringify(output) + '\n');
-  } else {
-    // Under Claude Code, rules/AGENTS.md is not loaded automatically by the plugin runtime.
-    // It is injected by the separate bin/claude-rules.js SessionStart hook, because Claude Code
-    // caps each hook's stdout at 10,000 characters and report + rules together exceed that.
-    process.stdout.write(report + '\n');
-  }
+  // Claude Code executes the hook command and injects raw stdout plain text
+  // (rules/AGENTS.md is injected separately by bin/claude-rules.js to respect Claude's 10,000-char hook cap).
+  const { isAntigravity } = detectHookPlatform(payload);
+  emitHookMessage(report, { isAntigravity });
 }
 
-main()
+const hookState = { payload: {} };
+main(hookState)
   .then(() => {
     process.exit(0);
   })
-  .catch((err) => {
+  .catch(() => {
     // Ensure hook never crashes the agent startup
-    if (process.env.CLAUDE_PLUGIN_ROOT || process.env.CLAUDE_CODE) {
-      process.stdout.write(`[knowledge-capture] Startup check completed.\n`);
-    } else {
-      process.stdout.write(JSON.stringify({ injectSteps: [] }) + '\n');
-    }
+    const { isAntigravity } = detectHookPlatform(hookState.payload);
+    emitHookMessage(isAntigravity ? '' : '[knowledge-capture] Startup check completed.', { isAntigravity });
     process.exit(0);
   });

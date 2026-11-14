@@ -13,12 +13,61 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const pluginRoot = path.dirname(__dirname);
+
+const GIT_EXEC_ENV = {
+  ...process.env,
+  GIT_TERMINAL_PROMPT: '0',
+  GIT_SSH_COMMAND: 'ssh -o BatchMode=yes -o ConnectTimeout=2'
+};
+
+function detectDefaultUpstreamRef(repoDir) {
+  try {
+    const symRef = execFileSync('git', ['symbolic-ref', 'refs/remotes/origin/HEAD'], {
+      cwd: repoDir,
+      timeout: 1000,
+      encoding: 'utf8',
+      env: GIT_EXEC_ENV,
+      stdio: ['ignore', 'pipe', 'ignore']
+    }).trim();
+    if (symRef.startsWith('refs/remotes/')) {
+      return symRef.slice('refs/remotes/'.length);
+    }
+  } catch {}
+
+  for (const candidate of ['origin/main', 'origin/master']) {
+    try {
+      execFileSync('git', ['rev-parse', '--verify', '--quiet', candidate], {
+        cwd: repoDir,
+        timeout: 1000,
+        env: GIT_EXEC_ENV,
+        stdio: 'ignore'
+      });
+      return candidate;
+    } catch {}
+  }
+  return null;
+}
+
+function compareSemver(v1, v2) {
+  if (!v1 || v1 === 'unknown') return 1;
+  if (!v2 || v2 === 'unknown') return 0;
+  const p1 = String(v1).replace(/^v/, '').split('.').map(n => parseInt(n, 10) || 0);
+  const p2 = String(v2).replace(/^v/, '').split('.').map(n => parseInt(n, 10) || 0);
+  const len = Math.max(p1.length, p2.length);
+  for (let i = 0; i < len; i++) {
+    const a = p1[i] || 0;
+    const b = p2[i] || 0;
+    if (b > a) return 1;
+    if (b < a) return -1;
+  }
+  return 0;
+}
 
 function checkPluginUpdateNotice(pluginRoot, pluginName, homeDir) {
   try {
@@ -42,23 +91,26 @@ function checkPluginUpdateNotice(pluginRoot, pluginName, homeDir) {
     if (fs.existsSync(repoGit)) {
       try {
         const repoDir = path.dirname(repoGit);
-        execSync('git fetch --dry-run origin', {
+        execFileSync('git', ['fetch', '--quiet', 'origin'], {
           cwd: repoDir,
           timeout: 2000,
-          env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_SSH_COMMAND: 'ssh -o BatchMode=yes -o ConnectTimeout=2' },
+          env: GIT_EXEC_ENV,
           stdio: ['ignore', 'pipe', 'ignore']
         });
-        const behind = execSync('git rev-list HEAD..origin/main --count', {
-          cwd: repoDir,
-          timeout: 1000,
-          encoding: 'utf8',
-          env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
-          stdio: ['ignore', 'pipe', 'ignore']
-        }).trim();
-        const count = parseInt(behind, 10) || 0;
-        if (count > 0) {
-          hasUpdate = true;
-          notice = `\n> [!NOTE]\n> 🚀 **Plugin Update Available:** ${count} new update(s) available for \`${pluginName}\` (and marketplace plugins).\n> Instruct me: **"Update ${pluginName}"** or **"Update all plugins"** to pull the latest changes.\n`;
+        const upstreamRef = detectDefaultUpstreamRef(repoDir);
+        if (upstreamRef) {
+          const behind = execFileSync('git', ['rev-list', `HEAD..${upstreamRef}`, '--count'], {
+            cwd: repoDir,
+            timeout: 1000,
+            encoding: 'utf8',
+            env: GIT_EXEC_ENV,
+            stdio: ['ignore', 'pipe', 'ignore']
+          }).trim();
+          const count = parseInt(behind, 10) || 0;
+          if (count > 0) {
+            hasUpdate = true;
+            notice = `\n> [!NOTE]\n> 🚀 **Plugin Update Available:** ${count} new update(s) available for \`${pluginName}\` (and marketplace plugins).\n> Instruct me: **"Update ${pluginName}"** or **"Update all plugins"** to pull the latest changes.\n`;
+          }
         }
       } catch {}
     } else {
@@ -69,7 +121,7 @@ function checkPluginUpdateNotice(pluginRoot, pluginName, homeDir) {
           const permManifest = path.join(homeDir, '.gemini', 'sources', 'agent-marketplace', 'plugins', pluginName, 'plugin.json');
           if (fs.existsSync(permManifest)) {
             const availVersion = JSON.parse(fs.readFileSync(permManifest, 'utf8')).version || currentVersion;
-            if (availVersion !== currentVersion) {
+            if (compareSemver(currentVersion, availVersion) > 0) {
               hasUpdate = true;
               notice = `\n> [!NOTE]\n> 🚀 **Plugin Update Available:** Version v${availVersion} is available for \`${pluginName}\` (installed: v${currentVersion}).\n> Instruct me: **"Update ${pluginName}"** or **"Update all plugins"** to upgrade.\n`;
             }
@@ -138,9 +190,9 @@ async function main() {
     }
   }
 
-  const isClaudeCode = Boolean(process.env.CLAUDE_PLUGIN_ROOT);
+  const isClaudeCode = Boolean(process.env.CLAUDE_PLUGIN_ROOT || process.env.CLAUDE_CODE);
   const isAntigravity = !isClaudeCode || Boolean(payload && payload.conversationId);
-  const home = os.homedir();
+  const home = process.env.USERPROFILE || process.env.HOME || os.homedir();
   const updateNotice = checkPluginUpdateNotice(pluginRoot, 'syran-persona', home);
 
   if (isAntigravity) {

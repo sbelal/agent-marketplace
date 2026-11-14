@@ -1,4 +1,26 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { getKnowledgeGraphData } from './graph-service.js';
+
+function resolveKcPluginVersion() {
+  try {
+    const pluginJsonPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'plugin.json');
+    const data = JSON.parse(fs.readFileSync(pluginJsonPath, 'utf8'));
+    if (data && data.version) return data.version;
+  } catch {}
+  return '2.2.0';
+}
+const KC_PLUGIN_VERSION = resolveKcPluginVersion();
+
+function safeJsonForHtmlScript(value) {
+  return JSON.stringify(value)
+    .replace(/</g, '\\u003c')
+    .replace(/>/g, '\\u003e')
+    .replace(/&/g, '\\u0026')
+    .replace(/\u2028/g, '\\u2028')
+    .replace(/\u2029/g, '\\u2029');
+}
 
 /**
  * Generates a self-contained, interactive HTML canvas artifact
@@ -6,9 +28,11 @@ import { getKnowledgeGraphData } from './graph-service.js';
  */
 export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd(), options = {}) {
   const graphData = getKnowledgeGraphData(workspaceRoot);
-  const dataJson = JSON.stringify(graphData);
+  const dataJson = safeJsonForHtmlScript(graphData);
   const isCompact = Boolean(options.compact);
-  const serverUrl = options.serverUrl || '';
+  const serverUrlJson = safeJsonForHtmlScript(options.serverUrl || '');
+  const studioTokenJson = safeJsonForHtmlScript(options.studioToken || '');
+  const versionJson = safeJsonForHtmlScript(KC_PLUGIN_VERSION);
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -296,6 +320,10 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd(), option
       <button class="studio-btn" id="btn-connect-mode" title="Toggle edge drawing mode: click source then target to link">
         <span>🔗 Connect Mode</span>
       </button>
+      <select id="connect-type-select" class="inspector-input" style="flex:0 0 auto; width:86px; font-size:11px; padding:4px 6px;" title="Relationship type created in Connect Mode">
+        <option value="related">related</option>
+        <option value="overrides">overrides</option>
+      </select>
       <button class="studio-btn" id="btn-save-disk" style="display:none; background:#0284c7; color:#fff; font-weight:600;" title="Save staged changes directly to disk via Standalone Studio">
         <span>💾 Save to Disk</span>
         <span class="badge-count" id="pending-count-save" style="display:none;">0</span>
@@ -448,6 +476,12 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd(), option
             if (typeof fn === 'function') fn(this);
             return this;
           }
+          merge(other) {
+            return new MiniDataSelection(
+              [...this._elements, ...(other?._elements || [])],
+              this._parent || other?._parent
+            );
+          }
         }
 
         class MiniDataSelection extends MiniSelection {
@@ -460,14 +494,14 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd(), option
           data(dataset, keyFn) {
             const key = keyFn || ((d, i) => i);
             const existingMap = new Map();
-            this._elements.forEach(el => {
-              if (el.__data__) existingMap.set(key(el.__data__), el);
+            this._elements.forEach((el, idx) => {
+              if (el.__data__ !== undefined) existingMap.set(key(el.__data__, idx), el);
             });
             const matched = [];
             const enterItems = [];
             const usedKeys = new Set();
-            dataset.forEach(d => {
-              const k = key(d);
+            dataset.forEach((d, idx) => {
+              const k = key(d, idx);
               usedKeys.add(k);
               const existing = existingMap.get(k);
               if (existing) {
@@ -478,8 +512,8 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd(), option
               }
             });
             const exitEls = [];
-            this._elements.forEach(el => {
-              if (el.__data__ && !usedKeys.has(key(el.__data__))) {
+            this._elements.forEach((el, idx) => {
+              if (el.__data__ !== undefined && !usedKeys.has(key(el.__data__, idx))) {
                 exitEls.push(el);
               }
             });
@@ -511,9 +545,6 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd(), option
                 els.forEach(el => el.parentNode?.removeChild(el));
               }
             };
-          }
-          merge(other) {
-            return new MiniSelection([...this._elements, ...(other._elements || [])]);
           }
         }
 
@@ -842,17 +873,19 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd(), option
           connectSourceNode = null;
           nodeElements.classed("node-connect-source", false);
         } else {
+          const linkTypeEl = document.getElementById('connect-type-select');
+          const linkType = linkTypeEl ? linkTypeEl.value : 'related';
           // Connect connectSourceNode -> d
           activeLinks.push({
             source: connectSourceNode,
             target: d,
-            type: "related",
+            type: linkType,
             staged: true
           });
           stagedChanges.addedLinks.push({
             source: connectSourceNode.id,
             target: d.id,
-            type: "related"
+            type: linkType
           });
           updatePendingBadge();
           nodeElements.classed("node-connect-source", false);
@@ -876,8 +909,8 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd(), option
       document.getElementById('edit-verified').value = node.verified || "";
 
       const linksDiv = document.getElementById('ins-links');
-      linksDiv.innerHTML = '';
-      
+      linksDiv.textContent = '';
+
       const outgoing = activeLinks.filter(l => {
         const s = typeof l.source === 'object' ? (l.source.id || l.source.slug) : l.source;
         return s === node.id || s === node.slug;
@@ -888,21 +921,43 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd(), option
       });
 
       if (outgoing.length) {
-        linksDiv.innerHTML += '<div style="color:var(--accent);">Outgoing:</div>';
+        const header = document.createElement('div');
+        header.style.color = 'var(--accent)';
+        header.textContent = 'Outgoing:';
+        linksDiv.appendChild(header);
+
         outgoing.forEach(l => {
           const tId = typeof l.target === 'object' ? (l.target.slug || l.target.id) : l.target;
-          linksDiv.innerHTML += '<div style="padding-left:8px;">↳ ' + tId + ' <span style="color:var(--text-muted)">(' + l.type + ')</span></div>';
+          const row = document.createElement('div');
+          row.style.paddingLeft = '8px';
+          row.appendChild(document.createTextNode('↳ ' + tId + ' '));
+          const typeSpan = document.createElement('span');
+          typeSpan.style.color = 'var(--text-muted)';
+          typeSpan.textContent = '(' + (l.type || 'related') + ')';
+          row.appendChild(typeSpan);
+          linksDiv.appendChild(row);
         });
       }
       if (incoming.length) {
-        linksDiv.innerHTML += '<div style="color:#22c55e; margin-top:4px;">Incoming (Backlinks):</div>';
+        const header = document.createElement('div');
+        header.style.color = '#22c55e';
+        header.style.marginTop = '4px';
+        header.textContent = 'Incoming (Backlinks):';
+        linksDiv.appendChild(header);
+
         incoming.forEach(l => {
           const sId = typeof l.source === 'object' ? (l.source.slug || l.source.id) : l.source;
-          linksDiv.innerHTML += '<div style="padding-left:8px;">↰ ' + sId + '</div>';
+          const row = document.createElement('div');
+          row.style.paddingLeft = '8px';
+          row.textContent = '↰ ' + sId;
+          linksDiv.appendChild(row);
         });
       }
       if (!outgoing.length && !incoming.length) {
-        linksDiv.innerHTML = '<span style="color:var(--text-muted)">No lateral connections</span>';
+        const emptySpan = document.createElement('span');
+        emptySpan.style.color = 'var(--text-muted)';
+        emptySpan.textContent = 'No lateral connections';
+        linksDiv.appendChild(emptySpan);
       }
 
       document.getElementById('inspector').classList.add('open');
@@ -916,6 +971,44 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd(), option
     document.getElementById('btn-bump-today').onclick = () => {
       const today = new Date().toISOString().slice(0, 10);
       document.getElementById('edit-verified').value = today;
+    };
+
+    document.getElementById('btn-delink-node').onclick = () => {
+      if (!selectedNode) return;
+      const nodeId = selectedNode.id;
+      const nodeSlug = selectedNode.slug;
+      let clearedCount = 0;
+
+      const remaining = [];
+      for (const l of activeLinks) {
+        const s = typeof l.source === 'object' ? (l.source.id || l.source.slug) : l.source;
+        const t = typeof l.target === 'object' ? (l.target.id || l.target.slug) : l.target;
+        if (s === nodeId || s === nodeSlug) {
+          clearedCount++;
+          const linkType = l.type || 'related';
+          const stagedIdx = stagedChanges.addedLinks.findIndex(
+            al => (al.source === s || al.source === nodeSlug) && al.target === t && (al.type || 'related') === linkType
+          );
+          if (stagedIdx >= 0) {
+            stagedChanges.addedLinks.splice(stagedIdx, 1);
+          } else {
+            stagedChanges.removedLinks.push({ source: nodeSlug, target: t, type: linkType });
+          }
+        } else {
+          remaining.push(l);
+        }
+      }
+
+      if (clearedCount === 0) {
+        showToast("No outgoing links to clear on '" + nodeSlug + "'.");
+        return;
+      }
+
+      activeLinks = remaining;
+      updatePendingBadge();
+      updateSimulation();
+      openInspector(selectedNode);
+      showToast("Staged removal of " + clearedCount + " outgoing link(s) from '" + nodeSlug + "'.");
     };
 
     document.getElementById('btn-save-node').onclick = () => {
@@ -956,7 +1049,8 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd(), option
 
     // HTTP Server Direct Persistence
     const isHttpServer = window.location.protocol.startsWith('http');
-    const configuredServerUrl = "${serverUrl}";
+    const configuredServerUrl = ${serverUrlJson};
+    const studioToken = ${studioTokenJson};
     const apiBase = isHttpServer ? '' : configuredServerUrl;
     const saveDiskBtn = document.getElementById('btn-save-disk');
     if ((isHttpServer || configuredServerUrl) && saveDiskBtn) {
@@ -991,13 +1085,15 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd(), option
         };
 
         saveDiskBtn.disabled = true;
-        saveDiskBtn.innerHTML = '<span>⏳ Saving...</span>';
+        saveDiskBtn.textContent = '⏳ Saving...';
 
         try {
           const targetUrl = (apiBase ? apiBase : '') + '/api/patch';
+          const headers = { 'Content-Type': 'application/json' };
+          if (studioToken) headers['X-Studio-Token'] = studioToken;
           const res = await fetch(targetUrl, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers,
             body: JSON.stringify(staged)
           });
           const data = await res.json();
@@ -1053,7 +1149,7 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd(), option
 
       const patchData = {
         generated_at: new Date().toISOString(),
-        version: "2.2.0",
+        version: ${versionJson},
         patch: staged
       };
 
@@ -1110,11 +1206,13 @@ export function generateKnowledgeGraphHtml(workspaceRoot = process.cwd(), option
         const s = d.source;
         const t = d.target;
         const sSlug = typeof s === 'object' ? (s.slug || s.id || '') : String(s || '');
+        const sDesc = typeof s === 'object' ? (s.description || '') : '';
         const sDomain = typeof s === 'object' ? (s.domain || '') : '';
         const tSlug = typeof t === 'object' ? (t.slug || t.id || '') : String(t || '');
+        const tDesc = typeof t === 'object' ? (t.description || '') : '';
         const tDomain = typeof t === 'object' ? (t.domain || '') : '';
-        const sMatch = (!q || sSlug.toLowerCase().includes(q)) && (activeChips.length === 0 || activeChips.includes(sDomain));
-        const tMatch = (!q || tSlug.toLowerCase().includes(q)) && (activeChips.length === 0 || activeChips.includes(tDomain));
+        const sMatch = (!q || sSlug.toLowerCase().includes(q) || sDesc.toLowerCase().includes(q)) && (activeChips.length === 0 || activeChips.includes(sDomain));
+        const tMatch = (!q || tSlug.toLowerCase().includes(q) || tDesc.toLowerCase().includes(q)) && (activeChips.length === 0 || activeChips.includes(tDomain));
         return (sMatch && tMatch) ? 0.8 : 0.05;
       });
     }

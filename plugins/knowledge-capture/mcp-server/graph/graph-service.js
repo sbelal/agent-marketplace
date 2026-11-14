@@ -1,156 +1,17 @@
-import fs from 'node:fs';
 import path from 'node:path';
 import { getDatabase } from '../db/connection.js';
-import { resolveStoragePaths, normalizeWorkspaceId } from '../core/storage-paths.js';
-import { parseYamlFrontmatter } from '../core/yaml-parser.js';
-import { findMarkdownFiles, scanLayerEntries } from '../retrieval/shadow-resolver.js';
+import { normalizeWorkspaceId } from '../core/storage-paths.js';
+import { scanLayerEntries } from '../retrieval/shadow-resolver.js';
+import { isIndexDirty } from '../retrieval/hybrid-search.js';
 import { readTelemetryJson } from '../db/telemetry.js';
+import { syncSqliteMetadataSync } from '../db/indexer.js';
 
 /**
  * Synchronously synchronizes file metadata, FTS5 text, and graph relationships into SQLite.
- * Used for fast synchronous queries such as knowledge graph rendering without blocking on embeddings.
+ * Delegates to shared syncSqliteMetadataSync so table schemas never diverge.
  */
 export function syncSqliteMetadata(workspaceRoot = process.cwd()) {
-  const db = getDatabase();
-  if (!db) {
-    return { totalIndexed: 0 };
-  }
-
-  const paths = resolveStoragePaths(workspaceRoot);
-  const currentWsId = normalizeWorkspaceId(workspaceRoot);
-
-  const layerDirs = [
-    { layer: 'workspace', wsId: currentWsId, dir: paths.workspaceDir, teamSlug: null },
-    { layer: 'private', wsId: 'global', dir: paths.privateDir, teamSlug: null }
-  ];
-
-  if (paths.activeTeamDirs && paths.activeTeamDirs.length > 0) {
-    for (const tRepo of paths.activeTeamDirs) {
-      layerDirs.push({ layer: 'team', wsId: 'global', dir: tRepo.dir, teamSlug: tRepo.slug });
-    }
-  } else {
-    layerDirs.push({ layer: 'team', wsId: 'global', dir: paths.teamDir, teamSlug: 'default' });
-  }
-
-  const currentFiles = new Map();
-
-  for (const { layer, wsId, dir, teamSlug } of layerDirs) {
-    const files = findMarkdownFiles(dir);
-    for (const filePath of files) {
-      const base = path.basename(filePath, '.md');
-      if (base.toUpperCase() === 'README') continue;
-
-      try {
-        const stats = fs.statSync(filePath);
-        const mtime = Math.floor(stats.mtimeMs);
-        currentFiles.set(`${wsId}:${layer}:${base}`, { wsId, layer, slug: base, filePath, mtime, teamSlug });
-      } catch {}
-    }
-  }
-
-  const existingRows = db.prepare(`
-    SELECT workspace_id, layer, slug, mtime 
-    FROM memories 
-    WHERE workspace_id = ? OR workspace_id = 'global'
-  `).all(currentWsId);
-
-  const existingMap = new Map();
-  for (const row of existingRows) {
-    existingMap.set(`${row.workspace_id}:${row.layer}:${row.slug}`, row.mtime);
-  }
-
-  const insertMetaNoVec = db.prepare(`
-    INSERT INTO memories (
-      workspace_id, layer, slug, domain, type, verified, trigger, path, mtime, team_slug
-    )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(workspace_id, layer, slug) DO UPDATE SET
-      domain=excluded.domain,
-      type=excluded.type,
-      verified=excluded.verified,
-      trigger=excluded.trigger,
-      path=excluded.path,
-      mtime=excluded.mtime,
-      team_slug=excluded.team_slug
-  `);
-
-  const deleteFts = db.prepare('DELETE FROM memories_fts WHERE workspace_id = ? AND layer = ? AND slug = ?');
-  const insertFts = db.prepare(`
-    INSERT INTO memories_fts (slug, domain, type, trigger, content, layer, workspace_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `);
-
-  const deleteGraph = db.prepare('DELETE FROM memories_graph WHERE workspace_id = ? AND source_slug = ?');
-  const insertGraph = db.prepare(`
-    INSERT OR IGNORE INTO memories_graph (workspace_id, source_slug, target_slug, rel_type)
-    VALUES (?, ?, ?, ?)
-  `);
-
-  db.exec('BEGIN IMMEDIATE');
-  try {
-    for (const [key, item] of currentFiles.entries()) {
-      const prevMtime = existingMap.get(key);
-      if (prevMtime && prevMtime === item.mtime) {
-        continue;
-      }
-
-      try {
-        const rawContent = fs.readFileSync(item.filePath, 'utf8');
-        const parsed = parseYamlFrontmatter(rawContent);
-        const fm = parsed.frontmatter;
-
-        const domain = fm.domain || 'general';
-        const type = fm.type || 'general';
-        const verified = fm.verified || '';
-        const trigger = fm.description || fm.trigger || '';
-
-        insertMetaNoVec.run(
-          item.wsId,
-          item.layer,
-          item.slug,
-          domain,
-          type,
-          verified,
-          trigger,
-          item.filePath,
-          item.mtime,
-          item.teamSlug || null
-        );
-
-        deleteFts.run(item.wsId, item.layer, item.slug);
-        insertFts.run(item.slug, domain, type, trigger, parsed.body, item.layer, item.wsId);
-
-        deleteGraph.run(item.wsId, item.slug);
-        if (Array.isArray(fm.related)) {
-          for (const rel of fm.related) {
-            if (rel) insertGraph.run(item.wsId, item.slug, rel, 'related');
-          }
-        }
-        if (fm.overrides) {
-          const overridesList = Array.isArray(fm.overrides) ? fm.overrides : [fm.overrides];
-          for (const ov of overridesList) {
-            if (ov) insertGraph.run(item.wsId, item.slug, ov, 'overrides');
-          }
-        }
-      } catch {}
-    }
-
-    const deleteMeta = db.prepare('DELETE FROM memories WHERE workspace_id = ? AND layer = ? AND slug = ?');
-    for (const row of existingRows) {
-      const key = `${row.workspace_id}:${row.layer}:${row.slug}`;
-      if (!currentFiles.has(key)) {
-        deleteMeta.run(row.workspace_id, row.layer, row.slug);
-        deleteFts.run(row.workspace_id, row.layer, row.slug);
-        deleteGraph.run(row.workspace_id, row.slug);
-      }
-    }
-    db.exec('COMMIT');
-  } catch (err) {
-    db.exec('ROLLBACK');
-    throw err;
-  }
-
-  return { totalIndexed: currentFiles.size };
+  return syncSqliteMetadataSync(workspaceRoot);
 }
 
 /**
@@ -164,42 +25,57 @@ export function getKnowledgeGraphData(workspaceRoot) {
   let rawNodes = [];
   let rawLinks = [];
 
-  if (db) {
+  if (db && !isIndexDirty(workspaceRoot)) {
     rawNodes = db.prepare(`
-      SELECT m.slug as id, m.slug, m.layer, m.domain, m.type, m.verified, m.trigger as description,
+      SELECT m.slug as id, m.slug, m.layer, m.team_slug, m.domain, m.type, m.verified, m.trigger as description,
              COALESCE(t.applied_count, 0) as applied_count,
              COALESCE(t.recalled_count, 0) as recalled_count,
              COALESCE(t.test_pass_count, 0) as test_pass_count,
              COALESCE(t.test_fail_count, 0) as test_fail_count,
              COALESCE(t.efficacy_score, 1.0) as efficacy_score
       FROM memories m
-      LEFT JOIN telemetry t ON m.slug = t.slug
+      LEFT JOIN telemetry t ON LOWER(m.slug) = LOWER(t.slug)
       WHERE m.workspace_id = ? OR m.workspace_id = 'global'
     `).all(currentWsId);
 
     rawLinks = db.prepare(`
-      SELECT DISTINCT source_slug as source, target_slug as target, rel_type as type
+      SELECT DISTINCT source_layer, source_team_slug, source_slug as source, target_slug as target, rel_type as type
       FROM memories_graph
       WHERE workspace_id = ? OR workspace_id = 'global'
     `).all(currentWsId);
   } else {
     const { activeEntries } = scanLayerEntries(workspaceRoot, 'all');
     const tele = readTelemetryJson();
+    if (db) {
+      try {
+        for (const row of db.prepare('SELECT * FROM telemetry').all()) {
+          if (row && row.slug) tele[row.slug] = row;
+        }
+      } catch {}
+    }
+    const teleLower = {};
+    for (const [k, v] of Object.entries(tele)) {
+      teleLower[k.toLowerCase()] = v;
+    }
 
-    rawNodes = activeEntries.map(e => ({
-      id: e.slug,
-      slug: e.slug,
-      layer: e.layerKey,
-      domain: e.domain,
-      type: e.type,
-      verified: e.verified,
-      description: e.trigger,
-      applied_count: tele[e.slug]?.applied_count || 0,
-      recalled_count: tele[e.slug]?.recalled_count || 0,
-      test_pass_count: tele[e.slug]?.test_pass_count || 0,
-      test_fail_count: tele[e.slug]?.test_fail_count || 0,
-      efficacy_score: typeof tele[e.slug]?.efficacy_score === 'number' ? tele[e.slug].efficacy_score : 1.0
-    }));
+    rawNodes = activeEntries.map(e => {
+      const tEntry = tele[e.slug] || teleLower[e.slug.toLowerCase()];
+      return {
+        id: e.slug,
+        slug: e.slug,
+        layer: e.layerKey,
+        team_slug: e.teamSlug || '',
+        domain: e.domain,
+        type: e.type,
+        verified: e.verified,
+        description: e.trigger,
+        applied_count: tEntry?.applied_count || 0,
+        recalled_count: tEntry?.recalled_count || 0,
+        test_pass_count: tEntry?.test_pass_count || 0,
+        test_fail_count: tEntry?.test_fail_count || 0,
+        efficacy_score: typeof tEntry?.efficacy_score === 'number' ? tEntry.efficacy_score : 1.0
+      };
+    });
 
     const seenFallbackLinks = new Set();
     for (const entry of activeEntries) {
@@ -208,7 +84,13 @@ export function getKnowledgeGraphData(workspaceRoot) {
           const key = `${entry.slug}->${rel}:related`;
           if (rel && !seenFallbackLinks.has(key)) {
             seenFallbackLinks.add(key);
-            rawLinks.push({ source: entry.slug, target: rel, type: 'related' });
+            rawLinks.push({
+              source_layer: entry.layerKey,
+              source_team_slug: entry.teamSlug || '',
+              source: entry.slug,
+              target: rel,
+              type: 'related'
+            });
           }
         }
       }
@@ -217,7 +99,13 @@ export function getKnowledgeGraphData(workspaceRoot) {
           const key = `${entry.slug}->${ov}:overrides`;
           if (ov && !seenFallbackLinks.has(key)) {
             seenFallbackLinks.add(key);
-            rawLinks.push({ source: entry.slug, target: ov, type: 'overrides' });
+            rawLinks.push({
+              source_layer: entry.layerKey,
+              source_team_slug: entry.teamSlug || '',
+              source: entry.slug,
+              target: ov,
+              type: 'overrides'
+            });
           }
         }
       }
@@ -227,14 +115,16 @@ export function getKnowledgeGraphData(workspaceRoot) {
   const nodeMap = new Map();
   const precedence = { workspace: 3, private: 2, team: 1 };
   for (const n of rawNodes) {
-    const existing = nodeMap.get(n.slug);
+    const slugKey = n.slug.toLowerCase();
+    const existing = nodeMap.get(slugKey);
     if (!existing || (precedence[n.layer] || 0) > (precedence[existing.layer] || 0)) {
-      nodeMap.set(n.slug, n);
+      nodeMap.set(slugKey, n);
     }
   }
 
   const nodes = Array.from(nodeMap.values());
-  const validNodeIds = new Set(nodes.map(n => n.id));
+  const validNodeIdLookup = new Map(nodes.map(n => [n.id.toLowerCase(), n.id]));
+  const activeNodeKeys = new Set(nodes.map(n => `${n.layer}:${n.team_slug || ''}:${n.slug.toLowerCase()}`));
 
   const now = Date.now();
   for (const node of nodes) {
@@ -250,10 +140,16 @@ export function getKnowledgeGraphData(workspaceRoot) {
   const brokenLinks = [];
 
   for (const l of rawLinks) {
-    if (validNodeIds.has(l.source) && validNodeIds.has(l.target)) {
-      validLinks.push(l);
+    // Exclude links originating from shadowed lower-tier memories
+    if (l.source_layer && !activeNodeKeys.has(`${l.source_layer}:${l.source_team_slug || ''}:${l.source.toLowerCase()}`)) {
+      continue;
+    }
+    const canonicalSource = validNodeIdLookup.get(String(l.source || '').toLowerCase());
+    const canonicalTarget = validNodeIdLookup.get(String(l.target || '').toLowerCase());
+    if (canonicalSource && canonicalTarget) {
+      validLinks.push({ source: canonicalSource, target: canonicalTarget, type: l.type });
     } else {
-      brokenLinks.push(l);
+      brokenLinks.push({ source: canonicalSource || l.source, target: canonicalTarget || l.target, type: l.type });
     }
   }
 
@@ -306,6 +202,7 @@ export function getKnowledgeGraphData(workspaceRoot) {
 export function getMemoryGraphNeighbors(workspaceRoot, slug, options = {}) {
   if (!slug) return { slug: '', outgoing: [], incoming: [] };
   const cleanSlug = path.basename(slug.trim()).replace(/\.md$/i, '');
+  const cleanKey = cleanSlug.toLowerCase();
   const depth = typeof options === 'number' ? options : (options.depth || 1);
 
   if (depth > 1) {
@@ -313,14 +210,14 @@ export function getMemoryGraphNeighbors(workspaceRoot, slug, options = {}) {
   }
 
   const graph = getKnowledgeGraphData(workspaceRoot);
-  const targetNode = graph.nodes.find(n => n.id === cleanSlug || n.slug === cleanSlug);
+  const targetNode = graph.nodes.find(n => n.id.toLowerCase() === cleanKey || n.slug.toLowerCase() === cleanKey);
 
   const outgoing = graph.links
-    .filter(l => l.source === cleanSlug)
+    .filter(l => l.source.toLowerCase() === cleanKey)
     .map(l => ({ target_slug: l.target, rel_type: l.type }));
 
   const incoming = graph.links
-    .filter(l => l.target === cleanSlug)
+    .filter(l => l.target.toLowerCase() === cleanKey)
     .map(l => ({ source_slug: l.source, rel_type: l.type }));
 
   return {

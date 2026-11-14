@@ -8,15 +8,17 @@
  */
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const readline = require('readline');
-const { execSync, execFileSync } = require('child_process');
+const { execFileSync } = require('child_process');
 
 const {
   normalizePath,
   resolveSourceConfigPath,
   getPluginsConfig,
   findSourceEntry,
+  findMarketplaceSourceEntry,
   addSourceEntry,
   removeSourceEntry
 } = require('./source-manager');
@@ -42,7 +44,7 @@ const {
 
 const REPO_ROOT = path.resolve(__dirname, '..');
 const WORKSPACE_DIR = process.cwd();
-const HOME_DIR = process.env.USERPROFILE || process.env.HOME || '';
+const HOME_DIR = process.env.USERPROFILE || process.env.HOME || os.homedir();
 const REMOTE_REPO_URL = 'https://github.com/sbelal/agent-marketplace.git';
 
 /**
@@ -53,7 +55,7 @@ const REMOTE_REPO_URL = 'https://github.com/sbelal/agent-marketplace.git';
  */
 function isNpxExecution(rootDir) {
   const norm = normalizePath(rootDir).toLowerCase();
-  return norm.includes('_npx') || norm.includes('npm-cache') || norm.includes('temp') || norm.includes('tmp');
+  return norm.includes('/_npx/') || norm.includes('/npm-cache/') || norm.endsWith('/_npx');
 }
 
 /**
@@ -478,15 +480,24 @@ function runInteractiveWizard() {
       const inventory = getPluginInventory(REPO_ROOT, WORKSPACE_DIR, HOME_DIR);
       let count = 0;
       for (const p of inventory.items) {
+        const display = p.displayName || p.name;
         if (p.workspaceNeedsUpdate) {
-          console.log(`Upgrading ${p.name} (Workspace)...`);
-          updatePlugin(p.id, REPO_ROOT, 'workspace', WORKSPACE_DIR, HOME_DIR);
-          count++;
+          console.log(`Upgrading ${display} (Workspace)...`);
+          try {
+            updatePlugin(p.id, REPO_ROOT, 'workspace', WORKSPACE_DIR, HOME_DIR);
+            count++;
+          } catch (err) {
+            console.error(`\x1b[31m✖ Failed updating ${display} (Workspace): ${err.message}\x1b[0m`);
+          }
         }
         if (p.globalNeedsUpdate) {
-          console.log(`Upgrading ${p.name} (Global)...`);
-          updatePlugin(p.id, REPO_ROOT, 'global', WORKSPACE_DIR, HOME_DIR);
-          count++;
+          console.log(`Upgrading ${display} (Global)...`);
+          try {
+            updatePlugin(p.id, REPO_ROOT, 'global', WORKSPACE_DIR, HOME_DIR);
+            count++;
+          } catch (err) {
+            console.error(`\x1b[31m✖ Failed updating ${display} (Global): ${err.message}\x1b[0m`);
+          }
         }
       }
       console.log(`\x1b[32m\nUpgraded ${count} plugin(s).\x1b[0m\n`);
@@ -547,7 +558,8 @@ function runInteractiveWizard() {
     } else if (sel === '3' || sel === '4') {
       const scope = sel === '3' ? 'workspace' : 'global';
       const configPath = resolveSourceConfigPath(scope, WORKSPACE_DIR, HOME_DIR);
-      const targetSourcePath = resolveSourceRegistrationPath(REPO_ROOT, HOME_DIR);
+      const matchedEntry = findMarketplaceSourceEntry(getPluginsConfig(configPath), REPO_ROOT, HOME_DIR);
+      const targetSourcePath = matchedEntry ? matchedEntry.path : resolveSourceRegistrationPath(REPO_ROOT, HOME_DIR);
       const removed = removeSourceEntry(configPath, targetSourcePath);
       if (removed) {
         console.log(`\x1b[32m✔ Successfully removed source from ${configPath}.\x1b[0m`);
@@ -614,20 +626,46 @@ Options:
     process.exit(0);
   }
 
-  const scopeArg = (getArg('--scope') || 'workspace').toLowerCase();
-  const scope = (scopeArg === 'global' || scopeArg === 'g') ? 'global' : 'workspace';
+  let scope = 'workspace';
+  if (hasFlag('--scope')) {
+    const rawScope = getArg('--scope');
+    const scopeArg = (rawScope || '').toLowerCase();
+    if (scopeArg === 'global' || scopeArg === 'g') {
+      scope = 'global';
+    } else if (scopeArg === 'workspace' || scopeArg === 'w') {
+      scope = 'workspace';
+    } else {
+      console.error(`\x1b[31mError: Invalid --scope value '${rawScope || ''}'. Must be 'workspace' or 'global'.\x1b[0m`);
+      process.exit(1);
+    }
+  }
 
-  const enableArg = getArg('--enable');
-  if (enableArg) {
-    setPluginEnabled(enableArg, true, HOME_DIR);
-    console.log(`\x1b[32m✔ Enabled plugin '${enableArg}' in Antigravity configuration.\x1b[0m`);
+  const validateToggleTarget = (flagName, rawVal) => {
+    if (!rawVal || rawVal.startsWith('-') || !/^[a-zA-Z0-9_-]+$/.test(rawVal)) {
+      console.error(`\x1b[31mError: Invalid or missing plugin ID for ${flagName}.\x1b[0m`);
+      process.exit(1);
+    }
+    const available = getAvailablePlugins(REPO_ROOT);
+    const matched = available.find(p => p.id.toLowerCase() === rawVal.toLowerCase());
+    if (!matched) {
+      const validIds = available.map(p => p.id).join(', ') || '(none)';
+      console.error(`\x1b[31mError: Unknown plugin '${rawVal}'. Available plugins: ${validIds}\x1b[0m`);
+      process.exit(1);
+    }
+    return matched.id;
+  };
+
+  if (hasFlag('--enable')) {
+    const enableId = validateToggleTarget('--enable', getArg('--enable'));
+    setPluginEnabled(enableId, true, HOME_DIR);
+    console.log(`\x1b[32m✔ Enabled plugin '${enableId}' in Antigravity configuration.\x1b[0m`);
     process.exit(0);
   }
 
-  const disableArg = getArg('--disable');
-  if (disableArg) {
-    setPluginEnabled(disableArg, false, HOME_DIR);
-    console.log(`\x1b[32m✔ Disabled plugin '${disableArg}' in Antigravity configuration.\x1b[0m`);
+  if (hasFlag('--disable')) {
+    const disableId = validateToggleTarget('--disable', getArg('--disable'));
+    setPluginEnabled(disableId, false, HOME_DIR);
+    console.log(`\x1b[32m✔ Disabled plugin '${disableId}' in Antigravity configuration.\x1b[0m`);
     process.exit(0);
   }
 
@@ -635,7 +673,11 @@ Options:
     const configPath = resolveSourceConfigPath(scope, WORKSPACE_DIR, HOME_DIR);
     const targetSourcePath = resolveSourceRegistrationPath(REPO_ROOT, HOME_DIR);
     if (isNpxExecution(REPO_ROOT)) {
-      ensurePermanentSourceClone(targetSourcePath);
+      const cloned = ensurePermanentSourceClone(targetSourcePath);
+      if (!cloned) {
+        console.error('\x1b[31m✖ Failed to clone or update permanent marketplace source cache.\x1b[0m');
+        process.exit(1);
+      }
     }
     const added = addSourceEntry(configPath, targetSourcePath);
     const plugins = getAvailablePlugins(REPO_ROOT);
@@ -652,7 +694,11 @@ Options:
   }
 
   const pluginArg = getArg('--plugin');
-  if (pluginArg) {
+  if (hasFlag('--plugin')) {
+    if (!pluginArg || pluginArg.startsWith('-')) {
+      console.error('\x1b[31mError: Missing plugin ID for --plugin. Usage: --plugin <id|all>\x1b[0m');
+      process.exit(1);
+    }
     const plugins = getAvailablePlugins(REPO_ROOT);
     const targets = pluginArg.toLowerCase() === 'all'
       ? plugins
@@ -693,25 +739,35 @@ Options:
 
   const updateArg = getArg('--update');
   if (updateArg || hasFlag('--update')) {
-    const target = (updateArg || 'all').toLowerCase();
+    const target = (!updateArg || updateArg.startsWith('-') ? 'all' : updateArg).toLowerCase();
     const inventory = getPluginInventory(REPO_ROOT, WORKSPACE_DIR, HOME_DIR);
+    if (target !== 'all' && !inventory.items.some(p => p.id.toLowerCase() === target)) {
+      const validIds = inventory.items.map(p => p.id).join(', ') || '(none)';
+      console.error(`\x1b[31mError: Unknown plugin '${updateArg}'. Available plugins: ${validIds}\x1b[0m`);
+      process.exit(1);
+    }
     let count = 0;
 
     for (const p of inventory.items) {
       if (target === 'all' || target === p.id.toLowerCase()) {
-        if (p.workspaceInstalled) {
-          const res = updatePlugin(p.id, REPO_ROOT, 'workspace', WORKSPACE_DIR, HOME_DIR);
-          if (res.updated) {
-            console.log(`\x1b[32m✔ Updated ${p.name} (workspace) v${res.fromVersion} -> v${res.toVersion}\x1b[0m`);
-            count++;
+        try {
+          if (p.workspaceInstalled) {
+            const res = updatePlugin(p.id, REPO_ROOT, 'workspace', WORKSPACE_DIR, HOME_DIR);
+            if (res.updated) {
+              console.log(`\x1b[32m✔ Updated ${p.name} (workspace) v${res.fromVersion} -> v${res.toVersion}\x1b[0m`);
+              count++;
+            }
           }
-        }
-        if (p.globalInstalled) {
-          const res = updatePlugin(p.id, REPO_ROOT, 'global', WORKSPACE_DIR, HOME_DIR);
-          if (res.updated) {
-            console.log(`\x1b[32m✔ Updated ${p.name} (global) v${res.fromVersion} -> v${res.toVersion}\x1b[0m`);
-            count++;
+          if (p.globalInstalled) {
+            const res = updatePlugin(p.id, REPO_ROOT, 'global', WORKSPACE_DIR, HOME_DIR);
+            if (res.updated) {
+              console.log(`\x1b[32m✔ Updated ${p.name} (global) v${res.fromVersion} -> v${res.toVersion}\x1b[0m`);
+              count++;
+            }
           }
+        } catch (err) {
+          console.error(`\x1b[31m✖ Failed updating ${p.id}: ${err.message}\x1b[0m`);
+          process.exit(1);
         }
       }
     }
@@ -720,10 +776,15 @@ Options:
   }
 
   const uninstallArg = getArg('--uninstall');
-  if (uninstallArg) {
+  if (hasFlag('--uninstall')) {
+    if (!uninstallArg || uninstallArg.startsWith('-')) {
+      console.error('\x1b[31mError: Missing target for --uninstall. Usage: --uninstall <id|source>\x1b[0m');
+      process.exit(1);
+    }
     if (uninstallArg.toLowerCase() === 'source') {
       const configPath = resolveSourceConfigPath(scope, WORKSPACE_DIR, HOME_DIR);
-      const targetSourcePath = resolveSourceRegistrationPath(REPO_ROOT, HOME_DIR);
+      const matchedEntry = findMarketplaceSourceEntry(getPluginsConfig(configPath), REPO_ROOT, HOME_DIR);
+      const targetSourcePath = matchedEntry ? matchedEntry.path : resolveSourceRegistrationPath(REPO_ROOT, HOME_DIR);
       const removed = removeSourceEntry(configPath, targetSourcePath);
       if (removed) {
         console.log(`\x1b[32m✔ Successfully removed source from ${configPath}.\x1b[0m`);
@@ -731,27 +792,41 @@ Options:
         console.log(`\x1b[33mSource entry not found in ${configPath}.\x1b[0m`);
       }
     } else {
-      const res = uninstallPlugin(uninstallArg, scope, WORKSPACE_DIR, HOME_DIR);
-      if (res.success) {
-        console.log(`\x1b[32m✔ Successfully uninstalled ${uninstallArg} from ${scope}.\x1b[0m`);
-      } else {
-        console.log(`\x1b[33mPlugin ${uninstallArg} was not found in ${scope}.\x1b[0m`);
+      try {
+        const matched = getAvailablePlugins(REPO_ROOT).find(p => p.id.toLowerCase() === uninstallArg.toLowerCase());
+        const targetId = matched ? matched.id : uninstallArg;
+        const res = uninstallPlugin(targetId, scope, WORKSPACE_DIR, HOME_DIR);
+        if (res.success) {
+          console.log(`\x1b[32m✔ Successfully uninstalled ${targetId} from ${scope}.\x1b[0m`);
+        } else {
+          console.log(`\x1b[33mPlugin ${targetId} was not found in ${scope}.\x1b[0m`);
+        }
+      } catch (err) {
+        console.error(`\x1b[31m✖ Failed uninstalling ${uninstallArg}: ${err.message}\x1b[0m`);
+        process.exit(1);
       }
     }
     process.exit(0);
   }
 
-  // Fallback to interactive wizard if no recognizable flag provided
-  runInteractiveWizard();
+  console.error(`\x1b[31mError: Unrecognized or incomplete arguments: ${args.join(' ')}. Run --help for usage.\x1b[0m`);
+  process.exit(1);
 }
 
 // ==========================================
 // ENTRY POINT
 // ==========================================
 
-const cliArgs = process.argv.slice(2);
-if (cliArgs.length > 0) {
-  runCliDispatcher(cliArgs);
-} else {
-  runInteractiveWizard();
+if (require.main === module) {
+  const cliArgs = process.argv.slice(2);
+  if (cliArgs.length > 0) {
+    runCliDispatcher(cliArgs);
+  } else {
+    runInteractiveWizard();
+  }
 }
+
+module.exports = {
+  isNpxExecution,
+  resolveSourceRegistrationPath
+};

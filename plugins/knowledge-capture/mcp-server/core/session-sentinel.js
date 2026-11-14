@@ -1,8 +1,42 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { execSync } from 'node:child_process';
-import { resolveStoragePaths } from './storage-paths.js';
+import { execFileSync } from 'node:child_process';
+import { resolveStoragePaths, GIT_EXEC_ENV } from './storage-paths.js';
+import { parsePorcelainZ } from './memory-store.js';
+import { findMarkdownFiles } from '../retrieval/shadow-resolver.js';
 import { searchMemoriesHybrid } from '../retrieval/hybrid-search.js';
+
+function readTranscriptFromPath(transcriptPath) {
+  if (!transcriptPath || typeof transcriptPath !== 'string' || !fs.existsSync(transcriptPath)) {
+    return [];
+  }
+  try {
+    const raw = fs.readFileSync(transcriptPath, 'utf8');
+    const trimmed = raw.trim();
+    if (!trimmed) return [];
+    if (trimmed.startsWith('[')) {
+      const parsed = JSON.parse(trimmed);
+      return Array.isArray(parsed) ? parsed : [];
+    }
+    const lines = trimmed.split(/\r?\n/).slice(-200);
+    const messages = [];
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        const obj = JSON.parse(line);
+        // Handle both flat {role, content} and nested Claude Code {type, message: {role, content}} JSONL shapes
+        if (obj.message && typeof obj.message === 'object') {
+          messages.push({ role: obj.message.role || obj.type, content: obj.message.content || obj.content });
+        } else {
+          messages.push(obj);
+        }
+      } catch {}
+    }
+    return messages;
+  } catch {
+    return [];
+  }
+}
 
 /**
  * Zero-Turn Proactive Recall Probe.
@@ -73,35 +107,44 @@ export function autoElicitSessionKnowledge(workspaceRoot = process.cwd(), option
     recent_memory_captures: 0,
     elicitation_needed: false,
     suggested_candidates: [],
+    signal_evidence: {
+      modified_files_sample: [],
+      user_preference_excerpts: [],
+      error_log_excerpts: []
+    },
     session_summary: ''
   };
 
   const gitDir = path.join(workspaceRoot, '.git');
   if (fs.existsSync(gitDir)) {
     try {
-      const statusOutput = execSync('git status --porcelain', {
+      const statusOutput = execFileSync('git', ['status', '--porcelain', '-z'], {
         cwd: workspaceRoot,
         encoding: 'utf8',
         timeout: 3000,
-        env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+        env: GIT_EXEC_ENV,
         stdio: ['ignore', 'pipe', 'ignore']
-      }).trim();
+      });
 
-      if (statusOutput) {
+      const parsedStatus = parsePorcelainZ(statusOutput);
+      if (parsedStatus.length > 0) {
         result.has_uncommitted_changes = true;
-        const lines = statusOutput.split('\n');
-        for (const line of lines) {
-          const parts = line.trim().split(/\s+/);
-          if (parts.length >= 2) {
-            result.modified_files.push({
-              status: parts[0],
-              file: parts.slice(1).join(' ')
-            });
-          }
+        for (const entry of parsedStatus) {
+          result.modified_files.push({
+            status: entry.status.trim() || entry.status,
+            file: entry.file
+          });
         }
+        result.signal_evidence.modified_files_sample = result.modified_files.slice(0, 10);
       }
     } catch {}
   }
+
+  // Hydrate transcript from transcript_path (Claude Code SessionEnd hook) if inline transcript omitted
+  const effectiveTranscript = options.transcript !== undefined
+    ? options.transcript
+    : readTranscriptFromPath(options.transcript_path || options.transcriptPath);
+  const resolvedOptions = effectiveTranscript ? { ...options, transcript: effectiveTranscript } : options;
 
   const paths = resolveStoragePaths(workspaceRoot);
   const now = Date.now();
@@ -109,18 +152,16 @@ export function autoElicitSessionKnowledge(workspaceRoot = process.cwd(), option
 
   const checkRecentFiles = (dir) => {
     let count = 0;
-    if (fs.existsSync(dir)) {
-      try {
-        const files = fs.readdirSync(dir);
-        for (const f of files) {
-          if (!f.endsWith('.md') || f.toUpperCase() === 'README.MD') continue;
-          const stat = fs.statSync(path.join(dir, f));
-          if (stat.mtimeMs >= threeHoursAgo) {
-            count++;
-          }
+    try {
+      const files = findMarkdownFiles(dir);
+      for (const filePath of files) {
+        if (path.basename(filePath, '.md').toUpperCase() === 'README') continue;
+        const stat = fs.statSync(filePath);
+        if (stat.mtimeMs >= threeHoursAgo) {
+          count++;
         }
-      } catch {}
-    }
+      }
+    } catch {}
     return count;
   };
 
@@ -159,27 +200,28 @@ export function autoElicitSessionKnowledge(workspaceRoot = process.cwd(), option
 
     if (codeFiles.length > 0 && result.suggested_candidates.length < 3) {
       const primaryFile = codeFiles[0];
-      const moduleName = path.basename(primaryFile, path.extname(primaryFile));
+      const rawModuleName = path.basename(primaryFile, path.extname(primaryFile));
+      const cleanModuleSlug = rawModuleName.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/--+/g, '-').replace(/^-|-$/g, '') || 'module';
       result.suggested_candidates.push({
-        slug: `${moduleName}-session-patterns`,
-        title: `${moduleName} Architecture & Implementation Decisions`,
+        slug: `${cleanModuleSlug}-session-patterns`,
+        title: `${rawModuleName} Architecture & Implementation Decisions`,
         domain: 'architecture',
         type: 'convention',
         layer: 'workspace',
-        description: `When modifying or extending the ${moduleName} module`,
-        suggested_body: `# ${moduleName} Architecture & Implementation Decisions\n\n## Why It Matters\nCore architectural logic was updated in ${primaryFile}.\n\n## How to Apply\n- Maintain separation between core domain logic and platform adapters.\n- Verify cross-platform path resolution.`
+        description: `When modifying or extending the ${rawModuleName} module`,
+        suggested_body: `# ${rawModuleName} Architecture & Implementation Decisions\n\n## Why It Matters\nCore architectural logic was updated in ${primaryFile}.\n\n## How to Apply\n- Maintain separation between core domain logic and platform adapters.\n- Verify cross-platform path resolution.`
       });
     }
   }
 
   // 2. Trajectory-Based User Feedback, Corrections & Preference / "Ways of Working" Elicitation
   const feedbackTexts = [
-    ...toTextArray(options.userFeedback),
-    ...toTextArray(options.feedback)
+    ...toTextArray(resolvedOptions.userFeedback),
+    ...toTextArray(resolvedOptions.feedback)
   ];
 
-  if (Array.isArray(options.transcript)) {
-    for (const item of options.transcript) {
+  if (Array.isArray(resolvedOptions.transcript)) {
+    for (const item of resolvedOptions.transcript) {
       if (item && typeof item === 'object') {
         const isUser = item.role === 'user' || item.type === 'USER_INPUT' || item.source === 'USER_EXPLICIT';
         if (isUser && item.content) {
@@ -187,8 +229,8 @@ export function autoElicitSessionKnowledge(workspaceRoot = process.cwd(), option
         }
       }
     }
-  } else if (typeof options.transcript === 'string') {
-    feedbackTexts.push(options.transcript);
+  } else if (typeof resolvedOptions.transcript === 'string') {
+    feedbackTexts.push(resolvedOptions.transcript);
   }
 
   let userPrefSignals = 0;
@@ -199,6 +241,7 @@ export function autoElicitSessionKnowledge(workspaceRoot = process.cwd(), option
     const isProseRewrite = /rewrite that prose|less verbose|be concise|more concise|too verbose|too wordy|conclusions? instead of detailed analysis|document(?:ing)? the conclusions|documenting conclusions|focus on conclusions|just the conclusions|conclusions first|brief prose|summary instead of analysis/i.test(text);
     if (isProseRewrite) {
       userPrefSignals++;
+      result.signal_evidence.user_preference_excerpts.push(text.slice(0, 200));
       if (!result.suggested_candidates.some(c => c.slug === 'user-preference-concise-conclusions')) {
         result.suggested_candidates.push({
           slug: 'user-preference-concise-conclusions',
@@ -217,9 +260,11 @@ export function autoElicitSessionKnowledge(workspaceRoot = process.cwd(), option
     const preferMatch = text.match(/prefer\s+([^,.;\n]+?)\s+(?:over|instead of)\s+([^,.;\n]+)/i);
     if (preferMatch) {
       userPrefSignals++;
+      result.signal_evidence.user_preference_excerpts.push(text.slice(0, 200));
       const preferred = preferMatch[1].trim();
       const avoided = preferMatch[2].trim();
-      const slug = `user-preference-${preferred.replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase()}`.replace(/--+/g, '-').slice(0, 40);
+      const prefPart = preferred.replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase().replace(/--+/g, '-').slice(0, 24).replace(/^-+|-+$/g, '') || 'custom';
+      const slug = `user-preference-${prefPart}`.slice(0, 40).replace(/-+$/g, '');
       if (!result.suggested_candidates.some(c => c.slug === slug)) {
         result.suggested_candidates.push({
           slug,
@@ -236,11 +281,11 @@ export function autoElicitSessionKnowledge(workspaceRoot = process.cwd(), option
   }
 
   // 3. Trajectory-Based Zero-Code Debugging Capture
-  const rawErrorLogs = toTextArray(options.errorLogs);
+  const rawErrorLogs = toTextArray(resolvedOptions.errorLogs);
   const errorTexts = [...rawErrorLogs];
 
   // Only extract failed commands from recentCommands to prevent false positives on benign commands
-  const rawCommands = Array.isArray(options.recentCommands) ? options.recentCommands : (options.recentCommands ? [options.recentCommands] : []);
+  const rawCommands = Array.isArray(resolvedOptions.recentCommands) ? resolvedOptions.recentCommands : (resolvedOptions.recentCommands ? [resolvedOptions.recentCommands] : []);
   for (const cmd of rawCommands) {
     if (!cmd) continue;
     if (typeof cmd === 'object') {
@@ -254,8 +299,8 @@ export function autoElicitSessionKnowledge(workspaceRoot = process.cwd(), option
     }
   }
 
-  if (Array.isArray(options.transcript)) {
-    for (const item of options.transcript) {
+  if (Array.isArray(resolvedOptions.transcript)) {
+    for (const item of resolvedOptions.transcript) {
       if (item && typeof item === 'object' && item.content) {
         const textContent = typeof item.content === 'string' ? item.content : JSON.stringify(item.content);
         const errorMatches = textContent.match(/(?:Error:|Exception:|failed with exit code \d+|ENOENT|ECONNREFUSED|TypeError:|AssertionError:)[^\n]+/gi);
@@ -264,8 +309,8 @@ export function autoElicitSessionKnowledge(workspaceRoot = process.cwd(), option
         }
       }
     }
-  } else if (typeof options.transcript === 'string') {
-    const errorMatches = options.transcript.match(/(?:Error:|Exception:|failed with exit code \d+|ENOENT|ECONNREFUSED|TypeError:|AssertionError:)[^\n]+/gi);
+  } else if (typeof resolvedOptions.transcript === 'string') {
+    const errorMatches = resolvedOptions.transcript.match(/(?:Error:|Exception:|failed with exit code \d+|ENOENT|ECONNREFUSED|TypeError:|AssertionError:)[^\n]+/gi);
     if (errorMatches) {
       errorTexts.push(...errorMatches.slice(0, 3));
     }
@@ -280,10 +325,11 @@ export function autoElicitSessionKnowledge(workspaceRoot = process.cwd(), option
 
     if (errorMatch) {
       debugSignals++;
+      result.signal_evidence.error_log_excerpts.push(errText.slice(0, 200));
       const rawSnippet = errorMatch[0].trim();
       const errSnippet = rawSnippet.slice(0, 60);
       const cleanPart = errSnippet.replace(/^(?:Error|Exception|TypeError|AssertionError|Fatal|Crash):\s*/i, '');
-      const errSlugPart = cleanPart.replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase().replace(/--+/g, '-').slice(0, 30);
+      const errSlugPart = cleanPart.replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase().replace(/--+/g, '-').slice(0, 30).replace(/^-+|-+$/g, '');
       const slug = `debug-gotcha-${errSlugPart || 'runtime-issue'}`;
       if (!result.suggested_candidates.some(c => c.slug === slug)) {
         result.suggested_candidates.push({
@@ -301,7 +347,7 @@ export function autoElicitSessionKnowledge(workspaceRoot = process.cwd(), option
     }
   }
 
-  const hasExplicitContext = Boolean(options.transcript || options.userFeedback || options.feedback || options.errorLogs || options.force);
+  const hasExplicitContext = Boolean(resolvedOptions.transcript || resolvedOptions.userFeedback || resolvedOptions.feedback || resolvedOptions.errorLogs || resolvedOptions.force);
   result.elicitation_needed = (result.has_uncommitted_changes || result.suggested_candidates.length > 0) && (hasExplicitContext || result.recent_memory_captures === 0);
 
   if (result.suggested_candidates.length > 0) {

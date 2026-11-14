@@ -7,15 +7,16 @@ import { resolveStoragePaths } from '../core/storage-paths.js';
 import { startStudioServer, openBrowser } from '../../bin/studio.js';
 
 let activeStudioInstance = null;
+let activeStudioWorkspace = null;
 
 /**
  * Universal Visual Memory Studio Launcher.
- * 
+ *
  * Provides native dual-platform dispatch:
  * - Google Antigravity: Generates self-contained Generative UI HTML artifact and returns <agent-embed> inline widget.
  * - Anthropic Claude Code: Launches background HTTP persistence server (127.0.0.1:4242), automatically opens browser,
  *   and provides clickable CLI fallbacks with direct browser-to-disk persistence (/api/patch).
- * 
+ *
  * @param {string} [workspaceRoot=process.cwd()] Project root directory
  * @param {Object} [options={}] Options { mode: 'auto'|'in_chat'|'browser', compact: boolean, autoOpen: boolean, port: number }
  * @returns {Promise<Object>} Execution status and launch metadata
@@ -28,9 +29,11 @@ export async function renderVisualMemoryStudio(workspaceRoot = process.cwd(), op
     options.platform === 'claude'
   );
 
-  const mode = options.mode || (isClaudeCode ? 'browser' : 'in_chat');
-  const graphData = getKnowledgeGraphData(workspaceRoot);
-  const paths = resolveStoragePaths(workspaceRoot);
+  const resolvedWorkspace = path.resolve(workspaceRoot);
+  const requestedMode = (options.mode && options.mode !== 'auto') ? options.mode : null;
+  const mode = requestedMode || (isClaudeCode ? 'browser' : 'in_chat');
+  const graphData = getKnowledgeGraphData(resolvedWorkspace);
+  const paths = resolveStoragePaths(resolvedWorkspace);
 
   // Determine artifact directory for HTML persistence
   let artifactDir = options.artifactDir || process.env.ARTIFACT_DIR;
@@ -40,16 +43,52 @@ export async function renderVisualMemoryStudio(workspaceRoot = process.cwd(), op
     } else if (process.env.GEMINI_HOME) {
       artifactDir = path.join(process.env.GEMINI_HOME, 'artifacts');
     } else {
-      artifactDir = path.join(paths.workspaceDir, '..');
+      artifactDir = path.join(paths.baseDir, 'artifacts');
     }
   }
 
   const htmlFileName = options.fileName || 'memory-studio.html';
   const htmlPath = path.join(artifactDir, htmlFileName);
 
-  const htmlContent = generateKnowledgeGraphHtml(workspaceRoot, {
-    compact: options.compact ?? (mode === 'in_chat'),
-    serverUrl: activeStudioInstance?.url || `http://localhost:${options.port || 4242}`
+  // Start or reuse Studio HTTP server BEFORE rendering HTML in browser mode so the resolved port & token are embedded
+  const requestedPort = options.port ?? 4242;
+  let serverInfo = null;
+  if (mode === 'browser' || (isClaudeCode && mode !== 'in_chat')) {
+    serverInfo = activeStudioInstance;
+    if (serverInfo && (activeStudioWorkspace !== resolvedWorkspace || serverInfo.server?.listening === false)) {
+      await stopStudioService();
+      serverInfo = null;
+    }
+    if (!serverInfo) {
+      try {
+        serverInfo = await startStudioServer({
+          workspaceRoot: resolvedWorkspace,
+          port: requestedPort,
+          strictPort: options.strictPort ?? false,
+          autoOpen: options.autoOpen ?? true
+        });
+        activeStudioInstance = serverInfo;
+        activeStudioWorkspace = resolvedWorkspace;
+      } catch (err) {
+        serverInfo = { url: `http://127.0.0.1:${requestedPort}`, studioToken: '', serverStarted: false, error: err.message };
+      }
+    } else if (options.autoOpen !== false) {
+      openBrowser(serverInfo.url);
+    }
+  } else if (
+    activeStudioInstance &&
+    activeStudioWorkspace === resolvedWorkspace &&
+    activeStudioInstance.server?.listening !== false
+  ) {
+    serverInfo = activeStudioInstance;
+  }
+
+  const resolvedServerUrl = serverInfo?.server ? serverInfo.url : '';
+  const isCompact = Boolean(options.compact ?? (mode === 'in_chat'));
+  const htmlContent = generateKnowledgeGraphHtml(resolvedWorkspace, {
+    compact: isCompact,
+    serverUrl: resolvedServerUrl,
+    studioToken: serverInfo?.server ? (serverInfo?.studioToken || '') : ''
   });
 
   try {
@@ -59,35 +98,26 @@ export async function renderVisualMemoryStudio(workspaceRoot = process.cwd(), op
 
   // 1. Claude Code Fallback: Local HTTP persistence daemon + automatic browser open
   if (mode === 'browser' || (isClaudeCode && mode !== 'in_chat')) {
-    let serverInfo = activeStudioInstance;
-    if (!serverInfo) {
-      try {
-        serverInfo = await startStudioServer({
-          workspaceRoot,
-          port: options.port || 4242,
-          autoOpen: options.autoOpen ?? true
-        });
-        activeStudioInstance = serverInfo;
-      } catch {
-        serverInfo = { url: `http://localhost:${options.port || 4242}` };
-      }
-    } else if (options.autoOpen !== false) {
-      openBrowser(serverInfo.url);
-    }
-
+    const serverStarted = Boolean(serverInfo?.server);
     return {
-      status: 'ready',
+      status: serverStarted ? 'ready' : 'offline_fallback',
+      serverStarted,
       platform: 'claude_code',
       mode: 'browser',
+      compact: isCompact,
+      workspace: resolvedWorkspace,
       serverUrl: serverInfo.url,
       offlineHtmlPath: htmlPath,
+      ...(serverInfo?.error ? { error: serverInfo.error } : {}),
       stats: {
         nodes: graphData.nodes.length,
         links: graphData.links.length,
         staleCount: graphData.summary.staleNodesCount,
         domains: graphData.summary.domains
       },
-      message: `Visual Memory Studio active at ${serverInfo.url}. Browser launched with direct browser-to-disk persistence via /api/patch.`
+      message: serverStarted
+        ? `Visual Memory Studio active at ${serverInfo.url}. Browser launched with direct browser-to-disk persistence via /api/patch.`
+        : `Visual Memory Studio HTTP server could not start (${serverInfo?.error || 'unknown error'}). Generated offline HTML at ${htmlPath}.`
     };
   }
 
@@ -97,6 +127,7 @@ export async function renderVisualMemoryStudio(workspaceRoot = process.cwd(), op
     status: 'ready',
     platform: 'antigravity',
     mode: 'in_chat',
+    compact: isCompact,
     artifactPath: htmlPath,
     embedTag: embedCode,
     stats: {
@@ -115,6 +146,7 @@ export async function renderVisualMemoryStudio(workspaceRoot = process.cwd(), op
 export async function stopStudioService() {
   if (activeStudioInstance && typeof activeStudioInstance.close === 'function') {
     await activeStudioInstance.close();
-    activeStudioInstance = null;
   }
+  activeStudioInstance = null;
+  activeStudioWorkspace = null;
 }

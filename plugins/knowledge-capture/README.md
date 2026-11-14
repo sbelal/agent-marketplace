@@ -118,7 +118,7 @@ The plugin includes a lightweight, zero-dependency Node.js stdio **Model Context
 2. **`SessionEnd` Sentinel (`bin/session-end.js`):**
    - Fires exclusively upon session wrap-up / termination (mapped to `SessionEnd` to eliminate alert fatigue during normal user interrupts).
    - Audits uncommitted workspace modifications.
-   - If files were changed without new memory recorded, injects an auto-elicitation reminder prompting the agent to preserve tacit decisions via `/kc-elicit` or `/kc-capture`.
+   - If files were changed without new memory recorded, injects an auto-elicitation reminder prompting the agent to preserve tacit decisions via `/kc-elicit` or `save_memory_entry`.
 
 ---
 

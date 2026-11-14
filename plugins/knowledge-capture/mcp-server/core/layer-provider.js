@@ -12,15 +12,51 @@ import { atomicWriteFileSync } from './memory-store.js';
 function findFileCaseInsensitive(dir, fileName) {
   if (!fs.existsSync(dir)) return null;
   const directPath = path.join(dir, fileName);
-  if (fs.existsSync(directPath)) return directPath;
+  try {
+    if (fs.existsSync(directPath) && fs.statSync(directPath).isFile()) {
+      return directPath;
+    }
+  } catch {}
   try {
     const target = fileName.toLowerCase();
-    const files = fs.readdirSync(dir);
-    const match = files.find(f => f.toLowerCase() === target);
-    return match ? path.join(dir, match) : null;
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    const match = entries.find(e => e.isFile() && e.name.toLowerCase() === target);
+    return match ? path.join(dir, match.name) : null;
   } catch {
     return null;
   }
+}
+
+function findFileInLayerDir(dir, cleanSlug) {
+  const flatMatch = findFileCaseInsensitive(dir, `${cleanSlug}.md`);
+  if (flatMatch) {
+    return { path: flatMatch, slug: path.basename(flatMatch, '.md') };
+  }
+
+  const lowerTarget = cleanSlug.toLowerCase();
+  const allMd = findMarkdownFiles(dir);
+  for (const filePath of allMd) {
+    const base = path.basename(filePath, '.md');
+    if (base.toUpperCase() === 'README') continue;
+    if (base.toLowerCase() === lowerTarget) {
+      return { path: filePath, slug: base };
+    }
+  }
+
+  for (const filePath of allMd) {
+    const base = path.basename(filePath, '.md');
+    if (base.toUpperCase() === 'README') continue;
+    try {
+      const content = fs.readFileSync(filePath, 'utf8');
+      const parsed = parseYamlFrontmatter(content);
+      const fmSlug = (parsed.frontmatter.slug || parsed.frontmatter.name || '').replace(/\.md$/i, '');
+      if (fmSlug && fmSlug.toLowerCase() === lowerTarget) {
+        return { path: filePath, slug: fmSlug };
+      }
+    } catch {}
+  }
+
+  return null;
 }
 
 export class LayerProvider {
@@ -79,7 +115,7 @@ export class LayerProvider {
           scope: 'global'
         });
       }
-    } else {
+    } else if (!this.settings?.teamRepos || this.settings.teamRepos.length === 0) {
       layers.push({
         key: 'team',
         teamSlug: 'default',
@@ -103,13 +139,12 @@ export class LayerProvider {
     if (this.paths.activeTeamDirs && this.paths.activeTeamDirs.length > 0) {
       if (teamSlug) {
         const match = this.paths.activeTeamDirs.find(r => r.slug.toLowerCase() === teamSlug.toLowerCase());
-        if (match) return match.dir;
-        if (teamSlug.toLowerCase() === 'default' && fs.existsSync(this.paths.teamDir)) {
-          return this.paths.teamDir;
-        }
-        return null;
+        return match ? match.dir : null;
       }
       return this.paths.activeTeamDirs[0].dir;
+    }
+    if (this.settings?.teamRepos && this.settings.teamRepos.length > 0) {
+      return null;
     }
     return (!teamSlug || teamSlug.toLowerCase() === 'default') ? this.paths.teamDir : null;
   }
@@ -123,21 +158,20 @@ export class LayerProvider {
     if (!slug) return null;
     const cleanSlug = path.basename(slug.trim()).replace(/\.md$/i, '');
     const normLayer = (targetLayer || 'all').toLowerCase();
-    const fileName = `${cleanSlug}.md`;
 
     // 1. Workspace
     if (normLayer === 'all' || normLayer === 'workspace') {
-      const p = findFileCaseInsensitive(this.paths.workspaceDir, fileName);
-      if (p) {
-        return { layer: 'workspace', teamSlug: null, path: p, slug: path.basename(p, '.md') };
+      const match = findFileInLayerDir(this.paths.workspaceDir, cleanSlug);
+      if (match) {
+        return { layer: 'workspace', teamSlug: null, path: match.path, slug: match.slug };
       }
     }
 
     // 2. Private
     if (normLayer === 'all' || normLayer === 'private') {
-      const p = findFileCaseInsensitive(this.paths.privateDir, fileName);
-      if (p) {
-        return { layer: 'private', teamSlug: null, path: p, slug: path.basename(p, '.md') };
+      const match = findFileInLayerDir(this.paths.privateDir, cleanSlug);
+      if (match) {
+        return { layer: 'private', teamSlug: null, path: match.path, slug: match.slug };
       }
     }
 
@@ -150,16 +184,15 @@ export class LayerProvider {
       if (this.paths.activeTeamDirs && this.paths.activeTeamDirs.length > 0) {
         for (const tRepo of this.paths.activeTeamDirs) {
           if (targetTeamSlug && tRepo.slug.toLowerCase() !== targetTeamSlug) continue;
-          const p = findFileCaseInsensitive(tRepo.dir, fileName);
-          if (p) {
-            return { layer: 'team', teamSlug: tRepo.slug, path: p, slug: path.basename(p, '.md') };
+          const match = findFileInLayerDir(tRepo.dir, cleanSlug);
+          if (match) {
+            return { layer: 'team', teamSlug: tRepo.slug, path: match.path, slug: match.slug };
           }
         }
-      }
-      if (!targetTeamSlug || targetTeamSlug === 'default') {
-        const p = findFileCaseInsensitive(this.paths.teamDir, fileName);
-        if (p) {
-          return { layer: 'team', teamSlug: 'default', path: p, slug: path.basename(p, '.md') };
+      } else if ((!this.settings?.teamRepos || this.settings.teamRepos.length === 0) && (!targetTeamSlug || targetTeamSlug === 'default')) {
+        const match = findFileInLayerDir(this.paths.teamDir, cleanSlug);
+        if (match) {
+          return { layer: 'team', teamSlug: 'default', path: match.path, slug: match.slug };
         }
       }
     }

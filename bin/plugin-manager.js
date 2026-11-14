@@ -7,8 +7,9 @@
  */
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
-const { execSync } = require('child_process');
+const { execFileSync } = require('child_process');
 const {
   getPluginsConfig,
   findSourceEntry,
@@ -18,6 +19,17 @@ const {
 } = require('./source-manager');
 
 const DEFAULT_EXCLUDES = ['.git', 'node_modules', '.DS_Store', 'Thumbs.db'];
+const VALID_PLUGIN_ID_RE = /^[a-zA-Z0-9_-]+$/;
+
+function getDefaultHomeDir() {
+  return process.env.USERPROFILE || process.env.HOME || os.homedir();
+}
+
+function assertValidPluginId(pluginId) {
+  if (!pluginId || typeof pluginId !== 'string' || !VALID_PLUGIN_ID_RE.test(pluginId)) {
+    throw new Error(`Invalid plugin ID '${pluginId}'. Must match ${VALID_PLUGIN_ID_RE}.`);
+  }
+}
 
 // ==========================================
 // PURE QUERIES (Resolution & Calculation)
@@ -29,7 +41,7 @@ const DEFAULT_EXCLUDES = ['.git', 'node_modules', '.DS_Store', 'Thumbs.db'];
  * @param {string} homeDir 
  * @returns {string} Path to ~/.gemini/config/config.json
  */
-function resolveUserConfigPath(homeDir = (process.env.USERPROFILE || process.env.HOME || '')) {
+function resolveUserConfigPath(homeDir = getDefaultHomeDir()) {
   if (!homeDir) return '';
   return path.join(homeDir, '.gemini', 'config', 'config.json');
 }
@@ -60,7 +72,7 @@ function getUserConfig(configPath) {
  * @param {string} homeDir 
  * @returns {boolean}
  */
-function isPluginEnabled(pluginId, homeDir = (process.env.USERPROFILE || process.env.HOME || '')) {
+function isPluginEnabled(pluginId, homeDir = getDefaultHomeDir()) {
   const configPath = resolveUserConfigPath(homeDir);
   const cfg = getUserConfig(configPath);
   if (!cfg.plugins || !cfg.plugins[pluginId]) {
@@ -114,7 +126,8 @@ function calculateConfigWithRemovedPlugin(currentConfig, pluginId) {
  * @param {string} homeDir 
  * @returns {string} Absolute install destination path
  */
-function resolvePluginInstallPath(pluginId, scope, workspaceDir = process.cwd(), homeDir = (process.env.USERPROFILE || process.env.HOME || '')) {
+function resolvePluginInstallPath(pluginId, scope, workspaceDir = process.cwd(), homeDir = getDefaultHomeDir()) {
+  assertValidPluginId(pluginId);
   if (scope === 'workspace') {
     return path.join(workspaceDir, '.agents', 'plugins', pluginId);
   }
@@ -241,7 +254,7 @@ function compareVersions(v1, v2) {
  * @param {string} homeDir 
  * @returns {Object} Full inventory report
  */
-function getPluginInventory(repoRoot, workspaceDir = process.cwd(), homeDir = (process.env.USERPROFILE || process.env.HOME || '')) {
+function getPluginInventory(repoRoot, workspaceDir = process.cwd(), homeDir = getDefaultHomeDir()) {
   const available = getAvailablePlugins(repoRoot);
   const pluginsSrcDir = path.join(repoRoot, 'plugins');
 
@@ -307,7 +320,7 @@ function getPluginInventory(repoRoot, workspaceDir = process.cwd(), homeDir = (p
  * @param {string} homeDir 
  * @returns {Object} State and filtered relevant actions
  */
-function getSystemInstallationState(repoRoot, workspaceDir = process.cwd(), homeDir = (process.env.USERPROFILE || process.env.HOME || '')) {
+function getSystemInstallationState(repoRoot, workspaceDir = process.cwd(), homeDir = getDefaultHomeDir()) {
   const inventory = getPluginInventory(repoRoot, workspaceDir, homeDir);
   const isGlobalSource = inventory.sources.global.active;
   const isWorkspaceSource = inventory.sources.workspace.active;
@@ -477,7 +490,7 @@ function getSystemInstallationState(repoRoot, workspaceDir = process.cwd(), home
  * @param {string} homeDir 
  * @returns {{ hasUpdate: boolean, details: Array<{ id: string, name: string, currentVersion: string, availableVersion: string, scope: string }> }}
  */
-function checkMarketplaceUpdates(repoRoot, workspaceDir = process.cwd(), homeDir = (process.env.USERPROFILE || process.env.HOME || '')) {
+function checkMarketplaceUpdates(repoRoot, workspaceDir = process.cwd(), homeDir = getDefaultHomeDir()) {
   const inventory = getPluginInventory(repoRoot, workspaceDir, homeDir);
   const details = [];
 
@@ -509,18 +522,47 @@ function checkMarketplaceUpdates(repoRoot, workspaceDir = process.cwd(), homeDir
 
   const checkGitDir = (dir) => {
     if (!fs.existsSync(path.join(dir, '.git'))) return 0;
+    const gitEnv = { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_SSH_COMMAND: 'ssh -o BatchMode=yes -o ConnectTimeout=3' };
     try {
-      execSync('git fetch --dry-run origin', {
+      execFileSync('git', ['fetch', '--quiet', 'origin'], {
         cwd: dir,
         timeout: 2500,
-        env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_SSH_COMMAND: 'ssh -o BatchMode=yes -o ConnectTimeout=3' },
+        env: gitEnv,
         stdio: ['ignore', 'pipe', 'ignore']
       });
-      const behind = execSync('git rev-list HEAD..origin/main --count', {
+      let upstreamRef = null;
+      try {
+        const symRef = execFileSync('git', ['symbolic-ref', 'refs/remotes/origin/HEAD'], {
+          cwd: dir,
+          timeout: 1500,
+          encoding: 'utf8',
+          env: gitEnv,
+          stdio: ['ignore', 'pipe', 'ignore']
+        }).trim();
+        if (symRef.startsWith('refs/remotes/')) {
+          upstreamRef = symRef.slice('refs/remotes/'.length);
+        }
+      } catch {}
+      if (!upstreamRef) {
+        for (const candidate of ['origin/main', 'origin/master']) {
+          try {
+            execFileSync('git', ['rev-parse', '--verify', '--quiet', candidate], {
+              cwd: dir,
+              timeout: 1500,
+              env: gitEnv,
+              stdio: 'ignore'
+            });
+            upstreamRef = candidate;
+            break;
+          } catch {}
+        }
+      }
+      if (!upstreamRef) return 0;
+      const behind = execFileSync('git', ['rev-list', `HEAD..${upstreamRef}`, '--count'], {
         cwd: dir,
         timeout: 1500,
         encoding: 'utf8',
-        env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+        env: gitEnv,
         stdio: ['ignore', 'pipe', 'ignore']
       }).trim();
       return parseInt(behind, 10) || 0;
@@ -531,7 +573,14 @@ function checkMarketplaceUpdates(repoRoot, workspaceDir = process.cwd(), homeDir
 
   if (inventory.sources.global.active || inventory.sources.workspace.active) {
     const permanentClone = homeDir ? path.join(homeDir, '.gemini', 'sources', 'agent-marketplace') : '';
-    if (permanentClone && fs.existsSync(permanentClone)) {
+    const activeEntry = findMarketplaceSourceEntry({ entries: inventory.sources.workspace.entries }, repoRoot, homeDir)
+      || findMarketplaceSourceEntry({ entries: inventory.sources.global.entries }, repoRoot, homeDir);
+    const activeRepoDir = activeEntry && activeEntry.path
+      ? (path.basename(activeEntry.path) === 'plugins' ? path.dirname(activeEntry.path) : activeEntry.path)
+      : '';
+    if (activeRepoDir && fs.existsSync(path.join(activeRepoDir, '.git'))) {
+      sourceCommitsBehind = checkGitDir(activeRepoDir);
+    } else if (permanentClone && fs.existsSync(permanentClone)) {
       sourceCommitsBehind = checkGitDir(permanentClone);
     } else if (fs.existsSync(path.join(repoRoot, '.git'))) {
       sourceCommitsBehind = checkGitDir(repoRoot);
@@ -629,7 +678,8 @@ function writeUserConfig(configPath, config) {
  * @param {string} homeDir 
  * @returns {boolean}
  */
-function setPluginEnabled(pluginId, enabled = true, homeDir = (process.env.USERPROFILE || process.env.HOME || '')) {
+function setPluginEnabled(pluginId, enabled = true, homeDir = getDefaultHomeDir()) {
+  assertValidPluginId(pluginId);
   const configPath = resolveUserConfigPath(homeDir);
   if (!configPath) return false;
 
@@ -639,7 +689,7 @@ function setPluginEnabled(pluginId, enabled = true, homeDir = (process.env.USERP
 
   try {
     const subcmd = enabled ? 'enable' : 'disable';
-    execSync(`agy plugin ${subcmd} "${pluginId}"`, { stdio: 'ignore' });
+    execFileSync('agy', ['plugin', subcmd, pluginId], { stdio: 'ignore' });
   } catch (err) {
     // Suppress CLI failure, config.json is already updated
   }
@@ -654,7 +704,8 @@ function setPluginEnabled(pluginId, enabled = true, homeDir = (process.env.USERP
  * @param {string} homeDir 
  * @returns {boolean}
  */
-function removePluginFromConfig(pluginId, homeDir = (process.env.USERPROFILE || process.env.HOME || '')) {
+function removePluginFromConfig(pluginId, homeDir = getDefaultHomeDir()) {
+  assertValidPluginId(pluginId);
   const configPath = resolveUserConfigPath(homeDir);
   if (!configPath) return false;
 
@@ -663,7 +714,7 @@ function removePluginFromConfig(pluginId, homeDir = (process.env.USERPROFILE || 
   writeUserConfig(configPath, updated);
 
   try {
-    execSync(`agy plugin disable "${pluginId}"`, { stdio: 'ignore' });
+    execFileSync('agy', ['plugin', 'disable', pluginId], { stdio: 'ignore' });
   } catch (err) {
     // Suppress CLI failure
   }
@@ -681,7 +732,7 @@ function removePluginFromConfig(pluginId, homeDir = (process.env.USERPROFILE || 
  * @param {string} homeDir 
  * @returns {{ success: boolean, targetPath: string, version: string, activated: boolean }}
  */
-function installPlugin(pluginId, repoRoot, scope, workspaceDir = process.cwd(), homeDir = (process.env.USERPROFILE || process.env.HOME || '')) {
+function installPlugin(pluginId, repoRoot, scope, workspaceDir = process.cwd(), homeDir = getDefaultHomeDir()) {
   const available = getAvailablePlugins(repoRoot);
   const plugin = available.find(p => p.id.toLowerCase() === pluginId.toLowerCase());
 
@@ -718,7 +769,7 @@ function installPlugin(pluginId, repoRoot, scope, workspaceDir = process.cwd(), 
  * @param {string} homeDir 
  * @returns {{ success: boolean, targetPath: string }}
  */
-function uninstallPlugin(pluginId, scope, workspaceDir = process.cwd(), homeDir = (process.env.USERPROFILE || process.env.HOME || '')) {
+function uninstallPlugin(pluginId, scope, workspaceDir = process.cwd(), homeDir = getDefaultHomeDir()) {
   const targetPath = resolvePluginInstallPath(pluginId, scope, workspaceDir, homeDir);
 
   if (fs.existsSync(targetPath)) {
@@ -730,8 +781,21 @@ function uninstallPlugin(pluginId, scope, workspaceDir = process.cwd(), homeDir 
     const rootParent = path.dirname(pluginsParent);
     removeEmptyDirectory(rootParent);
 
-    // Remove activation entry from config.json
-    removePluginFromConfig(pluginId, homeDir);
+    // Only remove activation entry from config.json if not still installed in the other scope or mounted via source
+    const otherScope = scope === 'workspace' ? 'global' : 'workspace';
+    let stillInstalledOtherScope = false;
+    try {
+      const otherPath = resolvePluginInstallPath(pluginId, otherScope, workspaceDir, homeDir);
+      stillInstalledOtherScope = Boolean(otherPath && fs.existsSync(otherPath));
+    } catch {}
+    const wsCfg = getPluginsConfig(path.join(workspaceDir, '.agents', 'plugins.json'));
+    const glCfg = homeDir ? getPluginsConfig(path.join(homeDir, '.gemini', 'config', 'plugins.json')) : { entries: [] };
+    const stillMountedViaSource = [...(wsCfg.entries || []), ...(glCfg.entries || [])].some(
+      e => e && e.path && fs.existsSync(path.join(e.path, pluginId))
+    );
+    if (!stillInstalledOtherScope && !stillMountedViaSource) {
+      removePluginFromConfig(pluginId, homeDir);
+    }
 
     return { success: true, targetPath };
   }
@@ -749,19 +813,19 @@ function uninstallPlugin(pluginId, scope, workspaceDir = process.cwd(), homeDir 
  * @param {string} homeDir 
  * @returns {{ success: boolean, updated: boolean, fromVersion: string, toVersion: string, targetPath: string }}
  */
-function updatePlugin(pluginId, repoRoot, scope, workspaceDir = process.cwd(), homeDir = (process.env.USERPROFILE || process.env.HOME || '')) {
-  const targetPath = resolvePluginInstallPath(pluginId, scope, workspaceDir, homeDir);
-  const info = getInstalledPluginInfo(targetPath);
-
-  if (!info.installed) {
-    throw new Error(`Plugin '${pluginId}' is not installed in ${scope} scope.`);
-  }
-
+function updatePlugin(pluginId, repoRoot, scope, workspaceDir = process.cwd(), homeDir = getDefaultHomeDir()) {
   const available = getAvailablePlugins(repoRoot);
   const plugin = available.find(p => p.id.toLowerCase() === pluginId.toLowerCase());
 
   if (!plugin) {
     throw new Error(`Plugin '${pluginId}' not found in source repository.`);
+  }
+
+  const targetPath = resolvePluginInstallPath(plugin.id, scope, workspaceDir, homeDir);
+  const info = getInstalledPluginInfo(targetPath);
+
+  if (!info.installed) {
+    throw new Error(`Plugin '${plugin.id}' is not installed in ${scope} scope.`);
   }
 
   const comp = compareVersions(info.version, plugin.version);
@@ -776,7 +840,7 @@ function updatePlugin(pluginId, repoRoot, scope, workspaceDir = process.cwd(), h
   }
 
   // Execute update copy
-  installPlugin(pluginId, repoRoot, scope, workspaceDir, homeDir);
+  installPlugin(plugin.id, repoRoot, scope, workspaceDir, homeDir);
 
   return {
     success: true,

@@ -1,83 +1,109 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { normalizeWorkspaceId } from '../core/storage-paths.js';
 import { scanLayerEntries } from '../retrieval/shadow-resolver.js';
 import { parseYamlFrontmatter } from '../core/yaml-parser.js';
-import { generateMultiVector } from '../embeddings/multi-vector.js';
+import { generateMultiVector, generateMultiVectorAsync } from '../embeddings/multi-vector.js';
 import { computeDenseCosineSimilarity } from '../embeddings/heuristic-provider.js';
+import { getActiveEmbeddingConfig } from '../embeddings/onnx-provider.js';
+import { loadCachedVectorsMap } from '../db/indexer.js';
 
-/**
- * Semantic Contradiction & Codebase Drift Detection Engine.
- *
- * Audits memories across all active layers against:
- * 1. Semantic Contradictions: Conflicting rules on identical triggers or domains without explicit overrides.
- * 2. Codebase Drift: References to missing files, incompatible engine requirements, and verification staleness.
- */
-export function detectContradictionsAndDrift(workspaceRoot = process.cwd(), options = {}) {
-  const currentWsId = normalizeWorkspaceId(workspaceRoot);
-  const threshold = typeof options.threshold === 'number' ? options.threshold : 0.65;
+function escapeRegex(str) {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
 
-  const { activeEntries, shadowedEntries } = scanLayerEntries(workspaceRoot, 'all');
+function hasAffirmativeToolMention(text, tool) {
+  const toolRe = new RegExp(`\\b${escapeRegex(tool)}\\b`, 'i');
+  if (!toolRe.test(text)) return false;
 
-  let targetEntries = activeEntries;
-  if (options.domain) {
-    const dLower = options.domain.toLowerCase();
-    targetEntries = activeEntries.filter(e => (e.domain || '').toLowerCase() === dLower);
+  const lines = text.split(/\r?\n/);
+  const negationBeforeRe = new RegExp(`\\b(?:never|do\\s+not|don't|avoid|stop\\s+using|instead\\s+of|not\\s+use|replace)\\b[^\\n.;,]*\\b${escapeRegex(tool)}\\b`, 'i');
+  const negationAfterRe = new RegExp(`\\b${escapeRegex(tool)}\\b[^\\n.;,]*\\b(?:is\\s+deprecated|deprecated|prohibited|forbidden|must\\s+not|not\\s+allowed)\\b`, 'i');
+
+  for (const line of lines) {
+    if (!toolRe.test(line)) continue;
+    // Split on sentence & clause boundaries so "Never use npm. Always enforce npm" or commas isolate clauses
+    const clauses = line.split(/[,;.]+/);
+    for (const clause of clauses) {
+      if (!toolRe.test(clause)) continue;
+      if (!negationBeforeRe.test(clause) && !negationAfterRe.test(clause)) {
+        return true;
+      }
+    }
   }
+  return false;
+}
 
-  const slugMap = new Map();
-  const allKnownSlugs = new Map();
-  for (const entry of activeEntries) {
-    slugMap.set(entry.slug, entry);
-    allKnownSlugs.set(entry.slug.toLowerCase(), entry);
-  }
-  for (const entry of shadowedEntries) {
-    allKnownSlugs.set(entry.slug.toLowerCase(), entry);
-  }
+function findFileInWorkspace(workspaceRoot, ref) {
+  if (fs.existsSync(path.join(workspaceRoot, ref))) return true;
+  if (ref.includes('/') || ref.includes('\\')) return false;
 
-  const shadowedSet = new Set();
-  for (const shadowed of shadowedEntries) {
-    shadowedSet.add(`${shadowed.layerKey}:${shadowed.slug}`);
-    shadowedSet.add(shadowed.slug);
-  }
-
-  const contradictions = [];
-  const drifts = [];
-
-  const entryVectors = [];
-  for (const entry of targetEntries) {
-    let body = '';
-    let fm = {};
+  const targetLower = ref.toLowerCase();
+  const queue = [{ dir: workspaceRoot, depth: 0 }];
+  while (queue.length > 0) {
+    const { dir, depth } = queue.shift();
+    if (depth > 3) continue;
     try {
-      const raw = fs.readFileSync(entry.file, 'utf8');
-      const parsed = parseYamlFrontmatter(raw);
-      body = parsed.body || '';
-      fm = parsed.frontmatter || {};
+      const entries = fs.readdirSync(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        if (entry.isFile() && entry.name.toLowerCase() === targetLower) {
+          return true;
+        }
+        if (entry.isDirectory() && depth < 3 && !entry.name.startsWith('.') && entry.name !== 'node_modules') {
+          queue.push({ dir: path.join(dir, entry.name), depth: depth + 1 });
+        }
+      }
     } catch {}
-
-    const multiVec = generateMultiVector({
-      trigger: entry.trigger,
-      body,
-      slug: entry.slug,
-      domain: entry.domain,
-      type: entry.type,
-      related: entry.related
-    });
-
-    entryVectors.push({
-      entry,
-      body,
-      fm,
-      multiVec
-    });
   }
+  return false;
+}
+
+function extractAffirmativeConfigReferences(body) {
+  const refs = new Set();
+  const lines = body.split(/\r?\n/);
+  let inCodeBlock = false;
+  const negationLineRe = /\b(?:never|do\s+not|don't|avoid|instead\s+of|deprecated|obsolete|removed|replace)\b/i;
+  const filePattern = /(?:[a-zA-Z0-9_\-./]+\/)?(?:\.[a-zA-Z0-9_\-.]+|[a-zA-Z0-9_\-.]+)\.(?:json|ya?ml|toml|conf|config\.[a-z]+)\b/g;
+
+  for (const line of lines) {
+    if (line.trim().startsWith('```')) {
+      inCodeBlock = !inCodeBlock;
+      continue;
+    }
+    if (inCodeBlock || negationLineRe.test(line)) continue;
+
+    // Strip URLs and user home paths before extracting workspace config filenames
+    const cleanLine = line
+      .replace(/https?:\/\/\S+/gi, ' ')
+      .replace(/(?:^|[\s`('"])~\/\S+/g, ' ');
+
+    const matches = cleanLine.match(filePattern);
+    if (!matches) continue;
+    for (const cf of matches) {
+      const clean = cf.replace(/^\.\//, '');
+      const base = path.basename(clean).toLowerCase();
+      if (base.startsWith('.') || base.includes('config') || base.includes('docker') || base.includes('lint') || clean.includes('/')) {
+        refs.add(clean);
+      }
+    }
+  }
+  return Array.from(refs);
+}
+
+function analyzeContradictionsAndDrifts(workspaceRoot, entryVectors, allKnownSlugs, shadowedSet, options = {}) {
+  const hasExplicitThreshold = typeof options.threshold === 'number' && Number.isFinite(options.threshold);
+  const threshold = hasExplicitThreshold ? options.threshold : 0.65;
+  const contradictions = [];
+  const ambiguousPairs = [];
+  const drifts = [];
 
   for (let i = 0; i < entryVectors.length; i++) {
     for (let j = i + 1; j < entryVectors.length; j++) {
       const a = entryVectors[i];
       const b = entryVectors[j];
 
-      if (a.entry.overrides === b.entry.slug || b.entry.overrides === a.entry.slug) {
+      const aOverrides = (a.entry.overridesList || []).map(s => s.toLowerCase());
+      const bOverrides = (b.entry.overridesList || []).map(s => s.toLowerCase());
+      if (aOverrides.includes(b.entry.slug.toLowerCase()) || bOverrides.includes(a.entry.slug.toLowerCase())) {
         continue;
       }
       if (shadowedSet.has(`${a.entry.layerKey}:${a.entry.slug}`) || shadowedSet.has(`${b.entry.layerKey}:${b.entry.slug}`)) {
@@ -87,9 +113,9 @@ export function detectContradictionsAndDrift(workspaceRoot = process.cwd(), opti
       const triggerSim = computeDenseCosineSimilarity(a.multiVec.trigger_vector, b.multiVec.trigger_vector);
       const sameDomain = a.entry.domain && b.entry.domain && a.entry.domain === b.entry.domain;
 
-      if (triggerSim >= threshold || (sameDomain && triggerSim >= 0.50)) {
-        const textA = `${a.entry.trigger} ${a.body}`.toLowerCase();
-        const textB = `${b.entry.trigger} ${b.body}`.toLowerCase();
+      if (triggerSim >= threshold || (!hasExplicitThreshold && sameDomain && triggerSim >= 0.50)) {
+        const textA = `${a.entry.trigger}\n${a.body}`;
+        const textB = `${b.entry.trigger}\n${b.body}`;
 
         const toolchains = [
           ['pnpm', 'npm'],
@@ -106,8 +132,15 @@ export function detectContradictionsAndDrift(workspaceRoot = process.cwd(), opti
         let severity = 'medium';
 
         for (const [tool1, tool2] of toolchains) {
-          if ((textA.includes(tool1) && textB.includes(tool2)) || (textA.includes(tool2) && textB.includes(tool1))) {
-            conflictReason = `Opposing toolchain recommendations: ${a.entry.slug} mandates '${tool1}' while ${b.entry.slug} mandates '${tool2}'.`;
+          const aUses1 = hasAffirmativeToolMention(textA, tool1);
+          const bUses2 = hasAffirmativeToolMention(textB, tool2);
+          const aUses2 = hasAffirmativeToolMention(textA, tool2);
+          const bUses1 = hasAffirmativeToolMention(textB, tool1);
+
+          if ((aUses1 && !aUses2 && bUses2 && !bUses1) || (aUses2 && !aUses1 && bUses1 && !bUses2)) {
+            const firstTool = (aUses1 && !aUses2 && bUses2 && !bUses1) ? tool1 : tool2;
+            const secondTool = firstTool === tool1 ? tool2 : tool1;
+            conflictReason = `Opposing toolchain recommendations: ${a.entry.slug} mandates '${firstTool}' while ${b.entry.slug} mandates '${secondTool}'.`;
             severity = 'high';
             break;
           }
@@ -122,12 +155,22 @@ export function detectContradictionsAndDrift(workspaceRoot = process.cwd(), opti
           const bPos = positiveReg.test(textB);
           const bNeg = negativeReg.test(textB);
 
-          if ((aPos && bNeg) || (aNeg && bPos)) {
+          if ((aPos && !aNeg && bNeg && !bPos) || (aNeg && !aPos && bPos && !bNeg)) {
             conflictReason = `Direct directive polarity conflict: ${a.entry.slug} and ${b.entry.slug} prescribe conflicting mandatory vs prohibited rules for similar situations.`;
             severity = 'high';
           } else if (triggerSim >= 0.85) {
             conflictReason = `High trigger duplication without explicit inheritance: ${a.entry.slug} and ${b.entry.slug} fire on virtually identical scenarios (trigger similarity: ${Math.round(triggerSim * 100)}%).`;
             severity = 'medium';
+          } else if (triggerSim >= 0.55 && ((aPos && bNeg) || (aNeg && bPos))) {
+            ambiguousPairs.push({
+              slug_a: a.entry.slug,
+              slug_b: b.entry.slug,
+              domain: a.entry.domain || 'general',
+              trigger_similarity: Math.round(triggerSim * 100),
+              excerpt_a: textA.slice(0, 200).trim(),
+              excerpt_b: textB.slice(0, 200).trim(),
+              note: 'Both memories mix positive and negative directives on overlapping scenarios; verify nuance via LLM review.'
+            });
           }
         }
 
@@ -142,9 +185,18 @@ export function detectContradictionsAndDrift(workspaceRoot = process.cwd(), opti
             domain: a.entry.domain || 'general',
             trigger_similarity: Math.round(triggerSim * 100),
             conflict_reason: conflictReason,
-            remediation: a.entry.layerKey !== b.entry.layerKey
-              ? `Declare 'overrides: ${b.entry.layerKey === 'team' ? b.entry.slug : a.entry.slug}' in the higher-tier memory file.`
-              : `Consolidate ${a.entry.slug} and ${b.entry.slug} into a unified rule via /kc-consolidate.`
+            evidence: {
+              excerpt_a: textA.slice(0, 240).trim(),
+              excerpt_b: textB.slice(0, 240).trim()
+            },
+            remediation: (() => {
+              const rank = { workspace: 3, private: 2, team: 1 };
+              if (a.entry.layerKey !== b.entry.layerKey) {
+                const lowerEntry = (rank[a.entry.layerKey] || 0) >= (rank[b.entry.layerKey] || 0) ? b.entry : a.entry;
+                return `Declare 'overrides: ${lowerEntry.slug}' in the higher-tier memory file.`;
+              }
+              return `Consolidate ${a.entry.slug} and ${b.entry.slug} into a unified rule via /kc-consolidate.`;
+            })()
           });
         }
       }
@@ -180,7 +232,16 @@ export function detectContradictionsAndDrift(workspaceRoot = process.cwd(), opti
       });
     } else {
       const vDate = new Date(entry.verified);
-      if (!isNaN(vDate.getTime())) {
+      if (isNaN(vDate.getTime())) {
+        drifts.push({
+          slug: entry.slug,
+          layer: entry.layerKey,
+          type: 'invalid_verification',
+          severity: 'low',
+          detail: `Memory entry has an invalid 'verified' timestamp: '${entry.verified}'. Expected YYYY-MM-DD.`,
+          remediation: `Inspect rule accuracy and update 'verified: ${new Date().toISOString().slice(0, 10)}'.`
+        });
+      } else {
         const daysOld = Math.floor((now - vDate.getTime()) / ONE_DAY_MS);
         if (daysOld > 180) {
           drifts.push({
@@ -227,19 +288,9 @@ export function detectContradictionsAndDrift(workspaceRoot = process.cwd(), opti
       }
     }
 
-    const referencedFiles = [];
-    const configMatches = body.match(/\b([a-zA-Z0-9_\-\.]+\.(json|ya?ml|toml|conf|config\.[a-z]+))\b/g);
-    if (configMatches) {
-      for (const cf of configMatches) {
-        if (cf.startsWith('.') || cf.includes('config') || cf.includes('docker') || cf.includes('lint')) {
-          referencedFiles.push(cf);
-        }
-      }
-    }
-
-    for (const ref of [...new Set(referencedFiles)]) {
-      const fullPath = path.join(workspaceRoot, ref);
-      if (!fs.existsSync(fullPath)) {
+    const referencedFiles = extractAffirmativeConfigReferences(body);
+    for (const ref of referencedFiles) {
+      if (!findFileInWorkspace(workspaceRoot, ref)) {
         drifts.push({
           slug: entry.slug,
           layer: entry.layerKey,
@@ -251,14 +302,26 @@ export function detectContradictionsAndDrift(workspaceRoot = process.cwd(), opti
       }
     }
 
-    if (targetNodeEngine && body.includes('Node')) {
-      const match = body.match(/Node(?:\.js)?\s+(?:v|version\s+)?([0-9]+)/i);
-      if (match) {
-        const statedVersion = parseInt(match[1], 10);
-        const reqMatch = targetNodeEngine.match(/>=?\s*([0-9]+)/);
-        if (reqMatch) {
-          const minRequired = parseInt(reqMatch[1], 10);
-          if (statedVersion < minRequired) {
+    if (targetNodeEngine && /node/i.test(body)) {
+      const reqMatch = targetNodeEngine.match(/(?:>=?\s*|\^|~|^v?)([0-9]+)/);
+      if (reqMatch) {
+        const minRequired = parseInt(reqMatch[1], 10);
+        // Strip migration and negated expressions before scanning required Node.js versions
+        const sanitizedBody = body
+          .replace(
+            /\b(?:from|migrating\s+from|upgrading\s+from|dropped|legacy|never\s+use|do\s+not\s+use|don't\s+use|avoid|deprecated\s+in|prior\s+to)\s+Node(?:\.js)?\s+(?:v|version\s+)?[0-9]+(?:\s*(?:to|->|→)\s*Node(?:\.js)?\s+(?:v|version\s+)?[0-9]+)?/gi,
+            ' '
+          );
+        const versionRegex = /\bNode(\.js)?\s+(?:(v|version\s+))?([0-9]+)\b/gi;
+        const flaggedVersions = new Set();
+        let match;
+        while ((match = versionRegex.exec(sanitizedBody)) !== null) {
+          const hasExplicitJsOrPrefix = Boolean(match[1] || match[2]);
+          const statedVersion = parseInt(match[3], 10);
+          // Avoid false positives on graph/k8s/AST "node 0/1/2" when neither ".js" nor "v/version" is present
+          if (!hasExplicitJsOrPrefix && statedVersion < 6) continue;
+          if (statedVersion < minRequired && !flaggedVersions.has(statedVersion)) {
+            flaggedVersions.add(statedVersion);
             drifts.push({
               slug: entry.slug,
               layer: entry.layerKey,
@@ -278,8 +341,129 @@ export function detectContradictionsAndDrift(workspaceRoot = process.cwd(), opti
     total_memories_checked: entryVectors.length,
     contradictions_count: contradictions.length,
     drifts_count: drifts.length,
+    ambiguous_pairs_count: ambiguousPairs.length,
     status: (contradictions.length === 0 && drifts.length === 0) ? 'HEALTHY' : 'DRIFT_DETECTED',
     contradictions,
-    drifts
+    drifts,
+    ambiguous_pairs: ambiguousPairs
   };
+}
+
+function prepareEntriesForAudit(workspaceRoot, options = {}) {
+  const { activeEntries, shadowedEntries } = scanLayerEntries(workspaceRoot, 'all');
+  let targetEntries = activeEntries;
+  if (options.domain) {
+    const dLower = options.domain.toLowerCase();
+    targetEntries = activeEntries.filter(e => (e.domain || '').toLowerCase() === dLower);
+  }
+
+  const allKnownSlugs = new Map();
+  for (const entry of activeEntries) {
+    allKnownSlugs.set(entry.slug.toLowerCase(), entry);
+  }
+  for (const entry of shadowedEntries) {
+    allKnownSlugs.set(entry.slug.toLowerCase(), entry);
+  }
+
+  const shadowedSet = new Set();
+  for (const shadowed of shadowedEntries) {
+    shadowedSet.add(`${shadowed.layerKey}:${shadowed.slug}`);
+    shadowedSet.add(shadowed.slug);
+  }
+
+  const cachedVectors = loadCachedVectorsMap(workspaceRoot);
+  return { targetEntries, allKnownSlugs, shadowedSet, cachedVectors };
+}
+
+/**
+ * Synchronous Semantic Contradiction & Codebase Drift Detection Engine.
+ * Reuses cached SQLite vectors (including ONNX 384-d when indexed) or generates synchronous heuristic vectors.
+ */
+export function detectContradictionsAndDrift(workspaceRoot = process.cwd(), options = {}) {
+  const { targetEntries, allKnownSlugs, shadowedSet, cachedVectors } = prepareEntriesForAudit(workspaceRoot, options);
+
+  const entryVectors = [];
+  let hasUncached = false;
+  for (const entry of targetEntries) {
+    let body = '';
+    let fm = {};
+    try {
+      const raw = fs.readFileSync(entry.file, 'utf8');
+      const parsed = parseYamlFrontmatter(raw);
+      body = parsed.body || '';
+      fm = parsed.frontmatter || {};
+    } catch {}
+
+    const cacheKey = `${entry.layerKey}:${entry.teamSlug || ''}:${entry.file}`;
+    const cachedVec = cachedVectors.get(cacheKey);
+    if (!cachedVec) hasUncached = true;
+    const multiVec = cachedVec || generateMultiVector({
+      trigger: entry.trigger,
+      body,
+      slug: entry.slug,
+      domain: entry.domain,
+      type: entry.type,
+      related: entry.related
+    });
+
+    entryVectors.push({ entry, body, fm, multiVec });
+  }
+
+  if (hasUncached && entryVectors.some(ev => ev.multiVec.trigger_vector.length !== 128)) {
+    for (const ev of entryVectors) {
+      if (ev.multiVec.trigger_vector.length !== 128) {
+        ev.multiVec = generateMultiVector({
+          trigger: ev.entry.trigger,
+          body: ev.body,
+          slug: ev.entry.slug,
+          domain: ev.entry.domain,
+          type: ev.entry.type,
+          related: ev.entry.related
+        });
+      }
+    }
+  }
+
+  return analyzeContradictionsAndDrifts(workspaceRoot, entryVectors, allKnownSlugs, shadowedSet, options);
+}
+
+/**
+ * Async Semantic Contradiction & Codebase Drift Detection Engine.
+ * Uses active ONNX / Heuristic embedding provider for uncached entries.
+ */
+export async function detectContradictionsAndDriftAsync(workspaceRoot = process.cwd(), options = {}) {
+  const { targetEntries, allKnownSlugs, shadowedSet, cachedVectors } = prepareEntriesForAudit(workspaceRoot, options);
+  const activeConfig = getActiveEmbeddingConfig();
+
+  const entryVectors = [];
+  for (const entry of targetEntries) {
+    let body = '';
+    let fm = {};
+    try {
+      const raw = fs.readFileSync(entry.file, 'utf8');
+      const parsed = parseYamlFrontmatter(raw);
+      body = parsed.body || '';
+      fm = parsed.frontmatter || {};
+    } catch {}
+
+    const cacheKey = `${entry.layerKey}:${entry.teamSlug || ''}:${entry.file}`;
+    let multiVec = cachedVectors.get(cacheKey);
+    if (!multiVec) {
+      const vecInput = {
+        trigger: entry.trigger,
+        body,
+        slug: entry.slug,
+        domain: entry.domain,
+        type: entry.type,
+        related: entry.related
+      };
+      multiVec = activeConfig.engine === 'onnx'
+        ? await generateMultiVectorAsync(vecInput)
+        : generateMultiVector(vecInput);
+    }
+
+    entryVectors.push({ entry, body, fm, multiVec });
+  }
+
+  return analyzeContradictionsAndDrifts(workspaceRoot, entryVectors, allKnownSlugs, shadowedSet, options);
 }

@@ -87,6 +87,14 @@ export function getPersonaDirectives() {
   return '# Persona: Syran, The Logic Officer\n\nAdhere strictly to pure logic, formal precision, and probability-driven counsel. Do not use contractions.';
 }
 
+function resolvePluginVersion() {
+  try {
+    const pluginJson = JSON.parse(fs.readFileSync(path.join(pluginRoot, 'plugin.json'), 'utf8'));
+    if (pluginJson && pluginJson.version) return pluginJson.version;
+  } catch {}
+  return '1.1.0';
+}
+
 /**
  * Pure query: Retrieves operational status of the Logic Officer.
  * 
@@ -104,7 +112,7 @@ export function getPersonaStatus() {
       first_principles_reasoning: true,
       probability_analysis: true
     },
-    version: '1.1.0'
+    version: resolvePluginVersion()
   };
 }
 
@@ -116,23 +124,65 @@ export function getPersonaStatus() {
  * @returns {Object} Structured logical deconstruction
  */
 export function consultLogic(query, premise = '') {
-  if (!query || typeof query !== 'string') {
+  if (!query || typeof query !== 'string' || !query.trim()) {
     return {
       status: 'error',
       message: 'A valid proposition or query string is required for logical evaluation.'
     };
   }
 
-  const fallacies = analyzeLogicalFallacies(query + ' ' + premise);
-  const containsContraction = /\b(can't|don't|won't|isn't|aren't|haven't|hasn't|didn't|couldn't|shouldn't|wouldn't|it's|they're|we're|i'm|you're)\b/i.test(query);
+  const safePremise = typeof premise === 'string' ? premise : (premise == null ? '' : String(premise));
+  const combined = `${query} ${safePremise}`.trim();
+  const fallacies = analyzeLogicalFallacies(combined);
+  const contractionMatches = query.match(/\b(can't|don't|won't|isn't|aren't|haven't|hasn't|didn't|couldn't|shouldn't|wouldn't|it's|they're|we're|i'm|you're)\b/gi) || [];
+  const containsContraction = contractionMatches.length > 0;
+
+  const evidence = [];
+  for (const f of fallacies.detected) {
+    const m = combined.match(FALLACY_PATTERNS.find(p => p.name === f.name)?.pattern || /$^/);
+    evidence.push({
+      type: 'fallacy_pattern',
+      label: f.name,
+      category: f.category,
+      matched_text: m ? m[0] : null
+    });
+  }
+  if (containsContraction) {
+    evidence.push({
+      type: 'informal_contraction',
+      matched_terms: [...new Set(contractionMatches)]
+    });
+  }
+
+  const epistemicGaps = [];
+  if (!safePremise.trim()) {
+    epistemicGaps.push({
+      gap: 'missing_explicit_premise',
+      detail: 'No explicit underlying premise was supplied; deductive validity relies upon unstated assumptions.'
+    });
+  }
+  if (!/\d+(?:\.\d+)?%?/.test(combined)) {
+    epistemicGaps.push({
+      gap: 'unquantified_proposition',
+      detail: 'No empirical measurements, thresholds, or probabilities were provided in the proposition.'
+    });
+  }
 
   return {
     officer: 'Syran',
     input_analyzed: query,
-    explicit_premise: premise || 'Not explicitly stated; derived from input context.',
+    explicit_premise: safePremise || 'Not explicitly stated; derived from input context.',
     logical_validity: fallacies.detected.length === 0 ? 'VALID' : 'COMPROMISED',
     identified_fallacies: fallacies.detected,
     informal_anomalies: containsContraction ? ['Contraction detected in input query; formal delivery recommended.'] : [],
+    evidence,
+    epistemic_gaps: epistemicGaps,
+    confidence_assessment: {
+      level: fallacies.detected.length > 0 ? 'high_certainty_flaw' : (epistemicGaps.length === 0 ? 'high' : 'moderate'),
+      basis: epistemicGaps.length === 0
+        ? 'Explicit premise and empirical quantities are present for deterministic verification.'
+        : 'Proposition evaluated syntactically; empirical verification requires closing stated epistemic gaps.'
+    },
     recommendation: fallacies.detected.length === 0
       ? 'The proposition appears logically coherent. Proceed with empirical verification and risk mitigation.'
       : 'The proposition contains logical fallacies that must be addressed prior to implementation.',
@@ -170,7 +220,7 @@ export function analyzeLogicalFallacies(text) {
 /**
  * Pure calculation: Calculates normalized probabilities, Bayesian confidence, and risk score.
  * 
- * @param {Array<{ label: string, weight?: number, risk?: number }>} hypotheses 
+ * @param {Array<{ label: string, weight?: number, risk?: number, prior?: number }>} hypotheses 
  * @param {number} [prior=0.5] Prior probability (0.0 to 1.0)
  * @returns {Object} Probabilistic analysis
  */
@@ -180,17 +230,25 @@ export function evaluateProbability(hypotheses = [], prior = 0.5) {
       error: 'At least one hypothesis is required for probability calculation.'
     };
   }
+  if (hypotheses.some(h => !h || typeof h !== 'object' || Array.isArray(h))) {
+    return {
+      error: 'Each hypothesis entry must be an object with at least a label.'
+    };
+  }
 
-  const numPrior = (typeof prior === 'number' && !isNaN(prior)) ? prior : (Number(prior) || 0.5);
+  const parsedPrior = typeof prior === 'number'
+    ? prior
+    : (typeof prior === 'string' && prior.trim() !== '' ? Number(prior) : NaN);
+  const numPrior = Number.isFinite(parsedPrior) ? parsedPrior : 0.5;
   const sanitizedPrior = Math.max(0.01, Math.min(0.99, numPrior));
   let totalLikelihood = 0;
 
   // Compute empirical likelihoods scaled by prior distribution
   const rawHypotheses = hypotheses.map((h, idx) => {
-    const rawWeight = (typeof h.weight === 'number' && h.weight > 0) ? h.weight : 1.0;
-    const riskFactor = (typeof h.risk === 'number') ? Math.max(0.0, Math.min(1.0, h.risk)) : 0.5;
+    const rawWeight = (typeof h.weight === 'number' && Number.isFinite(h.weight) && h.weight >= 0) ? h.weight : 1.0;
+    const riskFactor = (typeof h.risk === 'number' && Number.isFinite(h.risk)) ? Math.max(0.0, Math.min(1.0, h.risk)) : 0.5;
     // Bayesian prior weighting: modulate baseline likelihood with prior probability (supports hypothesis-level prior or prior parameter)
-    const priorWeight = (typeof h.prior === 'number' && !isNaN(h.prior))
+    const priorWeight = (typeof h.prior === 'number' && Number.isFinite(h.prior))
       ? Math.max(0.01, Math.min(0.99, h.prior))
       : (idx === 0 ? sanitizedPrior : (1.0 - sanitizedPrior) / Math.max(1, hypotheses.length - 1));
     const likelihood = rawWeight * priorWeight;
@@ -244,12 +302,31 @@ export function evaluateArchitecturalTradeoffs(options = [], criteria = []) {
       message: 'A minimum of two candidate architectural options is required for comparative trade-off analysis.'
     };
   }
+  if (options.some(opt => !opt || typeof opt !== 'object' || Array.isArray(opt))) {
+    return {
+      status: 'error',
+      officer: 'Syran',
+      message: 'All candidate architectural options must be non-null objects.'
+    };
+  }
 
   // Derive criteria list if not provided
-  let activeCriteria = Array.isArray(criteria) && criteria.length > 0 ? [...criteria] : [];
+  let activeCriteria = Array.isArray(criteria) && criteria.length > 0
+    ? criteria.filter(c => c && typeof c === 'object' && typeof c.name === 'string' && c.name.trim())
+    : [];
   if (activeCriteria.length === 0) {
-    const firstScores = options[0].scores || {};
-    activeCriteria = Object.keys(firstScores).map(key => {
+    const inferredKeys = [];
+    const seenKeys = new Set();
+    for (const opt of options) {
+      const s = opt.scores || {};
+      for (const k of Object.keys(s)) {
+        if (!seenKeys.has(k)) {
+          seenKeys.add(k);
+          inferredKeys.push(k);
+        }
+      }
+    }
+    activeCriteria = inferredKeys.map(key => {
       const isCost = /(cost|risk|latency|overhead|complexity|memory|cpu|delay|debt)/i.test(key);
       return {
         name: key,
@@ -268,32 +345,56 @@ export function evaluateArchitecturalTradeoffs(options = [], criteria = []) {
   }
 
   // Normalize criteria weights
-  const totalWeight = activeCriteria.reduce((sum, c) => sum + (typeof c.weight === 'number' && c.weight > 0 ? c.weight : 1.0), 0);
-  const normalizedCriteria = activeCriteria.map(c => ({
-    name: c.name,
-    weight: (typeof c.weight === 'number' && c.weight > 0 ? c.weight : 1.0) / totalWeight,
-    rawWeight: typeof c.weight === 'number' && c.weight > 0 ? c.weight : 1.0,
-    direction: c.direction === 'minimize' ? 'minimize' : 'maximize',
-    description: c.description || c.name
-  }));
+  const finiteWeight = (c) => (typeof c.weight === 'number' && Number.isFinite(c.weight) && c.weight > 0 ? c.weight : 1.0);
+  const totalWeight = activeCriteria.reduce((sum, c) => sum + finiteWeight(c), 0);
+  const normalizedCriteria = activeCriteria.map(c => {
+    const rw = finiteWeight(c);
+    return {
+      name: c.name,
+      weight: rw / totalWeight,
+      rawWeight: rw,
+      direction: c.direction === 'minimize' ? 'minimize' : 'maximize',
+      description: c.description || c.name
+    };
+  });
 
-  // Find min and max for each criterion
+  // Find min and max strictly across present finite numeric values
   const criteriaBounds = {};
   for (const c of normalizedCriteria) {
-    const values = options.map(o => (o.scores && typeof o.scores[c.name] === 'number') ? o.scores[c.name] : 0);
-    const minVal = Math.min(...values);
-    const maxVal = Math.max(...values);
-    criteriaBounds[c.name] = { min: minVal, max: maxVal, range: maxVal - minVal };
+    const presentValues = options
+      .map(o => (o.scores ? o.scores[c.name] : undefined))
+      .filter(v => typeof v === 'number' && Number.isFinite(v));
+    if (presentValues.length === 0) {
+      criteriaBounds[c.name] = { min: 0, max: 0, range: 0, hasValues: false };
+    } else {
+      const minVal = Math.min(...presentValues);
+      const maxVal = Math.max(...presentValues);
+      criteriaBounds[c.name] = { min: minVal, max: maxVal, range: maxVal - minVal, hasValues: true };
+    }
   }
+
+  const incompleteDataWarnings = [];
 
   // Compute normalized scores and multi-attribute utility for each option
   const evaluatedOptions = options.map(opt => {
     const scores = opt.scores || {};
     const normalizedScores = {};
+    const missingCriteria = [];
     let totalUtility = 0;
 
     for (const c of normalizedCriteria) {
-      const rawVal = typeof scores[c.name] === 'number' ? scores[c.name] : 0;
+      const candidateName = opt.name || 'Unnamed Candidate';
+      const rawVal = scores[c.name];
+      const isPresent = typeof rawVal === 'number' && Number.isFinite(rawVal);
+
+      if (!isPresent) {
+        // Missing values receive worst utility (0.0) so unmeasured options never gain an unearned advantage on minimize criteria
+        normalizedScores[c.name] = 0.0;
+        missingCriteria.push(c.name);
+        incompleteDataWarnings.push(`Candidate '${candidateName}' is missing a numerical score for criterion '${c.name}'; assigned worst-case normalized utility (0.0).`);
+        continue;
+      }
+
       const { min, max, range } = criteriaBounds[c.name];
       let norm = 1.0;
       if (range > 0) {
@@ -312,6 +413,7 @@ export function evaluateArchitecturalTradeoffs(options = [], criteria = []) {
       description: opt.description || '',
       rawScores: scores,
       normalizedScores,
+      missingCriteria,
       utility: Number(totalUtility.toFixed(4)),
       utilityPercentage: Number((totalUtility * 100).toFixed(2)) + '%',
       isDominated: false,
@@ -358,26 +460,31 @@ export function evaluateArchitecturalTradeoffs(options = [], criteria = []) {
   const optimalOption = evaluatedOptions[0];
   const runnerUp = evaluatedOptions.length > 1 ? evaluatedOptions[1] : null;
 
-  // Sensitivity / Critical Pivot Analysis
+  // Sensitivity / Critical Pivot Analysis (weighted advantage delta)
   let pivotAnalysis = null;
   if (runnerUp) {
     let maxAdvantageCriterion = null;
-    let maxDelta = -1;
+    let maxWeightedDelta = 0;
+    let maxRawDelta = 0;
 
     for (const c of normalizedCriteria) {
       const runnerUpScore = runnerUp.normalizedScores[c.name];
       const optimalScore = optimalOption.normalizedScores[c.name];
-      const delta = runnerUpScore - optimalScore;
-      if (delta > maxDelta) {
-        maxDelta = delta;
+      const rawDelta = runnerUpScore - optimalScore;
+      const weightedDelta = rawDelta * c.weight;
+      if (rawDelta > 0 && weightedDelta > maxWeightedDelta) {
+        maxWeightedDelta = weightedDelta;
+        maxRawDelta = rawDelta;
         maxAdvantageCriterion = c;
       }
     }
 
-    if (maxAdvantageCriterion && maxDelta > 0) {
+    if (maxAdvantageCriterion && maxWeightedDelta > 0) {
       pivotAnalysis = {
         criticalDimension: maxAdvantageCriterion.name,
-        runnerUpAdvantageDelta: Number(maxDelta.toFixed(4)),
+        runnerUpAdvantageDelta: Number(maxWeightedDelta.toFixed(4)),
+        normalizedAdvantageDelta: Number(maxRawDelta.toFixed(4)),
+        criterionWeight: Number(maxAdvantageCriterion.weight.toFixed(4)),
         explanation: `Candidate '${runnerUp.name}' demonstrates superior performance in '${maxAdvantageCriterion.name}'. If organizational constraints prioritize this dimension above all others, candidate '${runnerUp.name}' becomes viable.`
       };
     } else {
@@ -392,6 +499,9 @@ export function evaluateArchitecturalTradeoffs(options = [], criteria = []) {
   let officerCounsel = `Captain, I have evaluated the ${options.length} architectural candidates across ${normalizedCriteria.length} dimensions from first principles. `;
   officerCounsel += `The Pareto frontier contains: ${paretoFrontier.join(', ')}. `;
   officerCounsel += `Option '${optimalOption.name}' yields the highest composite utility at ${optimalOption.utilityPercentage}. `;
+  if (incompleteDataWarnings.length > 0) {
+    officerCounsel += `Note that ${incompleteDataWarnings.length} incomplete metric field(s) received worst-case utility scoring pending measurement. `;
+  }
   if (runnerUp && pivotAnalysis && pivotAnalysis.criticalDimension !== 'None') {
     officerCounsel += `The critical trade-off centers upon '${pivotAnalysis.criticalDimension}'. Should priorities shift toward '${pivotAnalysis.criticalDimension}', option '${runnerUp.name}' would merit reconsideration. `;
   }
@@ -410,9 +520,11 @@ export function evaluateArchitecturalTradeoffs(options = [], criteria = []) {
       utilityPercentage: o.utilityPercentage,
       utilityScore: o.utility,
       isParetoOptimal: !o.isDominated,
-      dominatedBy: o.dominatedBy
+      dominatedBy: o.dominatedBy,
+      missingCriteria: o.missingCriteria
     })),
     pivotAnalysis,
+    incompleteDataWarnings,
     officerCounsel,
     matrixDetails: evaluatedOptions
   };
