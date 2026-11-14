@@ -6,12 +6,14 @@ user-invocable: true
 
 # Skill: Knowledge Graph Visualization (`/kc-graph`)
 
+> **Plugin script location (`<plugin-root>`):** Bundled scripts live in this plugin's `bin/` directory. In Claude Code, `<plugin-root>` is `${CLAUDE_PLUGIN_ROOT}`. If that variable appears literally (unsubstituted, e.g. in Antigravity), `<plugin-root>` is the plugin directory itself: run the scripts as `./bin/...` from it. Always quote the path.
+
 This skill generates a self-contained, interactive HTML visual canvas artifact allowing developers to explore their multi-tier persistent memory graph.
 
 ## Workflow
 
 ### 1. Fetch Graph Dataset & Generate Canvas
-Call the MCP tool **`generate_knowledge_graph_html`** (or **`get_memory_graph`**) to produce the self-contained D3.js interactive canvas:
+Call **`generate_knowledge_graph_html`** (to render the standalone HTML canvas), **`render_visual_memory_studio`** (for platform-adapted interactive / inline artifact rendering), or **`get_memory_graph`** (to inspect the raw JSON graph dataset):
 - `nodes`: List of memory nodes with `id`, `slug`, `layer`, `domain`, `type`, `stale` (boolean), `description`, and `applied_count`.
 - `links`: Directed connections between nodes (`related` and `overrides`) with referential integrity guarantee.
 - `summary`: Total node/link counts, broken link diagnostics, and active domains.
@@ -36,5 +38,5 @@ Write the generated HTML to a standalone `.html` artifact in `<appDataDir>/brain
 Display a summary card in chat with metrics (total nodes, active domains, stale alerts) and point the developer to the newly generated knowledge graph artifact.
 
 ### 4. Direct Browser Saving vs Staged Patch
-- **Direct 1-Click Saving (`/kc-studio`):** To edit and save directly from your browser without copying patch JSONs, launch the standalone studio server via `/kc-studio` or `node ./plugins/knowledge-capture/bin/studio.js`.
+- **Direct 1-Click Saving (`/kc-studio`):** To edit and save directly from your browser without copying patch JSONs, launch `/kc-studio` (`render_visual_memory_studio`) or run `node "<plugin-root>/bin/studio.js"`.
 - **Staged Patch Application (`apply_memory_patch`):** When viewing an offline HTML artifact or file, click "Export Patch" and pass the JSON payload to the MCP tool `apply_memory_patch(patch)`. The server atomically writes to disk and updates SQLite.

@@ -366,11 +366,13 @@ export function evaluateArchitecturalTradeoffs(options = [], criteria = []) {
     };
   }
 
-  // Normalize criteria weights
-  const finiteWeight = (c) => (typeof c.weight === 'number' && Number.isFinite(c.weight) && c.weight > 0 ? c.weight : 1.0);
-  const totalWeight = activeCriteria.reduce((sum, c) => sum + finiteWeight(c), 0);
+  // Normalize criteria weights (allow explicit 0 weight to disable a criterion; fall back to uniform if sum <= 0)
+  const rawFiniteWeight = (c) => (typeof c.weight === 'number' && Number.isFinite(c.weight) && c.weight >= 0 ? c.weight : 1.0);
+  const rawWeightSum = activeCriteria.reduce((sum, c) => sum + rawFiniteWeight(c), 0);
+  const useUniformFallback = rawWeightSum <= 0;
+  const totalWeight = useUniformFallback ? activeCriteria.length : rawWeightSum;
   const normalizedCriteria = activeCriteria.map(c => {
-    const rw = finiteWeight(c);
+    const rw = useUniformFallback ? 1.0 : rawFiniteWeight(c);
     return {
       name: c.name,
       weight: rw / totalWeight,
@@ -480,34 +482,39 @@ export function evaluateArchitecturalTradeoffs(options = [], criteria = []) {
     .map(o => o.name);
 
   const optimalOption = evaluatedOptions[0];
-  const runnerUp = evaluatedOptions.length > 1 ? evaluatedOptions[1] : null;
+  const competingOptions = evaluatedOptions.slice(1);
 
-  // Sensitivity / Critical Pivot Analysis (weighted advantage delta)
+  // Sensitivity / Critical Pivot Analysis across all competing candidates (weighted advantage delta)
   let pivotAnalysis = null;
-  if (runnerUp) {
+  if (competingOptions.length > 0) {
     let maxAdvantageCriterion = null;
     let maxWeightedDelta = 0;
     let maxRawDelta = 0;
+    let bestChallenger = null;
 
-    for (const c of normalizedCriteria) {
-      const runnerUpScore = runnerUp.normalizedScores[c.name];
-      const optimalScore = optimalOption.normalizedScores[c.name];
-      const rawDelta = runnerUpScore - optimalScore;
-      const weightedDelta = rawDelta * c.weight;
-      if (rawDelta > 0 && weightedDelta > maxWeightedDelta) {
-        maxWeightedDelta = weightedDelta;
-        maxRawDelta = rawDelta;
-        maxAdvantageCriterion = c;
+    for (const challenger of competingOptions) {
+      for (const c of normalizedCriteria) {
+        const challengerScore = challenger.normalizedScores[c.name];
+        const optimalScore = optimalOption.normalizedScores[c.name];
+        const rawDelta = challengerScore - optimalScore;
+        const weightedDelta = rawDelta * c.weight;
+        if (rawDelta > 0 && weightedDelta > maxWeightedDelta) {
+          maxWeightedDelta = weightedDelta;
+          maxRawDelta = rawDelta;
+          maxAdvantageCriterion = c;
+          bestChallenger = challenger;
+        }
       }
     }
 
-    if (maxAdvantageCriterion && maxWeightedDelta > 0) {
+    if (maxAdvantageCriterion && maxWeightedDelta > 0 && bestChallenger) {
       pivotAnalysis = {
         criticalDimension: maxAdvantageCriterion.name,
+        challengerCandidate: bestChallenger.name,
         runnerUpAdvantageDelta: Number(maxWeightedDelta.toFixed(4)),
         normalizedAdvantageDelta: Number(maxRawDelta.toFixed(4)),
         criterionWeight: Number(maxAdvantageCriterion.weight.toFixed(4)),
-        explanation: `Candidate '${runnerUp.name}' demonstrates superior performance in '${maxAdvantageCriterion.name}'. If organizational constraints prioritize this dimension above all others, candidate '${runnerUp.name}' becomes viable.`
+        explanation: `Candidate '${bestChallenger.name}' demonstrates superior performance in '${maxAdvantageCriterion.name}'. If organizational constraints prioritize this dimension above all others, candidate '${bestChallenger.name}' becomes viable.`
       };
     } else {
       pivotAnalysis = {
@@ -524,8 +531,8 @@ export function evaluateArchitecturalTradeoffs(options = [], criteria = []) {
   if (incompleteDataWarnings.length > 0) {
     officerCounsel += `Note that ${incompleteDataWarnings.length} incomplete metric field(s) received worst-case utility scoring pending measurement. `;
   }
-  if (runnerUp && pivotAnalysis && pivotAnalysis.criticalDimension !== 'None') {
-    officerCounsel += `The critical trade-off centers upon '${pivotAnalysis.criticalDimension}'. Should priorities shift toward '${pivotAnalysis.criticalDimension}', option '${runnerUp.name}' would merit reconsideration. `;
+  if (competingOptions.length > 0 && pivotAnalysis && pivotAnalysis.criticalDimension !== 'None') {
+    officerCounsel += `The critical trade-off centers upon '${pivotAnalysis.criticalDimension}'. Should priorities shift toward '${pivotAnalysis.criticalDimension}', option '${pivotAnalysis.challengerCandidate}' would merit reconsideration. `;
   }
   officerCounsel += `It is mathematically optimal to select '${optimalOption.name}' under the designated weight distribution.`;
 

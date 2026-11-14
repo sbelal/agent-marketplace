@@ -4,8 +4,22 @@ import { getDatabase } from './connection.js';
 import { resolveStoragePaths, normalizeWorkspaceId } from '../core/storage-paths.js';
 import { parseYamlFrontmatter, parseInlineArrayOrList } from '../core/yaml-parser.js';
 import { findMarkdownFiles } from '../retrieval/shadow-resolver.js';
-import { getActiveEmbeddingConfig } from '../embeddings/onnx-provider.js';
+import { getActiveEmbeddingConfig, getEffectiveEmbeddingProviderId } from '../embeddings/onnx-provider.js';
 import { generateMultiVector, generateMultiVectorAsync } from '../embeddings/multi-vector.js';
+
+/**
+ * Checks whether stored 384-d vectors belong to a different embedding provider ('onnx-384' vs 'heuristic-384').
+ */
+export function has384ProviderMismatch(db, activeConfig) {
+  if (!db || !activeConfig || activeConfig.dimensions !== 384) return false;
+  try {
+    const effective = getEffectiveEmbeddingProviderId(activeConfig);
+    const provRow = db.prepare("SELECT val FROM meta WHERE key = 'embedding_provider_384'").get();
+    return Boolean(provRow && provRow.val && provRow.val !== effective);
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Serializes a numeric embedding array into a compact IEEE-754 Float32 binary Buffer.
@@ -94,7 +108,7 @@ function hasDimensionMatch(val, dimensions) {
 }
 
 /**
- * Loads cached multi-vectors from SQLite keyed by layer:team:path and lowercase slug when dimension matches active config.
+ * Loads cached multi-vectors from SQLite keyed by layer:team:path and lowercase slug when dimension & provider match active config.
  */
 export function loadCachedVectorsMap(workspaceRoot = process.cwd()) {
   const cached = new Map();
@@ -103,6 +117,9 @@ export function loadCachedVectorsMap(workspaceRoot = process.cwd()) {
 
   try {
     const activeConfig = getActiveEmbeddingConfig();
+    if (has384ProviderMismatch(db, activeConfig)) {
+      return cached;
+    }
     const currentWsId = normalizeWorkspaceId(workspaceRoot);
 
     const vecRows = new Map();
@@ -169,7 +186,7 @@ export function loadCachedVectorsMap(workspaceRoot = process.cwd()) {
   return cached;
 }
 
-function collectPendingDiskState(db, workspaceRoot, activeConfig, checkVectors) {
+function collectPendingDiskState(db, workspaceRoot, activeConfig, checkVectors, provider384Mismatch = false) {
   const { layerDirs, currentWsId } = getIndexLayerDirs(workspaceRoot);
   const currentFiles = new Map();
 
@@ -195,7 +212,7 @@ function collectPendingDiskState(db, workspaceRoot, activeConfig, checkVectors) 
   `).all(currentWsId);
 
   const cachedDimMap = new Map();
-  if (checkVectors && activeConfig) {
+  if (checkVectors && activeConfig && !provider384Mismatch) {
     try {
       const dimRows = db.prepare(`
         SELECT workspace_id, layer, team_slug, path, mtime, trigger_vector, content_vector, entity_vector
@@ -214,7 +231,7 @@ function collectPendingDiskState(db, workspaceRoot, activeConfig, checkVectors) 
   const existingMap = new Map();
   for (const row of existingRows) {
     let hasValidVector = false;
-    if (checkVectors && activeConfig && row.trigger_vector && row.content_vector && row.entity_vector) {
+    if (checkVectors && activeConfig && !provider384Mismatch && row.trigger_vector && row.content_vector && row.entity_vector) {
       hasValidVector =
         hasDimensionMatch(row.trigger_vector, activeConfig.dimensions) &&
         hasDimensionMatch(row.content_vector, activeConfig.dimensions) &&
@@ -312,7 +329,24 @@ function flushSyncToDatabase(db, currentFiles, existingRows, pendingUpdates, wri
     VALUES (?, ?, ?, ?, ?, ?)
   `);
 
+  const selectSurvivingBySlug = db.prepare(`
+    SELECT path FROM memories
+    WHERE workspace_id = ? AND layer = ? AND team_slug = ? AND slug = ?
+  `);
+
   const deleteVecCache = db.prepare('DELETE FROM memory_vectors WHERE workspace_id = ? AND layer = ? AND team_slug = ? AND path = ?');
+
+  const affectedSlugKeys = new Map();
+  const parsedByFullKey = new Map();
+
+  const markAffectedSlug = (wsId, layer, teamSlug, slug) => {
+    if (!slug) return;
+    const t = teamSlug || '';
+    const k = JSON.stringify([wsId, layer, t, slug]);
+    if (!affectedSlugKeys.has(k)) {
+      affectedSlugKeys.set(k, { wsId, layer, teamSlug: t, slug });
+    }
+  };
 
   db.exec('BEGIN IMMEDIATE');
   try {
@@ -380,25 +414,13 @@ function flushSyncToDatabase(db, currentFiles, existingRows, pendingUpdates, wri
         );
       }
 
-      if (u.prevSlug && u.prevSlug !== u.slug) {
-        deleteFts.run(u.item.wsId, u.item.layer, u.item.teamSlug, u.prevSlug);
-        deleteGraph.run(u.item.wsId, u.item.layer, u.item.teamSlug, u.prevSlug);
-      }
-      deleteFts.run(u.item.wsId, u.item.layer, u.item.teamSlug, u.slug);
-      insertFts.run(u.slug, u.domain, u.type, u.trigger, u.body, u.item.layer, u.item.wsId, u.item.teamSlug);
+      const fileKey = `${u.item.wsId}:${u.item.layer}:${u.item.teamSlug || ''}:${u.item.filePath}`;
+      parsedByFullKey.set(fileKey, u);
 
-      deleteGraph.run(u.item.wsId, u.item.layer, u.item.teamSlug, u.slug);
-      if (Array.isArray(u.fm.related)) {
-        for (const rel of u.fm.related) {
-          if (rel) insertGraph.run(u.item.wsId, u.item.layer, u.item.teamSlug, u.slug, rel, 'related');
-        }
+      if (u.prevSlug && u.prevSlug !== u.slug) {
+        markAffectedSlug(u.item.wsId, u.item.layer, u.item.teamSlug, u.prevSlug);
       }
-      if (u.fm.overrides) {
-        const overridesList = parseInlineArrayOrList(u.fm.overrides);
-        for (const ov of overridesList) {
-          if (ov) insertGraph.run(u.item.wsId, u.item.layer, u.item.teamSlug, u.slug, ov, 'overrides');
-        }
-      }
+      markAffectedSlug(u.item.wsId, u.item.layer, u.item.teamSlug, u.slug);
     }
 
     const deleteMeta = db.prepare('DELETE FROM memories WHERE workspace_id = ? AND layer = ? AND team_slug = ? AND path = ?');
@@ -407,9 +429,49 @@ function flushSyncToDatabase(db, currentFiles, existingRows, pendingUpdates, wri
       const key = `${row.workspace_id}:${row.layer}:${teamSlug}:${row.path}`;
       if (!currentFiles.has(key)) {
         deleteMeta.run(row.workspace_id, row.layer, teamSlug, row.path);
-        deleteFts.run(row.workspace_id, row.layer, teamSlug, row.slug);
-        deleteGraph.run(row.workspace_id, row.layer, teamSlug, row.slug);
         deleteVecCache.run(row.workspace_id, row.layer, teamSlug, row.path);
+        markAffectedSlug(row.workspace_id, row.layer, teamSlug, row.slug);
+      }
+    }
+
+    // Reconcile FTS5 and graph rows per affected (workspace_id, layer, team_slug, slug)
+    // so deleting/updating one file never wipes surviving sibling files sharing the same slug in subdirectories.
+    for (const { wsId, layer, teamSlug, slug } of affectedSlugKeys.values()) {
+      deleteFts.run(wsId, layer, teamSlug, slug);
+      deleteGraph.run(wsId, layer, teamSlug, slug);
+
+      const survivingRows = selectSurvivingBySlug.all(wsId, layer, teamSlug, slug);
+      for (const sRow of survivingRows) {
+        const fileKey = `${wsId}:${layer}:${teamSlug}:${sRow.path}`;
+        let entry = parsedByFullKey.get(fileKey);
+        if (!entry) {
+          const cfItem = currentFiles.get(fileKey) || {
+            wsId,
+            layer,
+            teamSlug,
+            base: path.basename(sRow.path, '.md'),
+            filePath: sRow.path
+          };
+          try {
+            entry = parseEntryForSync(cfItem);
+          } catch {
+            continue;
+          }
+        }
+
+        insertFts.run(entry.slug, entry.domain, entry.type, entry.trigger, entry.body, layer, wsId, teamSlug);
+
+        if (Array.isArray(entry.fm.related)) {
+          for (const rel of entry.fm.related) {
+            if (rel) insertGraph.run(wsId, layer, teamSlug, entry.slug, rel, 'related');
+          }
+        }
+        if (entry.fm.overrides) {
+          const overridesList = parseInlineArrayOrList(entry.fm.overrides);
+          for (const ov of overridesList) {
+            if (ov) insertGraph.run(wsId, layer, teamSlug, entry.slug, ov, 'overrides');
+          }
+        }
       }
     }
 
@@ -430,7 +492,7 @@ export function syncSqliteMetadataSync(workspaceRoot = process.cwd()) {
   if (!db) {
     return { totalIndexed: 0 };
   }
-  const { currentFiles, existingRows, existingMap } = collectPendingDiskState(db, workspaceRoot, null, false);
+  const { currentFiles, existingRows, existingMap } = collectPendingDiskState(db, workspaceRoot, null, false, false);
   const pendingUpdates = [];
   for (const [key, item] of currentFiles.entries()) {
     const prev = existingMap.get(key);
@@ -459,13 +521,15 @@ export async function syncSqliteCore(workspaceRoot = process.cwd(), { computeVec
   }
 
   const activeConfig = getActiveEmbeddingConfig();
+  const providerMismatch = has384ProviderMismatch(db, activeConfig);
 
-  try {
-    db.prepare('INSERT OR REPLACE INTO meta (key, val) VALUES (?, ?)').run('embedding_engine', activeConfig.engine);
-    db.prepare('INSERT OR REPLACE INTO meta (key, val) VALUES (?, ?)').run('embedding_dim', String(activeConfig.dimensions));
-  } catch {}
-
-  const { currentFiles, existingRows, existingMap, cachedDimMap } = collectPendingDiskState(db, workspaceRoot, activeConfig, true);
+  const { currentFiles, existingRows, existingMap, cachedDimMap } = collectPendingDiskState(
+    db,
+    workspaceRoot,
+    activeConfig,
+    true,
+    providerMismatch
+  );
   const pendingUpdates = [];
 
   for (const [key, item] of currentFiles.entries()) {
@@ -524,5 +588,29 @@ export async function syncSqliteCore(workspaceRoot = process.cwd(), { computeVec
     } catch {}
   }
 
-  return flushSyncToDatabase(db, currentFiles, existingRows, pendingUpdates, true, activeConfig.dimensions);
+  if (providerMismatch) {
+    try {
+      const currentWsId = normalizeWorkspaceId(workspaceRoot);
+      db.prepare(`
+        DELETE FROM memory_vectors
+        WHERE (workspace_id = ? OR workspace_id = 'global') AND dimensions = 384
+      `).run(currentWsId);
+    } catch {}
+  }
+
+  const flushRes = flushSyncToDatabase(db, currentFiles, existingRows, pendingUpdates, true, activeConfig.dimensions);
+
+  // Record final active engine/provider after vector computation so runtime ONNX fallback is tracked accurately.
+  try {
+    const finalConfig = getActiveEmbeddingConfig();
+    const finalProvider = getEffectiveEmbeddingProviderId(finalConfig);
+    db.prepare('INSERT OR REPLACE INTO meta (key, val) VALUES (?, ?)').run('embedding_engine', finalConfig.engine);
+    db.prepare('INSERT OR REPLACE INTO meta (key, val) VALUES (?, ?)').run('embedding_dim', String(finalConfig.dimensions));
+    db.prepare('INSERT OR REPLACE INTO meta (key, val) VALUES (?, ?)').run('embedding_provider', finalProvider);
+    if (finalConfig.dimensions === 384) {
+      db.prepare('INSERT OR REPLACE INTO meta (key, val) VALUES (?, ?)').run('embedding_provider_384', finalProvider);
+    }
+  } catch {}
+
+  return flushRes;
 }

@@ -67,6 +67,16 @@ export function getActiveEmbeddingConfig() {
 }
 
 /**
+ * Returns a stable provider signature so 384-d ONNX and 384-d heuristic fallback vectors are never mixed.
+ */
+export function getEffectiveEmbeddingProviderId(config = getActiveEmbeddingConfig()) {
+  if (config && config.engine === 'onnx') {
+    return config.fallbackActive ? 'heuristic-384' : 'onnx-384';
+  }
+  return 'heuristic-128';
+}
+
+/**
  * Dynamically loads the ONNX feature extraction pipeline on demand.
  * Caches the pipeline promise and model locally. If loading fails, marks failure and returns null.
  */

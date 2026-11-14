@@ -3372,6 +3372,366 @@ meta:
   }
   console.log('  ✔ Passed: All 11 audit regression checks verified.\n');
 
+  // ==========================================
+  // TEST 53: Deep Plugin Audit Fixes Regression Suite
+  // ==========================================
+  console.log('Test 53: Deep Plugin Audit Fixes (MCP applied/isError, Studio CORS null, 384-d provider cache, YAML round-trip, subdir FTS, adr/* & unborn git, session-end Antigravity, Syran pivot/weight0, install --update-source)...');
+  {
+    const { createRequire } = await import('node:module');
+    const requireCjs53 = createRequire(import.meta.url);
+    const { getDatabase } = await import('../plugins/knowledge-capture/mcp-server/db/connection.js');
+    const { has384ProviderMismatch } = await import('../plugins/knowledge-capture/mcp-server/db/indexer.js');
+    const { getEffectiveEmbeddingProviderId } = await import('../plugins/knowledge-capture/mcp-server/embeddings/onnx-provider.js');
+    const { queryGitRepoStatus } = await import('../plugins/knowledge-capture/mcp-server/core/memory-store.js');
+    const { resolveUpdateSourceTargets } = requireCjs53('../bin/install.js');
+
+    // 53.1 MCP record_memory_efficacy('applied', workspaceRoot), isError propagation, and correlateTestExecutionEfficacy partition preservation
+    const ws53A = path.join(tempRoot, 'audit53-ws-a');
+    const ws53B = path.join(tempRoot, 'audit53-ws-b');
+    fs.mkdirSync(path.join(ws53A, '.agents', 'rules', 'memory'), { recursive: true });
+    fs.mkdirSync(path.join(ws53B, '.agents', 'rules', 'memory'), { recursive: true });
+    saveMemoryEntry(ws53A, {
+      layer: 'workspace',
+      slug: 'shared-53-rule',
+      domain: 'testing',
+      description: 'Rule in workspace A',
+      why: 'Partition isolation check',
+      howToApply: 'Keep telemetry isolated to workspace A.'
+    });
+    saveMemoryEntry(ws53B, {
+      layer: 'workspace',
+      slug: 'shared-53-rule',
+      domain: 'testing',
+      description: 'Rule in workspace B',
+      why: 'Partition isolation check',
+      howToApply: 'Keep telemetry isolated to workspace B.'
+    });
+    await syncSqliteIndex(ws53A, { engine: 'heuristic' });
+    await syncSqliteIndex(ws53B, { engine: 'heuristic' });
+
+    const kcMcp53 = path.resolve(process.cwd(), 'plugins', 'knowledge-capture', 'mcp-server', 'index.js');
+    const mcpCalls53 = [
+      JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: {
+          name: 'record_memory_efficacy',
+          arguments: { slug: 'shared-53-rule', feedbackType: 'applied', workspaceRoot: ws53A }
+        }
+      }),
+      JSON.stringify({
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'tools/call',
+        params: {
+          name: 'delete_memory_entry',
+          arguments: { layer: 'workspace', slug: 'does-not-exist-53', workspaceRoot: ws53A }
+        }
+      })
+    ].join('\n') + '\n';
+    const mcpRun53 = spawnSync(process.execPath, [kcMcp53], {
+      input: mcpCalls53,
+      env: { ...process.env, KC_STORAGE_DIR: process.env.KC_STORAGE_DIR },
+      encoding: 'utf8'
+    });
+    assert.equal(mcpRun53.status, 0, `KC MCP run failed: ${mcpRun53.stderr}`);
+    const mcpLines53 = mcpRun53.stdout.trim().split('\n').map(l => JSON.parse(l));
+    assert.notEqual(mcpLines53[0].result.isError, true, 'record_memory_efficacy with feedbackType="applied" must succeed');
+    const recPayload53 = JSON.parse(mcpLines53[0].result.content[0].text);
+    assert.equal(recPayload53.applied_count, 1, 'feedbackType="applied" must increment applied_count rather than recalled_count');
+    assert.equal(recPayload53.workspace_id, normalizeWorkspaceId(ws53A), 'MCP record_memory_efficacy must scope telemetry to workspaceRoot');
+    assert.equal(mcpLines53[1].result.isError, true, 'Failed delete_memory_entry (success: false) must set MCP result.isError: true');
+
+    correlateTestExecutionEfficacy(ws53A, {
+      command: 'npm test',
+      exitCode: 1,
+      stderr: 'Assertion failed in shared-53-rule check'
+    });
+    const teleDb53 = getDatabase();
+    const teleRow53A = teleDb53.prepare(
+      'SELECT applied_count, test_fail_count, efficacy_score FROM telemetry WHERE workspace_id = ? AND layer = ? AND slug = ?'
+    ).get(normalizeWorkspaceId(ws53A), 'workspace', 'shared-53-rule');
+    const teleRow53B = teleDb53.prepare(
+      'SELECT applied_count, test_fail_count, efficacy_score FROM telemetry WHERE workspace_id = ? AND layer = ? AND slug = ?'
+    ).get(normalizeWorkspaceId(ws53B), 'workspace', 'shared-53-rule');
+    assert.equal(teleRow53A.applied_count, 1);
+    assert.equal(teleRow53A.test_fail_count, 1, 'correlateTestExecutionEfficacy must correlate against matching workspace partition');
+    assert.equal(teleRow53B, undefined, 'correlateTestExecutionEfficacy must not contaminate workspace B when slugs are omitted');
+
+    // 53.2 Studio CORS preflight for file:// (Origin: null) vs cross-site rejection
+    const studio53 = await startStudioServer(ws53A, { port: 0, autoOpen: false });
+    try {
+      const preflightNull = await fetch(`${studio53.url}/api/patch`, {
+        method: 'OPTIONS',
+        headers: {
+          Origin: 'null',
+          'Access-Control-Request-Method': 'POST',
+          'Access-Control-Request-Headers': 'Content-Type, X-Studio-Token'
+        }
+      });
+      assert.equal(preflightNull.status, 204, 'OPTIONS preflight with Origin: null must succeed with 204 for file:// Studio HTML');
+      assert.equal(preflightNull.headers.get('access-control-allow-origin'), 'null');
+
+      const preflightCrossSite = await fetch(`${studio53.url}/api/patch`, {
+        method: 'OPTIONS',
+        headers: { Origin: 'null', 'Sec-Fetch-Site': 'cross-site' }
+      });
+      assert.equal(preflightCrossSite.status, 403, 'OPTIONS preflight with Sec-Fetch-Site: cross-site must return 403');
+      assert.equal(preflightCrossSite.headers.get('access-control-allow-origin'), null);
+
+      const preflightEvil = await fetch(`${studio53.url}/api/patch`, {
+        method: 'OPTIONS',
+        headers: { Origin: 'https://evil.example.com' }
+      });
+      assert.equal(preflightEvil.status, 403, 'OPTIONS preflight from evil origin must return 403');
+      assert.equal(preflightEvil.headers.get('access-control-allow-origin'), null);
+    } finally {
+      await studio53.close();
+    }
+
+    // 53.3 384-d provider mismatch detection ('onnx-384' vs 'heuristic-384')
+    assert.equal(getEffectiveEmbeddingProviderId({ engine: 'onnx', dimensions: 384, fallbackActive: false }), 'onnx-384');
+    assert.equal(getEffectiveEmbeddingProviderId({ engine: 'onnx', dimensions: 384, fallbackActive: true }), 'heuristic-384');
+    assert.equal(getEffectiveEmbeddingProviderId({ engine: 'heuristic', dimensions: 128 }), 'heuristic-128');
+
+    const prevEngineEnv53 = process.env.KC_EMBEDDING_ENGINE;
+    try {
+      process.env.KC_EMBEDDING_ENGINE = 'onnx';
+      await syncSqliteIndex(ws53A);
+      const dbVec53 = getDatabase();
+      const recordedProv53 = dbVec53.prepare("SELECT val FROM meta WHERE key = 'embedding_provider_384'").get()?.val;
+      assert.ok(recordedProv53 === 'onnx-384' || recordedProv53 === 'heuristic-384');
+
+      // Simulate cached vectors written by the opposite 384-d provider
+      const fakeOtherProvider = recordedProv53 === 'onnx-384' ? 'heuristic-384' : 'onnx-384';
+      dbVec53.prepare("INSERT OR REPLACE INTO meta (key, val) VALUES ('embedding_provider_384', ?)").run(fakeOtherProvider);
+      assert.equal(has384ProviderMismatch(dbVec53, getActiveEmbeddingConfig()), true, 'has384ProviderMismatch must detect onnx-384 vs heuristic-384');
+      assert.equal(isIndexDirty(ws53A), true, 'isIndexDirty must return true when 384-d provider mismatches');
+
+      await syncSqliteIndex(ws53A);
+      const restoredProv53 = dbVec53.prepare("SELECT val FROM meta WHERE key = 'embedding_provider_384'").get()?.val;
+      assert.equal(restoredProv53, recordedProv53, 'syncSqliteIndex must refresh embedding_provider_384 after mismatch');
+      assert.equal(has384ProviderMismatch(dbVec53, getActiveEmbeddingConfig()), false);
+    } finally {
+      if (prevEngineEnv53 === undefined) delete process.env.KC_EMBEDDING_ENGINE;
+      else process.env.KC_EMBEDDING_ENGINE = prevEngineEnv53;
+      resetOnnxState();
+    }
+
+    // 53.4 YAML round-trip never leaks duplicate slug:/trigger: keys while keeping .trigger getter
+    saveMemoryEntry(ws53A, {
+      layer: 'workspace',
+      slug: 'yaml-roundtrip-53',
+      domain: 'testing',
+      description: 'Initial clean description',
+      why: 'No redundant keys',
+      howToApply: 'Verify serializeYamlFrontmatter drops synthetic trigger/slug aliases.'
+    });
+    saveMemoryEntry(ws53A, {
+      layer: 'workspace',
+      slug: 'yaml-ref-53',
+      domain: 'testing',
+      description: 'Refers to roundtrip rule',
+      why: 'Test rewire',
+      howToApply: 'References yaml-roundtrip-53.',
+      related: ['yaml-roundtrip-53']
+    });
+    applyMemoryPatch(ws53A, {
+      modified_nodes: [{ slug: 'yaml-roundtrip-53', description: 'Updated clean description 53' }]
+    });
+    rewireMemoryReferences(ws53A, 'yaml-roundtrip-53', 'yaml-roundtrip-renamed');
+    const rtRawPath = path.join(ws53A, '.agents', 'rules', 'memory', 'yaml-roundtrip-53.md');
+    const refRawPath = path.join(ws53A, '.agents', 'rules', 'memory', 'yaml-ref-53.md');
+    const rtRaw = fs.readFileSync(rtRawPath, 'utf8');
+    const refRaw = fs.readFileSync(refRawPath, 'utf8');
+    assert.equal(/^slug:/m.test(rtRaw), false, 'applyMemoryPatch must not write redundant slug: line');
+    assert.equal(/^trigger:/m.test(rtRaw), false, 'applyMemoryPatch must not write redundant trigger: line');
+    assert.equal(/^slug:/m.test(refRaw), false, 'rewireMemoryReferences must not write redundant slug: line');
+    assert.equal(/^trigger:/m.test(refRaw), false, 'rewireMemoryReferences must not write redundant trigger: line');
+    const rtParsed = parseYamlFrontmatter(rtRaw);
+    assert.equal(rtParsed.frontmatter.trigger, 'Updated clean description 53', 'Parsed frontmatter must still expose non-enumerable .trigger');
+    assert.equal(rtParsed.frontmatter.slug, 'yaml-roundtrip-53', 'Parsed frontmatter must still expose non-enumerable .slug');
+
+    // 53.5 Subdirectory same-slug FTS5 & graph preservation when one copy is deleted/updated
+    const ws53Sub = path.join(tempRoot, 'audit53-subslug-ws');
+    const subMemDir = path.join(ws53Sub, '.agents', 'rules', 'memory');
+    fs.mkdirSync(path.join(subMemDir, 'sub-a'), { recursive: true });
+    fs.mkdirSync(path.join(subMemDir, 'sub-b'), { recursive: true });
+    fs.writeFileSync(path.join(subMemDir, 'keep-target-53.md'), `---
+name: keep-target-53
+domain: testing
+type: convention
+description: Surviving target node for subdir test
+verified: 2026-11-13
+---
+# Keep Target
+`, 'utf8');
+    fs.writeFileSync(path.join(subMemDir, 'sub-a', 'shared-leaf.md'), `---
+name: shared-leaf
+domain: testing
+type: convention
+description: Alpha unique token alphaonly53
+verified: 2026-11-13
+---
+# Alpha Leaf
+`, 'utf8');
+    fs.writeFileSync(path.join(subMemDir, 'sub-b', 'shared-leaf.md'), `---
+name: shared-leaf
+domain: testing
+type: convention
+description: Beta unique token betaonly53
+verified: 2026-11-13
+related: [keep-target-53]
+---
+# Beta Leaf
+`, 'utf8');
+    await syncSqliteIndex(ws53Sub, { engine: 'heuristic' });
+    fs.unlinkSync(path.join(subMemDir, 'sub-a', 'shared-leaf.md'));
+    await syncSqliteIndex(ws53Sub, { engine: 'heuristic' });
+
+    const subFtsHit = await searchMemoriesHybrid(ws53Sub, 'betaonly53', { sync: false, limit: 5 });
+    assert.ok(subFtsHit.some(r => r.slug === 'shared-leaf'), 'Deleting sibling same-slug file must preserve surviving sibling FTS5 entry');
+    const subGraph = getKnowledgeGraphData(ws53Sub);
+    assert.ok(
+      subGraph.links.some(l => l.source === 'shared-leaf' && l.target === 'keep-target-53'),
+      'Deleting sibling same-slug file must preserve surviving sibling graph edges'
+    );
+
+    // 53.6 Unborn HEAD status, adr/* branch guard, and prepareTeamPromotion path traversal guard
+    assert.throws(
+      () => prepareTeamPromotion(ws53A, { slug: '../escape' }),
+      /Invalid memory slug/,
+      'prepareTeamPromotion must reject path-traversal slugs'
+    );
+    const unbornRepo53 = path.join(tempRoot, 'unborn-git-53');
+    fs.mkdirSync(unbornRepo53, { recursive: true });
+    execFileSync('git', ['init', '-b', 'main'], { cwd: unbornRepo53, stdio: 'ignore' });
+    const unbornStatus = queryGitRepoStatus(unbornRepo53);
+    assert.equal(unbornStatus.isGit, true);
+    assert.equal(unbornStatus.branch, 'main', 'queryGitRepoStatus must resolve unborn HEAD branch via symbolic-ref fallback');
+    assert.equal(unbornStatus.isPromoteBranch, false);
+
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: unbornRepo53, stdio: 'ignore' });
+    execFileSync('git', ['config', 'user.name', 'Test User'], { cwd: unbornRepo53, stdio: 'ignore' });
+    fs.writeFileSync(path.join(unbornRepo53, 'readme.md'), '# init\n', 'utf8');
+    execFileSync('git', ['add', '.'], { cwd: unbornRepo53, stdio: 'ignore' });
+    execFileSync('git', ['commit', '-m', 'init'], { cwd: unbornRepo53, stdio: 'ignore' });
+    execFileSync('git', ['checkout', '-b', 'adr/adr-053-check'], { cwd: unbornRepo53, stdio: 'ignore' });
+    const adrStatus = queryGitRepoStatus(unbornRepo53);
+    assert.equal(adrStatus.branch, 'adr/adr-053-check');
+    assert.equal(adrStatus.isPromoteBranch, true, 'queryGitRepoStatus must flag adr/* branches as promotion branches');
+
+    const adrTeamStorage = path.join(tempRoot, 'adr-team-storage');
+    fs.mkdirSync(adrTeamStorage, { recursive: true });
+    const prevStorage53 = process.env.KC_STORAGE_DIR;
+    process.env.KC_STORAGE_DIR = adrTeamStorage;
+    try {
+      const teamAdrPath = path.join(adrTeamStorage, 'team');
+      fs.cpSync(unbornRepo53, teamAdrPath, { recursive: true });
+      const syncAdrRes = syncMemoryLayer(ws53A, { layer: 'team' });
+      assert.equal(syncAdrRes.team.repos[0]?.status, 'on-promote-branch', 'syncMemoryLayer must treat adr/* as on-promote-branch');
+    } finally {
+      process.env.KC_STORAGE_DIR = prevStorage53;
+    }
+
+    // 53.7 session-end.js Antigravity clean-exit emits valid JSON {"injectSteps":[]}
+    const cleanSessWs = path.join(tempRoot, 'clean-sess-ws-53');
+    fs.mkdirSync(cleanSessWs, { recursive: true });
+    execFileSync('git', ['init'], { cwd: cleanSessWs, stdio: 'ignore' });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: cleanSessWs, stdio: 'ignore' });
+    execFileSync('git', ['config', 'user.name', 'Test User'], { cwd: cleanSessWs, stdio: 'ignore' });
+    fs.writeFileSync(path.join(cleanSessWs, 'index.js'), 'export const ok = true;\n', 'utf8');
+    execFileSync('git', ['add', '.'], { cwd: cleanSessWs, stdio: 'ignore' });
+    execFileSync('git', ['commit', '-m', 'init clean repo'], { cwd: cleanSessWs, stdio: 'ignore' });
+    const sessEndScript = path.resolve(process.cwd(), 'plugins', 'knowledge-capture', 'bin', 'session-end.js');
+    const sessEndRun = spawnSync(process.execPath, [sessEndScript], {
+      cwd: cleanSessWs,
+      input: JSON.stringify({
+        conversationId: 'conv-53',
+        workspacePaths: [cleanSessWs],
+        transcript: 'Checked status and finished.'
+      }),
+      env: { ...process.env, KC_STORAGE_DIR: process.env.KC_STORAGE_DIR },
+      encoding: 'utf8'
+    });
+    assert.equal(sessEndRun.status, 0);
+    assert.deepEqual(JSON.parse(sessEndRun.stdout.trim()), { injectSteps: [] }, 'session-end Antigravity clean exit must emit {"injectSteps":[]}');
+
+    // 53.8 Syran evaluateArchitecturalTradeoffs: weight:0 criterion, rank-#3 challenger pivot, zero contractions
+    const syranTrade53 = evaluateArchitecturalTradeoffs(
+      [
+        { name: 'Monolith', scores: { cost: 2, latency: 5, throughput: 80 } },
+        { name: 'Modular', scores: { cost: 3, latency: 6, throughput: 75 } },
+        { name: 'Microservices', scores: { cost: 9, latency: 1, throughput: 100 } }
+      ],
+      [
+        { name: 'cost', weight: 10, direction: 'minimize' },
+        { name: 'latency', weight: 1, direction: 'minimize' },
+        { name: 'throughput', weight: 0, direction: 'maximize' }
+      ]
+    );
+    assert.equal(syranTrade53.optimalCandidate, 'Monolith');
+    assert.equal(syranTrade53.pivotAnalysis.criticalDimension, 'latency', 'Rank #3 Pareto challenger must surface latency pivot');
+    assert.equal(syranTrade53.pivotAnalysis.challengerCandidate, 'Microservices', 'pivotAnalysis must identify rank #3 challengerCandidate');
+    assert.equal(
+      /\b(don't|won't|can't|isn't|aren't|it's|didn't|doesn't|hasn't|haven't|wouldn't|shouldn't|couldn't)\b/i.test(syranTrade53.officerCounsel),
+      false,
+      'Syran officerCounsel must contain zero contractions'
+    );
+    const monoScore = syranTrade53.matrixDetails.find(o => o.name === 'Monolith').utility;
+    assert.ok(Math.abs(monoScore - (10 / 11 + (1 / 11) * ((6 - 5) / 5))) < 1e-3, 'weight:0 criterion must not contribute utility weight');
+
+    // 53.9 bin/install.js resolveUpdateSourceTargets & --update-source on custom git clone
+    const bareRemote53 = path.join(tempRoot, 'bare-market-53.git');
+    const customClone53 = path.join(tempRoot, 'custom-market-clone');
+    const seedSrc53 = path.join(tempRoot, 'seed-market-src');
+    const updWs53 = path.join(tempRoot, 'upd-ws-53');
+    const updHome53 = path.join(tempRoot, 'upd-home-53');
+    fs.mkdirSync(path.join(seedSrc53, 'plugins', 'knowledge-capture'), { recursive: true });
+    fs.writeFileSync(path.join(seedSrc53, 'plugins', 'knowledge-capture', 'plugin.json'), '{"name":"knowledge-capture"}\n', 'utf8');
+    execFileSync('git', ['init', '--bare', '-b', 'main', bareRemote53], { stdio: 'ignore' });
+    execFileSync('git', ['init', '-b', 'main'], { cwd: seedSrc53, stdio: 'ignore' });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: seedSrc53, stdio: 'ignore' });
+    execFileSync('git', ['config', 'user.name', 'Test User'], { cwd: seedSrc53, stdio: 'ignore' });
+    execFileSync('git', ['add', '.'], { cwd: seedSrc53, stdio: 'ignore' });
+    execFileSync('git', ['commit', '-m', 'initial marketplace'], { cwd: seedSrc53, stdio: 'ignore' });
+    execFileSync('git', ['remote', 'add', 'origin', bareRemote53], { cwd: seedSrc53, stdio: 'ignore' });
+    execFileSync('git', ['push', '-u', 'origin', 'main'], { cwd: seedSrc53, stdio: 'ignore' });
+    execFileSync('git', ['clone', bareRemote53, customClone53], { stdio: 'ignore' });
+
+    fs.mkdirSync(path.join(updWs53, '.agents'), { recursive: true });
+    fs.mkdirSync(updHome53, { recursive: true });
+    const customPluginsPath53 = path.join(customClone53, 'plugins');
+    fs.writeFileSync(
+      path.join(updWs53, '.agents', 'plugins.json'),
+      JSON.stringify({ entries: [{ path: customPluginsPath53 }] }),
+      'utf8'
+    );
+    const resolvedTargets53 = resolveUpdateSourceTargets(process.cwd(), updWs53, updHome53);
+    assert.deepEqual(resolvedTargets53, [path.resolve(customPluginsPath53)], 'resolveUpdateSourceTargets must resolve registered custom git clone plugins dir');
+
+    // Push a second commit to bareRemote and run bin/install.js --update-source
+    fs.writeFileSync(path.join(seedSrc53, 'plugins', 'knowledge-capture', 'MARKER.txt'), 'pulled-via-update-source\n', 'utf8');
+    execFileSync('git', ['add', '.'], { cwd: seedSrc53, stdio: 'ignore' });
+    execFileSync('git', ['commit', '-m', 'second commit'], { cwd: seedSrc53, stdio: 'ignore' });
+    execFileSync('git', ['push', 'origin', 'main'], { cwd: seedSrc53, stdio: 'ignore' });
+
+    const installCli53 = path.resolve(process.cwd(), 'bin', 'install.js');
+    const updRun53 = spawnSync(process.execPath, [installCli53, '--update-source'], {
+      cwd: updWs53,
+      env: { ...process.env, HOME: updHome53, USERPROFILE: updHome53 },
+      encoding: 'utf8'
+    });
+    assert.equal(updRun53.status, 0, `--update-source failed: ${updRun53.stderr}`);
+    assert.equal(
+      fs.existsSync(path.join(customClone53, 'plugins', 'knowledge-capture', 'MARKER.txt')),
+      true,
+      'install.js --update-source must pull registered custom marketplace clone'
+    );
+  }
+  console.log('  ✔ Passed: Deep plugin audit regression suite verified.\n');
+
   console.log('============================================================');
   console.log('🎉 ALL TESTS PASSED SUCCESSFULLY!');
   console.log('============================================================\n');

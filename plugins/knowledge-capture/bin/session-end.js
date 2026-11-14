@@ -31,10 +31,11 @@ async function main() {
   } catch {}
   const workspaceRoot = resolveHookWorkspace(payload);
 
+  const { isAntigravity } = detectHookPlatform(payload);
   const audit = autoElicitSessionKnowledge(workspaceRoot, payload);
 
   if (!audit.elicitation_needed) {
-    // Nothing to prompt; exit cleanly without polluting output
+    emitHookMessage('', { isAntigravity });
     return;
   }
 
@@ -61,7 +62,6 @@ async function main() {
     }
   }
 
-  const { isAntigravity } = detectHookPlatform(payload);
   emitHookMessage(report, { isAntigravity });
 }
 

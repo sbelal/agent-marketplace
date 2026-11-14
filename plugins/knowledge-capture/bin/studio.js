@@ -180,8 +180,10 @@ export function startStudioServer(options = {}) {
     function tryListen() {
       const server = http.createServer(async (req, res) => {
         const origin = req.headers.origin;
-        const hasValidToken = typeof req.headers['x-studio-token'] === 'string' && req.headers['x-studio-token'] === studioToken;
-        if (origin && (isLoopbackOrigin(origin) || hasValidToken)) {
+        const secFetchSite = req.headers['sec-fetch-site'];
+        const isAllowedOrigin = origin ? (isLoopbackOrigin(origin) || origin === 'null') : false;
+
+        if (origin && secFetchSite !== 'cross-site' && isAllowedOrigin) {
           res.setHeader('Access-Control-Allow-Origin', origin);
           res.setHeader('Vary', 'Origin');
         }
@@ -189,7 +191,7 @@ export function startStudioServer(options = {}) {
         res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Studio-Token');
 
         if (req.method === 'OPTIONS') {
-          if (origin && !isLoopbackOrigin(origin) && !hasValidToken) {
+          if (secFetchSite === 'cross-site' || (origin && !isAllowedOrigin)) {
             res.writeHead(403, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: 'Forbidden origin' }));
             return;

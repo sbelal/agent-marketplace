@@ -557,7 +557,7 @@ const TOOLS = [
   {
     name: 'record_memory_efficacy',
     description:
-      'Records verification feedback and efficacy telemetry for a memory guideline (e.g. test_pass boosts efficacy, test_fail penalizes efficacy).',
+      'Records verification feedback and efficacy telemetry for a memory guideline (e.g. test_pass boosts efficacy, test_fail penalizes efficacy, applied records usage).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -567,8 +567,21 @@ const TOOLS = [
         },
         feedbackType: {
           type: 'string',
-          enum: ['test_pass', 'test_fail', 'apply', 'recall'],
+          enum: ['test_pass', 'test_fail', 'applied', 'apply', 'recall'],
           description: 'Type of feedback event.'
+        },
+        workspaceRoot: {
+          type: 'string',
+          description: 'Optional path to the project root directory. Defaults to resolved workspace root.'
+        },
+        layer: {
+          type: 'string',
+          enum: ['workspace', 'private', 'team'],
+          description: 'Optional explicit memory layer partition for scoped telemetry.'
+        },
+        teamSlug: {
+          type: 'string',
+          description: 'Optional team repository slug when layer is "team".'
         },
         details: {
           type: 'object',
@@ -1012,9 +1025,16 @@ async function handleRequest(message) {
             await syncSqliteIndex(workspaceRoot);
             break;
 
-          case 'record_memory_efficacy':
-            resultData = recordMemoryEfficacy(args.slug, args.feedbackType, args.details);
+          case 'record_memory_efficacy': {
+            const details = (args.details && typeof args.details === 'object' && !Array.isArray(args.details))
+              ? { ...args.details }
+              : {};
+            if (details.workspaceRoot === undefined) details.workspaceRoot = workspaceRoot;
+            if (args.layer !== undefined && details.layer === undefined) details.layer = args.layer;
+            if (args.teamSlug !== undefined && details.teamSlug === undefined) details.teamSlug = args.teamSlug;
+            resultData = recordMemoryEfficacy(args.slug, args.feedbackType, details);
             break;
+          }
 
           case 'auto_elicit_session_knowledge':
             resultData = autoElicitSessionKnowledge(workspaceRoot, args);
@@ -1087,6 +1107,16 @@ async function handleRequest(message) {
         }
 
         const formattedText = typeof resultData === 'string' ? resultData : JSON.stringify(resultData ?? null, null, 2);
+        const isErrorResult = Boolean(
+          resultData &&
+          typeof resultData === 'object' &&
+          !Array.isArray(resultData) &&
+          (
+            resultData.ok === false ||
+            (resultData.success === false && !('rewiredReferences' in resultData)) ||
+            resultData.status === 'error'
+          )
+        );
 
         sendJsonRpc({
           jsonrpc: '2.0',
@@ -1097,7 +1127,8 @@ async function handleRequest(message) {
                 type: 'text',
                 text: formattedText
               }
-            ]
+            ],
+            ...(isErrorResult ? { isError: true } : {})
           }
         });
       } catch (err) {
